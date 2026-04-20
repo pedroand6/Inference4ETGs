@@ -1,2 +1,5 @@
 illustris_python
 .venv
+*.pkl
+*.csv
+*.fits
