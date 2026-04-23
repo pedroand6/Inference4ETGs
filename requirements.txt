@@ -1,0 +1,5 @@
+bagpipes
+pandas
+numpy
+matplotlib
+scipy
