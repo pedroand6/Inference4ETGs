@@ -64,7 +64,7 @@ extinctions = extinct_SPLUS
 # Load dust map
 csfd_map = dustmaps.csfd.CSFDQuery(map_fname='dustMaps/csfd/csfd_ebv.fits', mask_fname='dustMaps/csfd/mask.fits')
 
-# Apply corrections
+# Apply correctionso
 dataframe = pd.read_csv('Data/morphgal.csv')
 dataframe_corrected = correct_extinction(dataframe, csfd_map, extinctions)
 

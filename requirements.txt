@@ -5,3 +5,5 @@ matplotlib
 scipy
 astropy
 astroquery
+extinction
+dustmaps
