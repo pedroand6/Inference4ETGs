@@ -1,0 +1,5 @@
+sdss-filters/SLOAN_SDSS.u.dat
+sdss-filters/SLOAN_SDSS.g.dat
+sdss-filters/SLOAN_SDSS.r.dat
+sdss-filters/SLOAN_SDSS.i.dat
+sdss-filters/SLOAN_SDSS.z.dat
