@@ -4,4 +4,4 @@ illustris_python
 *.csv
 *.fits
 cloudy
-Bagpipes-models
+/Bagpipes-models
