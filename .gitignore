@@ -1,7 +1,8 @@
 illustris_python
 .venv
 *.pkl
-*.csv
+morphgal_corrected.csv
+VIRTUAL_ETG_JAN_2025.csv
 *.fits
 cloudy
 /Bagpipes-models
