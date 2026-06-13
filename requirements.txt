@@ -8,3 +8,5 @@ astroquery
 extinction
 dustmaps
 synphot
+joblib
+seaborn
