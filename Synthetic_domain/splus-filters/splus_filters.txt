@@ -1,0 +1,12 @@
+splus-filters/uJAVA.dat
+splus-filters/F0378.dat
+splus-filters/F0395.dat
+splus-filters/F0410.dat
+splus-filters/F0430.dat
+splus-filters/gSDSS.dat
+splus-filters/F0515.dat
+splus-filters/rSDSS.dat
+splus-filters/F0660.dat
+splus-filters/iSDSS.dat
+splus-filters/F0861.dat
+splus-filters/zSDSS.dat
