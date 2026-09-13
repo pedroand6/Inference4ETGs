@@ -28,7 +28,7 @@ def correct_extinction(dataframe, extinction_maps, extinction_columns):
     av  = 3.1*ebv
 
     # Calculating the extinction on the S-PLUS bands using the Cardelli, Clayton & Mathis law.
-    Lambdas = np.array([3536, 4751, 6258, 7690, 8831]).astype(float)
+    Lambdas = np.array([3536, 3770, 3940, 4094, 4292, 4751, 5133, 6258, 6614, 7690, 8611, 8831]).astype(float)
 
     extinctions = []
     for i in range(len(av)):
@@ -46,7 +46,7 @@ def correct_extinction(dataframe, extinction_maps, extinction_columns):
 # -- Correct data
 
 # Filters
-features_SPLUS = ['u_auto', 'g_auto', 'r_auto', 'i_auto', 'z_auto']
+features_SPLUS = ['u_auto', 'J0378_auto', 'J0395_auto', 'J0410_auto', 'J0430_auto', 'g_auto', 'J0515_auto', 'r_auto', 'J0660_auto', 'i_auto', 'J0861_auto', 'z_auto']
 extinct_SPLUS = [filt+'_ext' for filt in features_SPLUS]
 
 features_WISE = ['W1_ab', 'W2_ab']
@@ -64,12 +64,12 @@ extinctions = extinct_SPLUS
 # Load dust map
 csfd_map = dustmaps.csfd.CSFDQuery(map_fname='dustMaps/csfd/csfd_ebv.fits', mask_fname='dustMaps/csfd/mask.fits')
 
-# Apply correctionso
-dataframe = pd.read_csv('Data/morphgal.csv')
+# Apply corrections
+dataframe = pd.read_csv('Synthetic_domain/dr3_alldata.csv')
 dataframe_corrected = correct_extinction(dataframe, csfd_map, extinctions)
 
 for i in range(len(features)):
     dataframe_corrected[features[i]] = dataframe_corrected[features[i]] - dataframe_corrected[extinctions[i]]
 
 # Save corrected data
-dataframe_corrected.to_csv('Data/morphgal_corrected.csv', index=False)
+dataframe_corrected.to_csv('Synthetic_domain/dr3_corrected.csv', index=False)

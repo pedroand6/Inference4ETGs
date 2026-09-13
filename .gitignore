@@ -1,8 +1,10 @@
 illustris_python
 .venv
+.kilo
 *.pkl
 morphgal_corrected.csv
 VIRTUAL_ETG_JAN_2025.csv
 *.fits
 cloudy
 /Bagpipes-models
+Synthetic_domain/dr3_alldata.csv
