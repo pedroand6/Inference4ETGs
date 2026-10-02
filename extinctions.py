@@ -23,7 +23,7 @@ def correct_extinction(dataframe, extinction_maps, extinction_columns):
     corrected_df = dataframe.copy().reset_index(drop=True)
 
     # Obtaining E(B-V) and Av in a given RA, DEC position
-    input_file_coords = SkyCoord(dataframe['ra'], dataframe['dec'], frame='icrs', unit='deg')
+    input_file_coords = SkyCoord(dataframe['RA'], dataframe['DEC'], frame='icrs', unit='deg')
     ebv = extinction_maps(input_file_coords)
     av  = 3.1*ebv
 
@@ -65,7 +65,7 @@ extinctions = extinct_SPLUS
 csfd_map = dustmaps.csfd.CSFDQuery(map_fname='dustMaps/csfd/csfd_ebv.fits', mask_fname='dustMaps/csfd/mask.fits')
 
 # Apply corrections
-dataframe = pd.read_csv('Synthetic_domain/dr3_alldata.csv')
+dataframe = pd.read_csv('Synthetic_domain/dr3_data.csv')
 dataframe_corrected = correct_extinction(dataframe, csfd_map, extinctions)
 
 for i in range(len(features)):
