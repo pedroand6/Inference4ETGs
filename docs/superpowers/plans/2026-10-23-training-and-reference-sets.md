@@ -2805,3 +2805,35 @@ git add Synthetic_domain/spectroscopic_reference.ipynb Synthetic_domain/spectros
         Synthetic_domain/firefly_comparison.png
 git commit -m "feat: Bagpipes spectral fits of SDSS x S-PLUS galaxies, Firefly check and locked split"
 ```
+
+---
+
+### Task 11: External fitting script, calibration test and job export
+
+Implements the spec's "Amendment (2026-10-23)" section — read it first: docs/superpowers/specs/2026-10-23-training-and-reference-sets-design.md (last section). Work from Synthetic_domain/. Global code-style rules apply (legible, didactic, docstrings with inputs/units/returns, named constants, numbered banners, concise).
+
+**Files:** modify `Synthetic_domain/synthetic_model.py`, `Synthetic_domain/tests/test_synthetic_model.py`, `Synthetic_domain/spectroscopic_reference.ipynb`; create `Synthetic_domain/run_spectral_fits.py`, `Synthetic_domain/slurm_fit.sh`.
+
+**1. Module additions (with tests):**
+- `export_job(job, jobs_directory) -> str` writes `<jobs_directory>/<job_id>.npz` (wavelength, flux, ivar, redshift, job_id); `load_job(path) -> dict` reads it back in the `fit_and_save` job format. Test: round trip.
+- `draw_calibration_mocks(n_mocks, templates, rng) -> (jobs, truths)`: `templates` is a list of (spectrum dict, redshift); each mock takes a random template, a unit-cube point drawn uniformly over ALL of SPECTRAL_DIMS (sfh_type included — mocks follow the training prior), and `make_mock_spectrum`; job ids `calib_000`, `calib_001`, … Test: deterministic for a seed; ids and count; sfh branches all occur for n = 60 (cheap: you may test branch choice on the cubes without building spectra by factoring the cube draw into a small helper).
+- `calibration_coverage(posteriors, truths, labels, levels=(0.68, 0.95)) -> pd.DataFrame`: `posteriors` maps job_id → posterior DataFrame, `truths` maps job_id → Series; for each label and level, the fraction of jobs whose truth lies inside the central interval, and the number of jobs used. Test with synthetic posteriors where the answer is known.
+- Constants: `N_CALIBRATION_MOCKS = 33`, `MIN_COVERAGE_95 = 0.85`, `MAX_ITERATIONS = 50000`, `CALIBRATION_LABELS = ["mw_age", "Z_fin", "f_old"]`.
+
+**2. `run_spectral_fits.py` (CLI, standalone):**
+- Top of file, BEFORE importing numpy: set OPENBLAS_NUM_THREADS, OMP_NUM_THREADS, MKL_NUM_THREADS to "1" (one core per fit). Then a clear check that `import pymultinest` works, with a message explaining LD_LIBRARY_PATH (path to libmultinest) if it does not.
+- Arguments: `--jobs-dir` (default spectral_fits/jobs), `--output-dir` (default spectral_fits), `--workers` (default: number of usable CPUs from os.sched_getaffinity, minus one), `--max-iterations` (default sm.MAX_ITERATIONS), `--n-live` (default sm.N_LIVE_POINTS), `--task-index` (run only that job index in sorted order; defaults to $SLURM_ARRAY_TASK_ID when set), `--status` (print pending/done counts and exit).
+- Pending jobs = jobs without `<output-dir>/<job_id>.h5`. Order: interleave calibration mocks and real galaxies so a partial run yields both. Local mode: `multiprocessing.Pool(workers, maxtasksperchild=1)` with `imap_unordered` over pending jobs calling `sm.fit_and_save(job, output_dir, max_iterations, n_live)`; append one line per finished job to `<output-dir>/fit_log.csv` (job_id, status, converged, minutes, n_iterations, error, host) and print a progress line.
+- MultiNest basename must stay under 100 characters: check `len(os.path.join(output_dir, job_id) + "/")` and exit with a clear message suggesting a shorter relative --output-dir.
+- Module docstring = a short how-to: environment (venv, Bagpipes grids, libmultinest + LD_LIBRARY_PATH), copying the bundle (Synthetic_domain/synthetic_model.py, splus-filters/, run_spectral_fits.py, spectral_fits/jobs/), local and Slurm usage, copying `<job_id>.h5` files back.
+- `slurm_fit.sh`: example array script (`#SBATCH --array=0-<N-1>%<parallel>`, `--cpus-per-task=1`, `--mem=2G`, `--time=12:00:00`, sets LD_LIBRARY_PATH, runs `python run_spectral_fits.py --task-index $SLURM_ARRAY_TASK_ID`), with comments on what to edit.
+- Test: a subprocess smoke test running the script on one exported tiny mock job with `--max-iterations 100 --n-live 40 --workers 1` into tmp_path (needs LD_LIBRARY_PATH like the existing MultiNest tests), asserting the .h5 and fit_log.csv exist; and a `--status` test.
+
+**3. Notebook 2 (`spectroscopic_reference.ipynb`):**
+- Cell 1 constants: add JOBS_DIRECTORY = "spectral_fits/jobs", SUPERSEDED_DIRECTORY = "spectral_fits/superseded", use sm.N_CALIBRATION_MOCKS / sm.MAX_ITERATIONS / sm.MIN_COVERAGE_95; remove the pilot / budget / wave constants (N_WORKERS stays only if still used); RUN_FITS_HERE = False (if True, the notebook runs run_spectral_fits.py locally via subprocess with a stated worker count).
+- Replace the pilot, first-wave/inject-and-recover and remaining-waves cells (10–12) with: (a) superseding: move every existing `<FITS_DIRECTORY>/<id>.h5` whose metadata max_iterations is missing or < sm.MAX_ITERATIONS, its MultiNest folder, the old MOCK_FILE and old mock_* fits into SUPERSEDED_DIRECTORY (print what moved); (b) calibration mocks: draw with sm.draw_calibration_mocks (seeded), persisted in a new MOCK_FILE ("spectral_fits/calibration_mocks.joblib") and reused when present; (c) export every calibration mock and every selected real galaxy with sm.export_job; (d) print the exact commands for a local run (`LD_LIBRARY_PATH=... python run_spectral_fits.py --workers N`) and for Slurm, and `--status`; (e) optional local run if RUN_FITS_HERE.
+- New calibration cell: load whatever `calib_*.h5` exist, compute sm.calibration_coverage, display it, set `fitter_calibrated` = all 95% coverages ≥ MIN_COVERAGE_95 (NA if fewer than the full set of mocks has finished), print a clear PASS/FAIL/INCOMPLETE line.
+- Cell 14 and after: must run with zero, some or all fits present (no crash; counts printed); add `fitter_calibrated` to every row of the reference CSV. Keep the F2/F4/F7 logic. Update markdown cells (0, the fitting section) to describe the external run and the calibration gate, concisely.
+- Validation: execute the notebook on a scratch copy with RUN_FITS_HERE = False and no new fits (it must export the jobs and finish), report the printed lines, then delete the scratch copy and any scratch outputs. Keep the exported real jobs bundle if it was written to the real JOBS_DIRECTORY? NO — scratch runs must use scratch directories; the controller will run the real notebook.
+
+**Verification:** `LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python -m pytest -v` (all pass, no warnings); nbformat validation. Commit: module + tests, the script + Slurm example, the notebook (outputs cleared). Never stage spectral_fits/ or spectra/.

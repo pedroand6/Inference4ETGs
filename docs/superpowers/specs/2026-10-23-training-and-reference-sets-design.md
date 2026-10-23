@@ -191,3 +191,28 @@ Failures: a failed download or fit is written to `spectral_fits/failures.csv` an
 - Fornax3D / MUSE and any other external sample.
 - Modelling the BOSS 2″ fibre vs 3″ aperture mismatch beyond flagging and reporting it separately.
 - Running more than 60 real spectral fits in this pass.
+
+## Amendment (2026-10-23): external fitting and a calibration gate
+
+Approved by the user after the first full run stopped at the inject-and-recover gate.
+
+**Why.**
+- *No defect behind the stop.* Debugging found no fault in the model, likelihood or sampler. χ² at the true parameters matches the noise, and MultiNest returns the same posterior with sampling efficiency 0.3 or with 800 live points.
+- *The misses are prior-volume effects.* Truths drawn from prior tails land where the data mildly prefer the region the prior favours.
+- *The gate is too strict for a sound fitter.* "≥ 5 of 6 mocks" fails about 15% of the time even when the fitter is calibrated.
+- *The time budget is too short.* Real galaxies need well over 8,500 iterations (more than 85 min each on this laptop under load), so the 3-hour budget cannot hold the sample.
+
+**Changes (they supersede §4 "Run plan" and §5 "Inject-and-recover" of Part 2):**
+- **Calibration test.**
+  - `N_CALIBRATION_MOCKS = 33` mocks drawn from the full training prior, with `sfh_type` drawn too. Each uses the wavelengths, mask and errors of a random selected galaxy.
+  - The fitter is calibrated when, for each of `mw_age`, `Z_fin` and `f_old`, the fraction of truths inside the 95% interval is at least `MIN_COVERAGE_95 = 0.85`.
+  - The 68%-interval coverage is reported too.
+  - The result is written into the reference CSV as `fitter_calibrated`; it does not stop the notebook.
+- **Fitting outside the notebook.**
+  - The notebook exports a portable job bundle: one `.npz` per job in `spectral_fits/jobs/`.
+  - `Synthetic_domain/run_spectral_fits.py` runs one MultiNest fit per core as independent processes, with BLAS threads pinned to 1. It runs locally with `--workers N`, or as a Slurm job array with `--task-index` (example `slurm_fit.sh`).
+  - It is resumable and writes the same `<job_id>.h5` files, plus a `fit_log.csv`.
+  - The iteration cap is `MAX_ITERATIONS = 50000`, and there is no wall-clock budget.
+- **Analysis.**
+  - The notebook's analysis cells read whatever results exist (none yet is fine), report calibration coverage, and build the reference table and split as before.
+  - Fits stored with a smaller iteration cap (the first run's) are moved to `spectral_fits/superseded/`, as are the first run's 6 fixed-branch mocks.
