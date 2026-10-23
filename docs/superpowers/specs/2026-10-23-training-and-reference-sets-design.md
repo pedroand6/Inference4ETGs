@@ -32,7 +32,7 @@ Priors are **not** tuned per galaxy from the literature: that would make the Fir
 - Spectral fitting budget: **at most 3 hours** wall time on 11 worker processes (the machine has 12 cores).
 - SDSS spectra are corrected for Milky Way extinction with the same map and law as the S-PLUS photometry (`extinctions.py`): CSFD E(B−V), CCM89, R_V = 3.1.
 - Spectral fits use the spectrum only. S-PLUS photometry is never part of the spectral likelihood, so reference labels stay independent of the ML inputs.
-- Large downloaded data (`spectra/`, `spectral_fits/`) is git-ignored.
+- Large downloaded or generated data (`spectra/`, `spectral_fits/`, `*.parquet`) is git-ignored; generated sets are reproducible from their seeds. The old tracked `training_set.csv` is removed from the repository (it stays in git history).
 
 ## Code style
 
@@ -101,12 +101,12 @@ Unchanged except `Z_RANGE = (0.002, 0.7)` and `N_MODELS = 2**19` (~22 min). The 
 
 Fitted to `dr3_corrected.csv` (PROB_GAL > 0.8):
 
-- per band, in 0.25 mag bins: fraction of galaxies detected (same detection rule as the coverage test: mag < 50, 0 < error < 1 mag) and the empirical distribution of errors;
-- `add_splus_noise` first scales each model to the `r_auto` of a random DR3 galaxy with `|zml − z| < 0.05`; then, per band, draws detection from that bin's probability, draws an error from that bin's errors and perturbs the flux with a Gaussian of that error.
+- per band, in 0.25 mag bins of measured magnitude: the empirical distribution of log errors, stored as 21 quantiles. A band counts as detected when its error is below 1 mag (the coverage test's rule), so the detection probability of a bin is the fraction of its errors below 1 mag;
+- `add_splus_noise` first scales each model to the `r_auto` of a random DR3 galaxy with `|zml − z| < 0.05`; then, per band, draws an error from that bin's quantiles, marks the band detected if the error is below 1 mag, and perturbs the flux with a Gaussian of that error. Models fainter than the faintest populated bin are undetected.
 
 ### Synthetic validation and test sets
 
-Two independent Latin Hypercube draws (own seeds), `2**14` models each, with noise and detection masks applied: `synthetic_validation.csv`, `synthetic_test.csv`. The training set itself stays noise-free; noise augmentation during training belongs to the ML spec.
+The training set is saved as `training_set.parquet`. Two independent Latin Hypercube draws (own seeds), `2**14` models each, with noise and detection masks applied: `synthetic_validation.parquet`, `synthetic_test.parquet`. The training set itself stays noise-free; noise augmentation during training belongs to the ML spec.
 
 ### Coverage test v2
 
@@ -137,7 +137,7 @@ Query the S-PLUS Cloud with `splusdata` for the 3″-diameter aperture magnitude
 - Download with `astroquery.sdss` by plate / MJD / fibre into `spectra/`.
 - Correct for Milky Way extinction (CSFD E(B−V) at the galaxy position, CCM89, R_V = 3.1): flux × 10^(0.4 A_λ), inverse variance × 10^(−0.8 A_λ).
 - Mask pixels with `ivar = 0`, ±10 Å around the 5577 Å and 6300 Å sky lines, and keep only 3800–9200 Å observed.
-- Rebin to 5 Å with `spectres`, propagating errors (~30% faster model calls at a resolution that still carries the SFH information).
+- Rebin to a regular 5 Å grid by inverse-variance-weighted mean of the unmasked pixels in each bin; empty bins get zero inverse variance (~30% faster model calls at a resolution that still carries the SFH information). `spectres` is not used because masked gaps distort its bin widths.
 
 ### 4. Spectral fit
 
