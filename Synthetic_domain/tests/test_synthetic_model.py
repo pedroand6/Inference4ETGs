@@ -741,3 +741,53 @@ def test_run_script_rejects_too_long_output_path_and_bad_task_index(tmp_path):
 
     assert too_long.returncode != 0 and "shorter relative --output-dir" in too_long.stderr
     assert bad_index.returncode != 0 and "--task-index 5 is outside 0..0" in bad_index.stderr
+
+
+def cpuinfo_text(n_sockets, cores_per_socket, threads_per_core):
+    """Build the text of a Linux /proc/cpuinfo for a machine with this topology (processors numbered from 0)."""
+    blocks = []
+    processor = 0
+    for thread in range(threads_per_core):
+        for socket_id in range(n_sockets):
+            for core_id in range(cores_per_socket):
+                blocks.append(f"processor\t: {processor}\nmodel name\t: test cpu\n"
+                              f"physical id\t: {socket_id}\ncore id\t\t: {core_id}\n")
+                processor += 1
+    return "\n".join(blocks)
+
+
+def test_physical_core_count_ignores_hardware_threads():
+    import run_spectral_fits
+    four_cores_two_threads = cpuinfo_text(1, 4, 2)                 # 8 processors
+    two_sockets = cpuinfo_text(2, 3, 2)                            # 12 processors, 6 cores
+    assert run_spectral_fits.count_physical_cores(four_cores_two_threads, set(range(8))) == 4
+    assert run_spectral_fits.count_physical_cores(two_sockets, set(range(12))) == 6
+
+
+def test_physical_core_count_follows_the_allowed_processors():
+    import run_spectral_fits
+    text = cpuinfo_text(1, 4, 2)    # processors 0-3 are the first threads, 4-7 their siblings
+    assert run_spectral_fits.count_physical_cores(text, {0, 1, 4}) == 2     # cores 0 and 1 only
+    assert run_spectral_fits.count_physical_cores(text, {0, 1, 2, 3}) == 4
+
+
+def test_physical_core_count_is_none_without_topology_fields():
+    import run_spectral_fits
+    assert run_spectral_fits.count_physical_cores("processor\t: 0\nmodel name\t: arm\n", {0}) is None
+    assert run_spectral_fits.count_physical_cores("", {0}) is None
+
+
+def test_slurm_tasks_write_one_log_file_each(tmp_path):
+    for job_id in ("calib_000", "calib_001"):
+        sm.export_job(mock_job(job_id, np.random.default_rng(17))[0], str(tmp_path / "jobs"))
+
+    for task_index in ("0", "1"):
+        result = run_script("--jobs-dir", str(tmp_path / "jobs"), "--output-dir", str(tmp_path),
+                            "--max-iterations", "100", "--n-live", "40", "--task-index", task_index)
+        assert result.returncode == 0, result.stderr
+
+    log_files = sorted(path.name for path in (tmp_path / "fit_logs").iterdir())
+    assert log_files == ["calib_000.csv", "calib_001.csv"]
+    assert not (tmp_path / "fit_log.csv").exists()
+    for job_id in ("calib_000", "calib_001"):
+        assert list(pd.read_csv(tmp_path / "fit_logs" / f"{job_id}.csv")["job_id"]) == [job_id]

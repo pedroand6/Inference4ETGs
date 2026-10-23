@@ -14,16 +14,22 @@ fit is <output-dir>/<job_id>.h5, so a run can be stopped and started again: fini
    - splus-filters/
    - spectral_fits/jobs/  (all the .npz files)
 
-3. Run on one machine, one fit per core (leave a core for yourself with the default)
+3. Run on one machine, one fit per physical core (hardware threads of one core are not counted).
+   By default the number of workers is the physical cores this process may use (Linux /proc/cpuinfo, within
+   the CPU affinity mask) minus one, to leave a core for you; where the topology is not readable it is half
+   the usable CPUs, with a printed note. The chosen number is printed at start.
        python run_spectral_fits.py --status
        python run_spectral_fits.py --workers 19
 
 4. Run on a Slurm cluster, one fit per array task (edit the array size and paths in slurm_fit.sh)
        sbatch slurm_fit.sh
+   Each array task writes its own log file, <output-dir>/fit_logs/<job_id>.csv, so tasks never write to the
+   same file on a shared filesystem.
 
 5. Copy the results back: every <job_id>.h5 in the output folder (spectral_fits/) goes into the
    notebook's spectral_fits/ folder. Then run the notebook's analysis cells again.
-   fit_log.csv lists the run time, iterations and convergence of every fit made here.
+   fit_log.csv (local runs) and fit_logs/*.csv (Slurm tasks) list the run time, iterations and convergence
+   of every fit made here; copy them back too (the notebook reads both).
 """
 
 # One core per fit: these must be set before numpy is imported, or the math libraries start many threads
@@ -52,7 +58,9 @@ import synthetic_model as sm
 
 DEFAULT_JOBS_DIRECTORY = "spectral_fits/jobs"
 DEFAULT_OUTPUT_DIRECTORY = "spectral_fits"
-LOG_FILE_NAME = "fit_log.csv"
+LOG_FILE_NAME = "fit_log.csv"             # local runs: one file, written by the parent process only
+TASK_LOG_DIRECTORY = "fit_logs"           # Slurm tasks: one <job_id>.csv each, so no two tasks share a file
+CPUINFO_FILE = "/proc/cpuinfo"
 LOG_COLUMNS = ["job_id", "status", "converged", "minutes", "n_iterations", "error", "host"]
 MAX_BASENAME_LENGTH = 100         # [characters] MultiNest limit on the output basename (the path with its "/")
 SECONDS_PER_MINUTE = 60.0
@@ -118,13 +126,13 @@ def fit_one(arguments):
     return summary
 
 
-def append_to_log(output_directory, summary):
-    """Append one finished job to fit_log.csv, writing the header first if the file is new.
+def append_to_log(log_path, summary):
+    """Append one finished job to a log file, writing the header first if the file is new.
 
-    Inputs: output_directory: folder of the log (str); summary: dict from fit_one.
+    Inputs: log_path: the log file (str); summary: dict from fit_one.
     Returns: None.
     """
-    log_path = os.path.join(output_directory, LOG_FILE_NAME)
+    os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
     is_new = not os.path.exists(log_path)
     with open(log_path, "a", newline="") as log_file:
         writer = csv.DictWriter(log_file, fieldnames=LOG_COLUMNS, extrasaction="ignore")
@@ -133,19 +141,19 @@ def append_to_log(output_directory, summary):
         writer.writerow(summary)
 
 
-def run_jobs(job_paths, output_directory, workers, max_iterations, n_live_points):
+def run_jobs(job_paths, output_directory, workers, max_iterations, n_live_points, log_path):
     """Fit the jobs with a pool of single-core worker processes, logging each as it finishes.
 
     A fresh process per fit (maxtasksperchild=1) so that no memory or sampler state is carried over.
     Inputs: job_paths: job files (list of str); output_directory: folder for results and log (str);
             workers: number of processes (count); max_iterations: MultiNest iteration limit (count);
-            n_live_points: live points (count).
+            n_live_points: live points (count); log_path: file that receives one line per finished job (str).
     Returns: None.
     """
     tasks = [(path, output_directory, max_iterations, n_live_points) for path in job_paths]
     with multiprocessing.Pool(workers, maxtasksperchild=1) as pool:
         for finished_count, summary in enumerate(pool.imap_unordered(fit_one, tasks), start=1):
-            append_to_log(output_directory, summary)
+            append_to_log(log_path, summary)
             print(f"[{finished_count}/{len(tasks)}] {summary['job_id']}: {summary['status']}, "
                   f"converged={summary['converged']}, {summary['minutes']:.1f} min, "
                   f"iterations={summary['n_iterations']}" + (f", error={summary['error']}" if summary["error"] else ""),
@@ -155,12 +163,50 @@ def run_jobs(job_paths, output_directory, workers, max_iterations, n_live_points
 # =============================================================================
 # 3. Command line
 # =============================================================================
-def usable_cpus():
-    """Number of CPUs this process may use (respects Slurm and taskset), leaving one for the user.
+def usable_cpu_ids():
+    """Ids of the logical CPUs this process may use (respects Slurm and taskset where Linux reports it).
 
-    Returns: workers (count), at least 1.
+    Returns: set of processor numbers (int); every CPU if the affinity mask is not available.
     """
-    return max(1, len(os.sched_getaffinity(0)) - 1)
+    if hasattr(os, "sched_getaffinity"):
+        return set(os.sched_getaffinity(0))
+    return set(range(os.cpu_count() or 1))
+
+
+def count_physical_cores(cpuinfo_text, allowed_cpus):
+    """Count the physical cores behind some logical CPUs, so hardware threads of one core count once.
+
+    A core is a unique (physical id, core id) pair in the Linux /proc/cpuinfo text.
+    Inputs: cpuinfo_text: contents of /proc/cpuinfo (str); allowed_cpus: processor numbers to count (set of int).
+    Returns: number of physical cores (count), or None if the text has no usable topology fields.
+    """
+    cores = set()
+    for block in cpuinfo_text.split("\n\n"):
+        fields = dict(line.split(":", 1) for line in block.splitlines() if ":" in line)
+        fields = {name.strip(): value.strip() for name, value in fields.items()}
+        if {"processor", "physical id", "core id"} <= fields.keys() and int(fields["processor"]) in allowed_cpus:
+            cores.add((fields["physical id"], fields["core id"]))
+    return len(cores) or None
+
+
+def default_workers():
+    """Default number of parallel fits: physical cores usable by this process minus one, at least 1.
+
+    Falls back to half the usable logical CPUs (assuming two threads per core) when /proc/cpuinfo cannot
+    be read or has no topology.
+    Returns: tuple (workers (count), note describing how it was chosen (str)).
+    """
+    allowed_cpus = usable_cpu_ids()
+    try:
+        with open(CPUINFO_FILE) as cpuinfo_file:
+            physical_cores = count_physical_cores(cpuinfo_file.read(), allowed_cpus)
+    except OSError:
+        physical_cores = None
+    if physical_cores is not None:
+        return max(1, physical_cores - 1), f"{physical_cores} physical cores usable, minus one"
+    return (max(1, len(allowed_cpus) // 2 - 1),
+            f"NOTE: core topology unreadable; assuming 2 threads per core on {len(allowed_cpus)} usable CPUs, "
+            "minus one (set --workers to override)")
 
 
 def parse_arguments():
@@ -172,8 +218,9 @@ def parse_arguments():
     parser.add_argument("--jobs-dir", default=DEFAULT_JOBS_DIRECTORY, help="folder with the job .npz files")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIRECTORY,
                         help="folder for the .h5 results and fit_log.csv (keep the path short: MultiNest limit)")
-    parser.add_argument("--workers", type=int, default=usable_cpus(),
-                        help="parallel fits, one core each (default: usable CPUs minus one)")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="parallel fits, one physical core each (default: physical cores usable by this "
+                             "process minus one; half the usable CPUs minus one if the topology is unreadable)")
     parser.add_argument("--max-iterations", type=int, default=sm.MAX_ITERATIONS, help="MultiNest iteration limit")
     parser.add_argument("--n-live", type=int, default=sm.N_LIVE_POINTS, help="MultiNest live points")
     parser.add_argument("--task-index", type=int,
@@ -184,6 +231,10 @@ def parse_arguments():
 
 
 def main():
+    """Fit the pending jobs (or one array task) as the command line asks, or print the job status.
+
+    Returns: None; exits with a message on a missing job folder, a too-long output path or a bad task index.
+    """
     arguments = parse_arguments()
     job_ids = list_job_ids(arguments.jobs_dir)
     if not job_ids:
@@ -208,14 +259,21 @@ def main():
             sys.exit(f"--task-index {arguments.task_index} is outside 0..{len(job_ids) - 1} ({len(job_ids)} jobs)")
         selected_ids = [job_ids[arguments.task_index]]
         workers = 1
+        workers_note = "Slurm array task"
+        log_path = os.path.join(arguments.output_dir, TASK_LOG_DIRECTORY, f"{selected_ids[0]}.csv")
     else:
         selected_ids = interleave_calibration_and_galaxies(pending_ids)
-        workers = min(arguments.workers, max(1, len(selected_ids)))
-    print(f"Running {len(selected_ids)} job(s) on {workers} worker(s), max {arguments.max_iterations} iterations, "
-          f"{arguments.n_live} live points", flush=True)
+        if arguments.workers is None:
+            requested_workers, workers_note = default_workers()
+        else:
+            requested_workers, workers_note = arguments.workers, "set with --workers"
+        workers = min(requested_workers, max(1, len(selected_ids)))
+        log_path = os.path.join(arguments.output_dir, LOG_FILE_NAME)
+    print(f"Running {len(selected_ids)} job(s) on {workers} worker(s) ({workers_note}), "
+          f"max {arguments.max_iterations} iterations, {arguments.n_live} live points", flush=True)
 
     job_paths = [os.path.join(arguments.jobs_dir, f"{job_id}.npz") for job_id in selected_ids]
-    run_jobs(job_paths, arguments.output_dir, workers, arguments.max_iterations, arguments.n_live)
+    run_jobs(job_paths, arguments.output_dir, workers, arguments.max_iterations, arguments.n_live, log_path)
 
 
 if __name__ == "__main__":
