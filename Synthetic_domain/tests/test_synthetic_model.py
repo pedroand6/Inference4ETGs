@@ -371,3 +371,63 @@ def test_split_by_hash_is_stable():
     for identifier, expected in zip(reversed(identifiers), reversed(first)):
         assert sm.split_by_hash(identifier) == expected
     assert set(first).issubset({"validation", "test"})
+
+
+# =============================================================================
+# MultiNest fit and fit files (run with LD_LIBRARY_PATH=../.venv/lib)
+# =============================================================================
+def mock_job(job_id, rng):
+    """A small mock spectrum job at z = 0.1.
+
+    Inputs: job_id: identifier (str); rng: numpy Generator.
+    Returns: (job dict with job_id, spectrum and redshift, truth labels as a Series).
+    """
+    wavelength_vacuum = 10 ** np.arange(np.log10(3700), np.log10(9300), 1e-4)
+    template = sm.prepare_spectrum(wavelength_vacuum, np.ones_like(wavelength_vacuum),
+                                   np.full_like(wavelength_vacuum, 100.0), ebv=0.0)
+    cube = rng.random(len(sm.SPECTRAL_DIMS))
+    spectrum, truth = sm.make_mock_spectrum(cube, 0.1, template, rng)
+    return {"job_id": job_id, "spectrum": spectrum, "redshift": 0.1}, truth
+
+
+def test_make_mock_spectrum_returns_truth_labels():
+    """The mock spectrum is finite and its truth labels are finite."""
+    job, truth = mock_job("mock_test", np.random.default_rng(9))
+    assert np.isfinite(job["spectrum"]["flux"]).all()
+    for column in ("mw_age", "Z_fin", "f_old", "model_r"):
+        assert np.isfinite(truth[column]), column
+
+
+def test_fit_and_save_smoke_run(tmp_path):
+    """A short MultiNest run on a mock spectrum is saved with posterior labels and metadata."""
+    job, _ = mock_job("smoke", np.random.default_rng(10))
+    summary = sm.fit_and_save(job, str(tmp_path), max_iterations=100, n_live_points=40)
+
+    assert summary["status"] == "fitted", summary["error"]
+    posterior, metadata = sm.load_fit(str(tmp_path / "smoke.h5"))
+    assert len(posterior) > 0
+    for column in ("mw_age", "Z_fin", "f_old", "frac_bin_00", "model_r", "veldisp"):
+        assert column in posterior.columns
+    assert metadata["converged"] in (True, False)
+
+
+def test_fit_and_save_skips_existing_output(tmp_path):
+    """A job whose .h5 file already exists is skipped and its run time is read from the file."""
+    job, _ = mock_job("skip", np.random.default_rng(11))
+    posterior = pd.DataFrame({"mw_age": [1.0, 2.0]})
+    metadata = {"converged": True, "run_time": 5.0, "n_iterations": 10, "log_evidence": -1.0}
+    sm.save_fit(str(tmp_path / "skip.h5"), posterior, np.zeros((2, len(sm.SPECTRAL_DIMS))), metadata)
+
+    summary = sm.fit_and_save(job, str(tmp_path), max_iterations=100, n_live_points=40)
+
+    assert summary["status"] == "skipped"
+    assert summary["run_time"] == 5.0
+
+
+def test_summarise_posterior_percentiles():
+    """The 16th, 50th and 84th percentiles of 0..100 are 16, 50 and 84."""
+    posterior = pd.DataFrame({"mw_age": np.arange(101.0)})
+    summary = sm.summarise_posterior(posterior, ["mw_age"])
+    assert summary["mw_age_median"] == 50.0
+    assert summary["mw_age_p16"] == 16.0
+    assert summary["mw_age_p84"] == 84.0

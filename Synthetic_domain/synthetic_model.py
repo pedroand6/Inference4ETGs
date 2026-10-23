@@ -11,6 +11,7 @@ import time
 import warnings
 
 import extinction
+import h5py
 import numpy as np
 import pandas as pd
 from astropy.cosmology import FlatLambdaCDM
@@ -930,3 +931,240 @@ def split_by_hash(specobjid):
     if hash_value % SPLIT_MODULUS == 0:
         return "validation"
     return "test"
+
+
+# =============================================================================
+# 6. MultiNest fit, posterior labels, mocks and fit files
+# =============================================================================
+N_LIVE_POINTS = 300              # live points: more gives finer posteriors but a slower fit (count)
+SAMPLING_EFFICIENCY = 0.8        # MultiNest parameter-estimation mode (dimensionless)
+MAX_POSTERIOR_SAMPLES = 500      # posterior samples kept for labels (count)
+MIDPOINT_DRAW = 0.5              # unit-cube value of every parameter, for the starting model (dimensionless)
+UNIT_NOISE_CUBE_VALUE = 0.0      # unit-cube value of noise_scale that gives an error multiplier of 1
+LOW_PERCENTILE = 16              # lower posterior summary (percent), 1 sigma
+MEDIAN_PERCENTILE = 50           # central posterior summary (percent)
+HIGH_PERCENTILE = 84             # upper posterior summary (percent), 1 sigma
+
+
+def fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_points=N_LIVE_POINTS):
+    """MultiNest fit of one prepared spectrum under the training prior at a fixed redshift.
+
+    The sampler works directly on the unit cube (SPECTRAL_DIMS): spectral_components maps each point
+    to physical values, exactly as the training set does. output_basename must be short (MultiNest
+    limit of 100 characters), e.g. "spectral_fits/<id>/".
+    Inputs: spectrum: dict with wavelength [Angstrom, observed], flux and ivar, as from prepare_spectrum;
+            redshift: spectroscopic redshift (dimensionless); output_basename: directory prefix for the
+            MultiNest files (str); max_iterations: MultiNest iteration limit (count);
+            n_live_points: live points (count).
+    Returns: dict with samples (unit-cube points, shape (n_samples, len(SPECTRAL_DIMS))), log_evidence
+             (dimensionless ln Z), n_iterations (count), converged (bool) and run_time [s].
+    """
+    # pymultinest loads the MultiNest C library on import, so it needs LD_LIBRARY_PATH (set by the kernel)
+    import pymultinest
+
+    os.makedirs(output_basename, exist_ok=True)
+
+    # 1. Bagpipes model built once; each likelihood call updates it in place, which is much faster
+    midpoint_cube = np.full(len(SPECTRAL_DIMS), MIDPOINT_DRAW)
+    starting_components, _, _ = spectral_components(midpoint_cube, redshift)
+    model = pipes.model_galaxy(starting_components, spec_wavs=spectrum["wavelength"])
+
+    # 2. Likelihood of one unit-cube point: model spectrum vs data, with the S/N-scaling noise multiplier
+    def log_likelihood(cube):
+        """Log-likelihood of the spectrum for one unit-cube point.
+
+        Inputs: cube: unit-cube point (dimensionless, SPECTRAL_DIMS order). Returns: log-likelihood (dimensionless).
+        """
+        bagpipes_components, _, noise_scale = spectral_components(cube, redshift)
+        model.update(bagpipes_components)
+        model_flux = model.spectrum[:, 1]
+        return spectral_log_likelihood(model_flux, spectrum["flux"], spectrum["ivar"], noise_scale)
+
+    def unit_cube_prior(cube):
+        """Identity map: the training prior is already uniform on the unit cube.
+
+        Inputs: cube: unit-cube point (dimensionless). Returns: the same point (dimensionless).
+        """
+        return cube
+
+    # 3. Run MultiNest, timing only the sampling itself
+    start = time.time()
+    result = pymultinest.solve(
+        LogLikelihood=log_likelihood, Prior=unit_cube_prior, n_dims=len(SPECTRAL_DIMS),
+        outputfiles_basename=output_basename, n_live_points=n_live_points,
+        sampling_efficiency=SAMPLING_EFFICIENCY, multimodal=True, max_iter=max_iterations,
+        # Standard nested-sampling evidence: the importance-sampled one underflows in short runs and
+        # MultiNest then writes it in a form pymultinest cannot parse
+        importance_nested_sampling=False,
+        resume=False, verbose=False, use_MPI=False,
+    )
+    run_time = time.time() - start
+
+    # 4. Each ev.dat line is one MultiNest iteration (one dead point); hitting the limit means no convergence
+    with open(output_basename + "ev.dat") as dead_points:
+        n_iterations = sum(1 for _ in dead_points)
+    return {
+        "samples": result["samples"],
+        "log_evidence": result["logZ"],
+        "n_iterations": n_iterations,
+        "converged": n_iterations < max_iterations,
+        "run_time": run_time,
+    }
+
+
+def posterior_labels(unit_cube_samples, redshift):
+    """Labels of each posterior sample, from a Bagpipes model that also computes S-PLUS photometry.
+
+    Keeps at most MAX_POSTERIOR_SAMPLES evenly spaced samples, because building labels is the slow part.
+    model_r is the model r magnitude for 10^10 M_sun formed, used later to rescale mass-like labels.
+    Inputs: unit_cube_samples: unit-cube points (dimensionless, shape (n_samples, len(SPECTRAL_DIMS)));
+            redshift: spectroscopic redshift (dimensionless).
+    Returns: DataFrame with one row per kept sample: the drawn parameters (veldisp [km/s], Z_fin [Z/Z_sun], ...),
+             noise_scale (dimensionless), SUMMARY_LABEL_COLUMNS, BIN_LABEL_COLUMNS, mw_metallicity (Z/Z_sun)
+             and model_r [mag].
+    """
+    # 1. Thin the samples evenly: neighbouring MultiNest samples are nearly identical
+    step = max(1, int(np.ceil(len(unit_cube_samples) / MAX_POSTERIOR_SAMPLES)))
+    kept_samples = unit_cube_samples[::step]
+
+    # 2. Labels per kept sample, with one photometry model updated in place
+    model = None
+    rows = []
+    for cube in kept_samples:
+        bagpipes_components, drawn, noise_scale = spectral_components(cube, redshift)
+        if model is None:
+            model = pipes.model_galaxy(bagpipes_components, filt_list=FILTER_FILES)
+        else:
+            model.update(bagpipes_components)
+        fractions, metallicities, edges = bins_from_components(bagpipes_components)
+
+        row = dict(drawn)
+        row["noise_scale"] = noise_scale
+        row.update(summary_labels(model.sfh))
+        row.update(bin_labels(fractions, metallicities, edges))
+        row["mw_metallicity"] = mass_weighted_metallicity(fractions, metallicities)
+        row["model_r"] = ab_magnitudes(model.photometry)[BANDS.index("r")]
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def make_mock_spectrum(cube, redshift, template_spectrum, rng):
+    """Mock spectrum from a known unit-cube point, with the wavelengths, mask and errors of a real one.
+
+    The model is scaled to the template's median flux so the mock has the template's S/N. The
+    noise_scale coordinate is set to UNIT_NOISE_CUBE_VALUE (error multiplier 1) because the mock
+    noise is the template's own.
+    Inputs: cube: unit-cube point (dimensionless, SPECTRAL_DIMS order); redshift: dimensionless;
+            template_spectrum: dict from prepare_spectrum (wavelength [Angstrom], flux, ivar);
+            rng: numpy Generator.
+    Returns: (spectrum dict with wavelength, flux and ivar, truth labels as a pandas Series with the
+             same labels as posterior_labels).
+    """
+    # 1. Known model on the template's wavelength grid (copied, so the caller's point is not changed)
+    cube = np.array(cube, dtype=float)
+    cube[SPECTRAL_DIMS.index("noise_scale")] = UNIT_NOISE_CUBE_VALUE
+    bagpipes_components, _, _ = spectral_components(cube, redshift)
+    model = pipes.model_galaxy(bagpipes_components, spec_wavs=template_spectrum["wavelength"])
+    model_flux = model.spectrum[:, 1]
+
+    # 2. Match the template's flux scale, then add Gaussian noise with the template's errors
+    good = template_spectrum["ivar"] > 0
+    scale = np.median(template_spectrum["flux"][good]) / np.median(model_flux[good])
+    errors = np.zeros(len(model_flux))
+    errors[good] = 1 / np.sqrt(template_spectrum["ivar"][good])
+    mock_flux = scale * model_flux + rng.normal(0, 1, len(model_flux)) * errors
+    mock_flux[~good] = 0.0    # bins without data stay empty, as in the template
+
+    # 3. Spectrum and truth labels of the same point, so a fit can be checked against them
+    spectrum = {"wavelength": template_spectrum["wavelength"], "flux": mock_flux,
+                "ivar": template_spectrum["ivar"].copy()}
+    truth = posterior_labels(cube[np.newaxis, :], redshift).iloc[0]
+    return spectrum, truth
+
+
+def save_fit(path, posterior, unit_cube_samples, metadata):
+    """Write posterior labels, unit-cube samples and fit metadata to one HDF5 file.
+
+    Inputs: path: output file path (str); posterior: DataFrame of labels, one column per label;
+            unit_cube_samples: unit-cube points (dimensionless, shape (n_samples, len(SPECTRAL_DIMS)));
+            metadata: dict of scalars (converged, run_time [s], n_iterations, log_evidence, redshift).
+    Returns: None. An existing file at path is overwritten.
+    """
+    with h5py.File(path, "w") as output:
+        output.create_dataset("unit_cube_samples", data=unit_cube_samples)
+        labels_group = output.create_group("posterior")
+        for column in posterior.columns:
+            labels_group.create_dataset(column, data=posterior[column].to_numpy(dtype=float))
+        for key, value in metadata.items():
+            output.attrs[key] = value
+
+
+def load_fit(path):
+    """Read a file written by save_fit.
+
+    Inputs: path: file path (str).
+    Returns: (posterior DataFrame with one column per label, metadata dict with the attributes save_fit wrote).
+    """
+    with h5py.File(path, "r") as source:
+        columns = {}
+        for column in source["posterior"]:
+            columns[column] = source["posterior"][column][()]
+        metadata = {}
+        for key, value in source.attrs.items():
+            # HDF5 returns numpy scalars; .item() gives back the plain Python value
+            metadata[key] = value.item() if hasattr(value, "item") else value
+    return pd.DataFrame(columns), metadata
+
+
+def fit_and_save(job, output_directory, max_iterations, n_live_points=N_LIVE_POINTS):
+    """Fit one job and save <output_directory>/<job_id>.h5. Never raises.
+
+    Skips jobs whose file already exists, so a batch can be re-run with more galaxies. A failed fit
+    comes back with status "failed" and the error text instead of an exception.
+    Inputs: job: dict with job_id (str), spectrum (dict as from prepare_spectrum) and redshift (dimensionless);
+            output_directory: folder for the .h5 file and the MultiNest files (str); max_iterations: MultiNest
+            iteration limit (count); n_live_points: live points (count).
+    Returns: dict with job_id, status ("fitted", "skipped" or "failed"), converged (bool or None),
+             run_time [s] (or None), n_iterations (count or None) and error (str or None).
+    """
+    # 1. Output path and a summary that the steps below fill in
+    output_path = os.path.join(output_directory, f"{job['job_id']}.h5")
+    summary = {"job_id": job["job_id"], "status": None, "converged": None,
+               "run_time": None, "n_iterations": None, "error": None}
+
+    # 2. Skip finished jobs; their run details come from the file
+    if os.path.exists(output_path):
+        _, metadata = load_fit(output_path)
+        summary.update(status="skipped", converged=metadata["converged"],
+                       run_time=metadata["run_time"], n_iterations=metadata["n_iterations"])
+        return summary
+
+    # 3. Fit, label the posterior and save; any error is recorded rather than raised
+    try:
+        multinest_basename = os.path.join(output_directory, str(job["job_id"])) + "/"
+        fit = fit_spectrum(job["spectrum"], job["redshift"], multinest_basename, max_iterations, n_live_points)
+        posterior = posterior_labels(fit["samples"], job["redshift"])
+        metadata = {"converged": fit["converged"], "run_time": fit["run_time"],
+                    "n_iterations": fit["n_iterations"], "log_evidence": fit["log_evidence"],
+                    "redshift": job["redshift"]}
+        save_fit(output_path, posterior, fit["samples"], metadata)
+        summary.update(status="fitted", converged=fit["converged"],
+                       run_time=fit["run_time"], n_iterations=fit["n_iterations"])
+    except Exception as error:
+        summary.update(status="failed", error=repr(error))
+    return summary
+
+
+def summarise_posterior(posterior, columns):
+    """16th, 50th and 84th percentiles of each listed posterior column.
+
+    Inputs: posterior: DataFrame of labels, one row per posterior sample; columns: names of the columns to summarise.
+    Returns: dict with <column>_p16, <column>_median and <column>_p84 for each column, in the column's units.
+    """
+    summary = {}
+    for column in columns:
+        values = posterior[column].to_numpy(dtype=float)
+        summary[f"{column}_p{LOW_PERCENTILE}"] = np.nanpercentile(values, LOW_PERCENTILE)
+        summary[f"{column}_median"] = np.nanpercentile(values, MEDIAN_PERCENTILE)
+        summary[f"{column}_p{HIGH_PERCENTILE}"] = np.nanpercentile(values, HIGH_PERCENTILE)
+    return summary
