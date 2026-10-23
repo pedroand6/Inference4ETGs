@@ -624,3 +624,61 @@ def scale_to_observed_r(model_magnitudes, model_z, catalogue_r, catalogue_z, rng
 
     scaled_magnitudes = model_magnitudes + offsets[:, np.newaxis]
     return scaled_magnitudes, offsets
+
+
+# =============================================================================
+# 4. Coverage test v2
+# =============================================================================
+P_MIN = 0.01                 # probability (dimensionless): covered if the best p-value exceeds this
+NO_MODEL = -1                # best_model value when no model lies in the redshift window
+FREE_OFFSETS = 1             # the magnitude normalisation is fitted, so it uses one degree of freedom
+
+
+def coverage_test(observed_magnitudes, observed_errors, detected, observed_z, observed_dz,
+                  model_magnitudes, model_z):
+    """Is each galaxy consistent with some model at its redshift?
+
+    Purpose: for every model with |z_model - z| < dz, chi^2 over the detected bands, with the magnitude
+    offset (the model's mass normalisation) solved analytically. A galaxy is covered if its minimum chi^2
+    has p-value > P_MIN for n_detected - FREE_OFFSETS degrees of freedom.
+    Inputs: observed_magnitudes and observed_errors [mag], arrays (n_galaxies, 12) in BANDS order;
+            detected: bool array (n_galaxies, 12); observed_z and observed_dz: dimensionless, shape (n_galaxies,);
+            model_magnitudes [mag], array (n_models, 12); model_z: dimensionless, shape (n_models,).
+    Returns: DataFrame with one row per galaxy and columns chi2_min, n_dof, p_value, covered (bool) and
+             best_model (index into model_magnitudes; NO_MODEL when no model is in the window).
+    """
+    # 1. Models with finite magnitudes, sorted by redshift so each galaxy's window is a contiguous slice
+    finite_models = np.flatnonzero(np.isfinite(model_magnitudes).all(axis=1))
+    order = finite_models[np.argsort(model_z[finite_models])]
+    sorted_z = model_z[order]
+    sorted_magnitudes = model_magnitudes[order]
+
+    rows = []
+    for galaxy_index in range(len(observed_magnitudes)):
+        bands = np.flatnonzero(detected[galaxy_index])
+        n_dof = len(bands) - FREE_OFFSETS
+        first = np.searchsorted(sorted_z, observed_z[galaxy_index] - observed_dz[galaxy_index])
+        last = np.searchsorted(sorted_z, observed_z[galaxy_index] + observed_dz[galaxy_index])
+        if last == first or n_dof < 1:    # a chi^2 needs at least one degree of freedom
+            rows.append({"chi2_min": np.nan, "n_dof": n_dof, "p_value": np.nan,
+                         "covered": False, "best_model": NO_MODEL})
+            continue
+
+        # 2. chi^2 with free offset: sum w d^2 - (sum w d)^2 / sum w, where d = m_obs - m_model.
+        # Solving for the offset analytically avoids a grid over normalisations.
+        # The variance is the error squared plus ERROR_FLOOR squared (model error in quadrature).
+        weights = 1 / (observed_errors[galaxy_index, bands] ** 2 + ERROR_FLOOR**2)
+        window_magnitudes = sorted_magnitudes[first:last]
+        differences = observed_magnitudes[galaxy_index, bands] - window_magnitudes[:, bands]
+        weighted_sum = differences @ weights
+        best_offsets = weighted_sum / weights.sum()
+        weighted_square_sum = (differences**2) @ weights
+        chi2_values = weighted_square_sum - weighted_sum * best_offsets
+
+        # 3. Best model in the window and its p-value
+        best_in_window = np.argmin(chi2_values)
+        chi2_min = chi2_values[best_in_window]
+        p_value = chi_squared.sf(chi2_min, n_dof)
+        rows.append({"chi2_min": chi2_min, "n_dof": n_dof, "p_value": p_value,
+                     "covered": p_value > P_MIN, "best_model": int(order[first + best_in_window])})
+    return pd.DataFrame(rows)

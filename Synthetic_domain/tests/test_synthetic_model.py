@@ -201,3 +201,56 @@ def test_scale_to_observed_r_takes_r_from_galaxies_at_similar_redshift():
     r_index = sm.BANDS.index("r")
     assert set(scaled[:, r_index]).issubset({18.0, 19.0})
     assert np.allclose(scaled[:, 0] - model_magnitudes[:, 0], offsets)
+
+
+# =============================================================================
+# Coverage test
+# =============================================================================
+@pytest.fixture(scope="module")
+def random_model_grid():
+    rng = np.random.default_rng(6)
+    model_magnitudes = rng.uniform(20, 23, size=(2000, len(sm.BANDS)))
+    model_z = rng.uniform(0.0, 0.5, size=2000)
+    return model_magnitudes, model_z
+
+
+def galaxy_from_model(model_magnitudes, model_z, model_index, rng):
+    """A noisy copy of one model, 2 mag fainter, with 0.05 mag errors in all bands."""
+    errors = np.full((1, len(sm.BANDS)), 0.05)
+    magnitudes = model_magnitudes[[model_index]] + 2.0 + rng.normal(0, 0.05, size=(1, len(sm.BANDS)))
+    detected = np.ones((1, len(sm.BANDS)), dtype=bool)
+    redshift = model_z[[model_index]]
+    return magnitudes, errors, detected, redshift
+
+
+def test_coverage_noisy_model_is_covered(random_model_grid):
+    model_magnitudes, model_z = random_model_grid
+    magnitudes, errors, detected, redshift = galaxy_from_model(model_magnitudes, model_z, 7, np.random.default_rng(7))
+
+    result = sm.coverage_test(magnitudes, errors, detected, redshift, np.array([0.05]), model_magnitudes, model_z)
+
+    assert bool(result.loc[0, "covered"])
+    assert result.loc[0, "best_model"] == 7
+    assert result.loc[0, "n_dof"] == len(sm.BANDS) - 1
+
+
+def test_coverage_model_with_shifted_colour_is_not_covered(random_model_grid):
+    model_magnitudes, model_z = random_model_grid
+    magnitudes, errors, detected, redshift = galaxy_from_model(model_magnitudes, model_z, 7, np.random.default_rng(7))
+    magnitudes[0, sm.BANDS.index("g")] += 0.5
+
+    result = sm.coverage_test(magnitudes, errors, detected, redshift, np.array([0.05]), model_magnitudes, model_z)
+
+    assert not bool(result.loc[0, "covered"])
+
+
+def test_coverage_galaxy_without_models_in_window(random_model_grid):
+    model_magnitudes, model_z = random_model_grid
+    magnitudes, errors, detected, _ = galaxy_from_model(model_magnitudes, model_z, 7, np.random.default_rng(7))
+
+    result = sm.coverage_test(magnitudes, errors, detected, np.array([0.9]), np.array([0.05]),
+                              model_magnitudes, model_z)
+
+    assert not bool(result.loc[0, "covered"])
+    assert np.isnan(result.loc[0, "chi2_min"])
+    assert result.loc[0, "best_model"] == -1
