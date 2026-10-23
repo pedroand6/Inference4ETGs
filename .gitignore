@@ -12,3 +12,4 @@ Synthetic_domain/dr3_alldata.csv
 Synthetic_domain/spectra/
 Synthetic_domain/spectral_fits/
 Synthetic_domain/*.parquet
+*.env
