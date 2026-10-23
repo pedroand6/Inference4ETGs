@@ -15,7 +15,7 @@
 - SPS: Bagpipes `bc03_miles` (installed default). Cosmology: `FlatLambdaCDM(H0=70, Om0=0.3)`.
 - `Z_RANGE = (0.002, 0.7)`; `N_MODELS = 2**19`; synthetic validation and test sets `2**14` models each.
 - Spectral fits: MultiNest through PyMultiNest; kernel must have `LD_LIBRARY_PATH=/home/pedroand/Projects/Inference4ETGs/.venv/lib`.
-- Spectral fitting budget: at most 3 hours wall time on 11 workers.
+- Spectral fitting: run outside the notebook (run_spectral_fits.py), one fit per physical core, MAX_ITERATIONS = 50000, no wall-clock budget (spec amendment 2026-10-23; supersedes the 3-hour budget).
 - SDSS spectra are corrected for Milky Way extinction with CSFD E(B−V), CCM89, R_V = 3.1 (same as `extinctions.py`).
 - Spectral fits use the spectrum only; S-PLUS photometry never enters the spectral likelihood.
 - `spectra/`, `spectral_fits/`, `*.parquet` are git-ignored; the old tracked `Synthetic_domain/training_set.csv` is removed from the repository.
