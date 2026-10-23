@@ -985,24 +985,48 @@ MEDIAN_PERCENTILE = 50           # central posterior summary (percent)
 HIGH_PERCENTILE = 84             # upper posterior summary (percent), 1 sigma
 
 
-def multinest_iterations(output_basename):
-    """Number of outer-loop iterations of a finished MultiNest run.
+def multinest_iteration_bounds(output_basename):
+    """Lower and upper bound on the outer-loop iterations of a finished MultiNest run.
 
     MultiNest writes one row to ev.dat for every dead point, and with multimodal=True it removes one
     dead point per active mode in each iteration, so counting rows overstates the iterations as soon
     as the posterior splits into several modes. Inside one iteration the rows follow the mode order
-    (the last column of ev.dat is the mode number, increasing), so every row whose mode number is not
-    larger than the previous row's starts a new iteration. This is the loop counter that the
-    max_iter limit is compared with in MultiNest's nested.F90 (the resume file only stores the
-    number of dead points, not the iterations).
+    (the last column of ev.dat is the mode number, increasing). A row whose mode number is not larger
+    than the previous row's certainly starts a new iteration, which gives the lower bound. The count
+    can be missed when every mode of one iteration is replaced in the next (nested.F90, isolateModes2:
+    new modes get the next free number and an emptied parent is dropped), e.g. rows 1 | 2 3: there the
+    mode numbers only rise. Such a boundary is an ascending step k -> j into a mode number j that never
+    appeared before, with k never occurring again (k is then dead); the upper bound counts each of
+    those steps. The exact value is
+    in between and is the loop counter that the max_iter limit is compared with in nested.F90 (no
+    MultiNest file stores it).
     Inputs: output_basename: directory prefix of the MultiNest files (str), as given to fit_spectrum.
-    Returns: iterations (count); 0 if ev.dat has no rows.
+    Returns: (lower, upper) iteration counts (counts); (0, 0) if ev.dat has no rows.
     """
     mode_of_each_row = np.loadtxt(output_basename + "ev.dat", usecols=-1, ndmin=1)
     if len(mode_of_each_row) == 0:
-        return 0
-    starts_new_iteration = mode_of_each_row[1:] <= mode_of_each_row[:-1]
-    return 1 + int(starts_new_iteration.sum())
+        return 0, 0
+    certain_starts = int((mode_of_each_row[1:] <= mode_of_each_row[:-1]).sum())
+    possible_starts = 0
+    modes_seen = {mode_of_each_row[0]}
+    for row_index in range(1, len(mode_of_each_row)):
+        previous_mode, mode = mode_of_each_row[row_index - 1], mode_of_each_row[row_index]
+        previous_mode_is_dead = not (mode_of_each_row[row_index:] == previous_mode).any()
+        if mode > previous_mode and mode not in modes_seen and previous_mode_is_dead:
+            possible_starts += 1
+        modes_seen.add(mode)
+    return 1 + certain_starts, 1 + certain_starts + possible_starts
+
+
+def multinest_iterations(output_basename):
+    """Best (lower-bound) count of outer-loop iterations of a finished MultiNest run.
+
+    Exact unless a whole set of modes is replaced at once (see multinest_iteration_bounds); use the
+    upper bound from multinest_iteration_bounds to decide whether the run hit max_iter.
+    Inputs: output_basename: directory prefix of the MultiNest files (str), as given to fit_spectrum.
+    Returns: iterations (count); 0 if ev.dat has no rows.
+    """
+    return multinest_iteration_bounds(output_basename)[0]
 
 
 def fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_points=N_LIVE_POINTS):
@@ -1017,7 +1041,7 @@ def fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_poi
             n_live_points: live points (count).
     Returns: dict with samples (unit-cube points, shape (n_samples, len(SPECTRAL_DIMS))), log_evidence
              (dimensionless ln Z), n_iterations (count, from multinest_iterations), converged (bool: the
-             run stopped before max_iterations) and run_time [s].
+             run certainly stopped before max_iterations, judged by the upper bound of the count) and run_time [s].
     """
     # pymultinest loads the MultiNest C library on import, so it needs LD_LIBRARY_PATH (set by the kernel)
     import pymultinest
@@ -1061,13 +1085,14 @@ def fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_poi
     )
     run_time = time.time() - start
 
-    # 4. Hitting the iteration limit means the run stopped before it converged
-    n_iterations = multinest_iterations(output_basename)
+    # 4. Hitting the iteration limit means the run stopped before it converged; the upper bound of the
+    #    count is used so that a capped run is never reported as converged
+    n_iterations, max_possible_iterations = multinest_iteration_bounds(output_basename)
     return {
         "samples": result["samples"],
         "log_evidence": result["logZ"],
         "n_iterations": n_iterations,
-        "converged": n_iterations < max_iterations,
+        "converged": max_possible_iterations < max_iterations,
         "run_time": run_time,
     }
 

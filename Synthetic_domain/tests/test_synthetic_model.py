@@ -448,6 +448,29 @@ def test_multinest_iterations_handles_a_mode_that_appears_later(tmp_path):
     assert sm.multinest_iterations(basename) == 4
 
 
+def test_multinest_iteration_bounds_when_every_mode_is_replaced(tmp_path):
+    """Mode 1 splits into 2 and 3 and is emptied: rows 1 | 1 | 2 3 | 2 3. Only 3 -> 2 shows a boundary
+    in the mode numbers, so the lower bound is 3 and the upper bound is 4 (1 -> 2 may be a
+    boundary since mode 1 never returns; 2 -> 3 is not, mode 2 returns), which is the true count."""
+    basename = str(tmp_path) + "/"
+    write_ev_file(basename, [1, 1, 2, 3, 2, 3])
+    assert sm.multinest_iteration_bounds(basename) == (3, 4)
+    assert sm.multinest_iterations(basename) == 3
+
+
+def test_multinest_iteration_bounds_are_equal_when_modes_keep_their_points(tmp_path):
+    """A new mode next to a surviving parent is not a possible boundary: 1 1 | 1 2 | 1 2."""
+    basename = str(tmp_path) + "/"
+    write_ev_file(basename, [1, 1, 1, 2, 1, 2])
+    assert sm.multinest_iteration_bounds(basename) == (4, 4)
+
+
+def test_multinest_iteration_bounds_of_a_one_row_file(tmp_path):
+    basename = str(tmp_path) + "/"
+    write_ev_file(basename, [1])
+    assert sm.multinest_iteration_bounds(basename) == (1, 1)
+
+
 def test_multinest_iterations_of_a_one_row_file(tmp_path):
     basename = str(tmp_path) + "/"
     write_ev_file(basename, [1])
