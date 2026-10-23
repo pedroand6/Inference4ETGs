@@ -2,6 +2,7 @@
 
 import json
 
+import extinction
 import numpy as np
 import pandas as pd
 import pytest
@@ -254,3 +255,119 @@ def test_coverage_galaxy_without_models_in_window(random_model_grid):
     assert not bool(result.loc[0, "covered"])
     assert np.isnan(result.loc[0, "chi2_min"])
     assert result.loc[0, "best_model"] == -1
+
+
+# =============================================================================
+# Spectra, likelihood, Firefly and split
+# =============================================================================
+def test_vacuum_to_air_halpha():
+    assert abs(sm.vacuum_to_air(np.array([6564.61]))[0] - 6562.80) < 0.02
+
+
+def test_deredden_spectrum_undoes_ccm89_extinction():
+    wavelength = np.linspace(3800, 9200, 500)
+    intrinsic_flux = np.ones_like(wavelength)
+    ebv = 0.1
+    extinction_magnitudes = extinction.ccm89(wavelength, sm.R_V * ebv, sm.R_V)
+    observed_flux = intrinsic_flux * 10 ** (-0.4 * extinction_magnitudes)
+    observed_ivar = np.ones_like(wavelength)
+
+    flux, ivar = sm.deredden_spectrum(wavelength, observed_flux, observed_ivar, ebv)
+
+    assert np.allclose(flux, intrinsic_flux)
+    assert np.all(ivar < observed_ivar)
+
+
+def test_prepare_spectrum_rebins_and_masks():
+    wavelength_vacuum = 10 ** np.arange(np.log10(3700), np.log10(9300), 1e-4)
+    flux = np.ones_like(wavelength_vacuum)
+    ivar = np.ones_like(wavelength_vacuum)
+
+    spectrum = sm.prepare_spectrum(wavelength_vacuum, flux, ivar, ebv=0.0)
+
+    assert np.allclose(np.diff(spectrum["wavelength"]), sm.REBIN_WIDTH)
+    assert spectrum["wavelength"][0] >= sm.OBSERVED_RANGE[0]
+    assert spectrum["wavelength"][-1] <= sm.OBSERVED_RANGE[1]
+    good = spectrum["ivar"] > 0
+    assert np.allclose(spectrum["flux"][good], 1.0)
+    sky_bin = np.argmin(np.abs(spectrum["wavelength"] - 5577.0))
+    assert spectrum["ivar"][sky_bin] == 0
+
+
+def test_prepare_spectrum_rejects_mostly_masked_spectrum():
+    wavelength_vacuum = 10 ** np.arange(np.log10(3700), np.log10(9300), 1e-4)
+    flux = np.ones_like(wavelength_vacuum)
+    ivar = np.zeros_like(wavelength_vacuum)
+    ivar[:200] = 1.0
+    with pytest.raises(ValueError, match="good bins"):
+        sm.prepare_spectrum(wavelength_vacuum, flux, ivar, ebv=0.0)
+
+
+def test_calibration_polynomial_recovers_known_polynomial():
+    n_bins = 1000
+    model_flux = 1 + 0.5 * np.sin(np.linspace(0, 20, n_bins))
+    x = np.linspace(-1, 1, n_bins)
+    true_polynomial = 2.0 + 0.3 * x - 0.1 * x**2
+    data_flux = model_flux * true_polynomial
+    data_ivar = np.ones(n_bins)
+
+    polynomial = sm.calibration_polynomial(model_flux, data_flux, data_ivar)
+
+    assert np.allclose(polynomial, true_polynomial)
+
+
+def test_log_likelihood_is_highest_for_the_true_model():
+    rng = np.random.default_rng(8)
+    model_flux = 1 + 0.5 * np.sin(np.linspace(0, 20, 1000))
+    data_flux = model_flux + rng.normal(0, 0.01, 1000)
+    data_ivar = np.full(1000, 1 / 0.01**2)
+    wrong_model = 1 + 0.5 * np.sin(np.linspace(0, 21, 1000))
+
+    true_value = sm.spectral_log_likelihood(model_flux, data_flux, data_ivar, noise_scale=1.0)
+    wrong_value = sm.spectral_log_likelihood(wrong_model, data_flux, data_ivar, noise_scale=1.0)
+
+    assert true_value > wrong_value
+
+
+def test_spectral_components_fix_redshift_and_add_veldisp():
+    cube = np.full(len(sm.SPECTRAL_DIMS), 0.5)
+    bagpipes_components, drawn, noise_scale = sm.spectral_components(cube, redshift=0.08)
+
+    assert "z" not in sm.SPECTRAL_DIMS
+    assert bagpipes_components["redshift"] == 0.08
+    assert sm.VELDISP_RANGE[0] <= bagpipes_components["veldisp"] <= sm.VELDISP_RANGE[1]
+    assert drawn["veldisp"] == bagpipes_components["veldisp"]
+    assert 1.0 <= noise_scale <= 5.0
+
+
+def test_compare_with_firefly_flags_consistency():
+    result = sm.compare_with_firefly(
+        bagpipes_age_gyr=np.array([5.0, 5.0]),
+        bagpipes_metallicity=np.array([1.0, 1.0]),
+        firefly_age_years=np.array([5.5e9, 20e9]),
+        firefly_metallicity=np.array([0.9, 1.0]),
+    )
+    assert bool(result.loc[0, "firefly_consistent"])
+    assert not bool(result.loc[1, "firefly_consistent"])
+
+
+def test_compare_with_firefly_missing_values_are_na():
+    result = sm.compare_with_firefly(
+        bagpipes_age_gyr=np.array([5.0]),
+        bagpipes_metallicity=np.array([1.0]),
+        firefly_age_years=np.array([-9999.0]),
+        firefly_metallicity=np.array([1.0]),
+    )
+    assert pd.isna(result.loc[0, "firefly_consistent"])
+    assert np.isnan(result.loc[0, "delta_log_age"])
+
+
+def test_split_by_hash_is_stable():
+    identifiers = [299489677444933632, 299490502078654464, 1237645879578460255, 42]
+    first = []
+    for identifier in identifiers:
+        first.append(sm.split_by_hash(identifier))
+    # Same answer when asked again, in another order, with other galaxies around
+    for identifier, expected in zip(reversed(identifiers), reversed(first)):
+        assert sm.split_by_hash(identifier) == expected
+    assert set(first).issubset({"validation", "test"})

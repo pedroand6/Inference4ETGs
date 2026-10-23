@@ -10,6 +10,7 @@ import os
 import time
 import warnings
 
+import extinction
 import numpy as np
 import pandas as pd
 from astropy.cosmology import FlatLambdaCDM
@@ -682,3 +683,250 @@ def coverage_test(observed_magnitudes, observed_errors, detected, observed_z, ob
         rows.append({"chi2_min": chi2_min, "n_dof": n_dof, "p_value": p_value,
                      "covered": p_value > P_MIN, "best_model": int(order[first + best_in_window])})
     return pd.DataFrame(rows)
+
+
+# =============================================================================
+# 5. Spectra, spectral likelihood, Firefly comparison and split
+# =============================================================================
+R_V = 3.1                                # [dimensionless] CCM89 R_V = A_V / E(B-V), as in extinctions.py
+DEX_PER_MAGNITUDE = 1 / MAGNITUDES_PER_DEX   # [dex/mag] = 0.4: flux ratio is 10**(-0.4 * magnitude)
+GYR_TO_YEARS = 1e9                       # [yr/Gyr]
+
+# S-PLUS wavelengths [Angstrom] at which the CCM89 law is evaluated, as in extinctions.py
+EXTINCTION_WAVELENGTHS = np.array([3536, 3770, 3940, 4094, 4292, 4751, 5133, 6258, 6614, 7690, 8611, 8831],
+                                  dtype=float)
+
+# Refractive index of air (Morton 2000, IAU standard); s is the wavenumber in 1/micron
+ANGSTROM_PER_MICRON = 1e4                # [Angstrom/micron]
+AIR_INDEX_OFFSET = 8.34254e-5            # dimensionless constant part of (n - 1)
+AIR_INDEX_NUMERATOR_1 = 0.02406147       # dimensionless
+AIR_INDEX_POLE_1 = 130.0                 # [1/micron^2] pole of the first term in s^2
+AIR_INDEX_NUMERATOR_2 = 0.00015998       # dimensionless
+AIR_INDEX_POLE_2 = 38.9                  # [1/micron^2] pole of the second term in s^2
+
+OBSERVED_RANGE = (3800.0, 9200.0)        # [Angstrom, observed] kept for the fit
+SKY_LINES = (5577.0, 6300.0)             # [Angstrom] strong sky residuals
+SKY_LINE_HALF_WIDTH = 10.0               # [Angstrom]
+REBIN_WIDTH = 5.0                        # [Angstrom]
+MIN_GOOD_BINS = 300                      # bins with data, out of about 1080
+CALIBRATION_ORDER = 2                    # degree of the multiplicative calibration polynomial
+
+VELDISP_RANGE = (40.0, 400.0)                  # [km/s]
+LOG_NOISE_SCALE_RANGE = (0.0, np.log10(5.0))   # [dex] log10 of the error multiplier, 1 to 5
+IGNORED_REDSHIFT_DRAW = 0.5              # unit-cube value for the redshift slot, which fixed_redshift replaces
+
+FIREFLY_MISSING = -999.0                 # [same units as Firefly] Firefly writes -9999 for missing values
+MAX_DELTA_LOG_AGE = 0.3                  # [dex]
+MAX_DELTA_LOG_METALLICITY = 0.3          # [dex]
+
+HASH_HEX_DIGITS = 8                      # digits of the md5 digest used for the split (32 bits)
+SPLIT_MODULUS = 2                        # even hash goes to validation, odd to test: half each
+
+
+def vacuum_to_air(wavelength):
+    """Air wavelengths [Angstrom] from vacuum ones (IAU standard, Morton 2000).
+
+    SDSS spectra are in vacuum; the BC03-MILES models are in air.
+    Inputs: wavelength: vacuum wavelengths [Angstrom] (array).
+    Returns: air wavelengths [Angstrom], same shape as wavelength.
+    """
+    # The index of air departs from 1 by an amount that grows as the wavelength shortens
+    wavenumber_squared = (ANGSTROM_PER_MICRON / wavelength) ** 2
+    first_term = AIR_INDEX_NUMERATOR_1 / (AIR_INDEX_POLE_1 - wavenumber_squared)
+    second_term = AIR_INDEX_NUMERATOR_2 / (AIR_INDEX_POLE_2 - wavenumber_squared)
+    refractive_index = 1 + AIR_INDEX_OFFSET + first_term + second_term
+    return wavelength / refractive_index
+
+
+def deredden_spectrum(wavelength, flux, ivar, ebv):
+    """Remove Milky Way extinction (CCM89, R_V = 3.1) from a spectrum.
+
+    Inputs: wavelength [Angstrom], flux and ivar (inverse variance, 1/flux^2) as arrays of equal length;
+            ebv: Milky Way E(B-V) [mag] at the galaxy.
+    Returns: (flux, ivar), both dereddened, in the same units as the inputs.
+    """
+    extinction_magnitudes = extinction.ccm89(wavelength.astype(float), R_V * ebv, R_V)
+    # Observed flux = intrinsic flux * 10**(-0.4 A), so the correction multiplies by the inverse
+    correction = 10 ** (DEX_PER_MAGNITUDE * extinction_magnitudes)
+    # Errors scale with flux, so the inverse variance divides by the square of the correction
+    return flux * correction, ivar / correction**2
+
+
+def deredden_magnitudes(magnitudes, ebv):
+    """Remove Milky Way extinction from S-PLUS magnitudes, as extinctions.py does.
+
+    Inputs: magnitudes: observed [mag], array (n_galaxies, 12) in EXTINCTION_WAVELENGTHS order;
+            ebv: Milky Way E(B-V) [mag] per galaxy, shape (n_galaxies,).
+    Returns: dereddened magnitudes [mag], same shape as magnitudes.
+    """
+    corrected = np.array(magnitudes, dtype=float)
+    for galaxy_index in range(len(corrected)):
+        # Magnitudes are brighter than intrinsic by A_lambda, so the extinction is subtracted
+        band_extinction = extinction.ccm89(EXTINCTION_WAVELENGTHS, R_V * ebv[galaxy_index], R_V)
+        corrected[galaxy_index] = corrected[galaxy_index] - band_extinction
+    return corrected
+
+
+def prepare_spectrum(wavelength_vacuum, flux, ivar, ebv):
+    """SDSS spectrum ready for the fit: air wavelengths, dereddened, masked, rebinned to REBIN_WIDTH.
+
+    Each output bin is the inverse-variance-weighted mean of its unmasked pixels; bins without any
+    get ivar = 0. Raises ValueError when fewer than MIN_GOOD_BINS bins have data.
+    Inputs: wavelength_vacuum [Angstrom, vacuum]; flux [erg/s/cm2/Angstrom, any scale] and ivar
+            (inverse variance) per pixel, arrays of equal length; ebv: Milky Way E(B-V) [mag].
+    Returns: dict(wavelength [Angstrom, air, observed bin centres], flux, ivar), one value per bin.
+    """
+    # 1. Air wavelengths and Milky Way extinction
+    wavelength = vacuum_to_air(wavelength_vacuum)
+    flux, ivar = deredden_spectrum(wavelength, flux, ivar, ebv)
+
+    # 2. Pixels to ignore: no data, non-finite flux, and strong sky residuals
+    good = (ivar > 0) & np.isfinite(flux)
+    for sky_line in SKY_LINES:
+        near_sky_line = np.abs(wavelength - sky_line) < SKY_LINE_HALF_WIDTH
+        good = good & ~near_sky_line
+
+    # 3. Rebin onto a regular grid, weighting each pixel by its inverse variance
+    bin_centres = np.arange(OBSERVED_RANGE[0] + REBIN_WIDTH / 2, OBSERVED_RANGE[1], REBIN_WIDTH)
+    rebinned_flux = np.zeros(len(bin_centres))
+    rebinned_ivar = np.zeros(len(bin_centres))
+    pixel_bin = np.floor((wavelength - OBSERVED_RANGE[0]) / REBIN_WIDTH).astype(int)
+    for bin_index in range(len(bin_centres)):
+        in_bin = good & (pixel_bin == bin_index)
+        if not in_bin.any():
+            continue
+        weights = ivar[in_bin]
+        rebinned_ivar[bin_index] = weights.sum()
+        rebinned_flux[bin_index] = np.sum(weights * flux[in_bin]) / weights.sum()
+
+    # 4. Refuse spectra with too little usable wavelength range
+    n_good_bins = int((rebinned_ivar > 0).sum())
+    if n_good_bins < MIN_GOOD_BINS:
+        raise ValueError(f"only {n_good_bins} good bins (need {MIN_GOOD_BINS})")
+    return {"wavelength": bin_centres, "flux": rebinned_flux, "ivar": rebinned_ivar}
+
+
+def calibration_polynomial(model_flux, data_flux, data_ivar, order=CALIBRATION_ORDER):
+    """Multiplicative polynomial (in normalised wavelength) that best maps the model onto the data.
+
+    Weighted linear least squares; the constant term absorbs the model normalisation, so the
+    spectrum constrains the shape of the SFH, not the mass.
+    Inputs: model_flux, data_flux: flux per bin (arrays of equal length, any common scale);
+            data_ivar: inverse variance per bin (1/flux^2); order: polynomial degree (dimensionless).
+    Returns: the polynomial evaluated on each bin (dimensionless), same length as model_flux.
+    """
+    n_bins = len(model_flux)
+    # Wavelength axis rescaled to [-1, 1] keeps the polynomial terms well conditioned
+    x = np.linspace(-1, 1, n_bins)
+    design = np.zeros((n_bins, order + 1))
+    for power in range(order + 1):
+        design[:, power] = model_flux * x**power
+
+    weighted_design = design * data_ivar[:, np.newaxis]
+    normal_matrix = design.T @ weighted_design
+    right_hand_side = weighted_design.T @ data_flux
+    coefficients = np.linalg.solve(normal_matrix, right_hand_side)
+
+    polynomial = np.zeros(n_bins)
+    for power in range(order + 1):
+        polynomial = polynomial + coefficients[power] * x**power
+    return polynomial
+
+
+def spectral_log_likelihood(model_flux, data_flux, data_ivar, noise_scale):
+    """Gaussian log-likelihood of the data given the calibrated model, with errors x noise_scale.
+
+    The calibration polynomial is refitted for each model. It does not depend on noise_scale,
+    because scaling every weight by the same factor leaves the best fit unchanged. Terms that
+    do not depend on the model are dropped.
+    Inputs: model_flux, data_flux, data_ivar: as in calibration_polynomial;
+            noise_scale: error multiplier (dimensionless, positive).
+    Returns: log-likelihood (dimensionless) summed over bins with data_ivar > 0.
+    """
+    polynomial = calibration_polynomial(model_flux, data_flux, data_ivar)
+    residuals = data_flux - model_flux * polynomial
+    good = data_ivar > 0
+    chi2_value = np.sum(residuals[good] ** 2 * data_ivar[good]) / noise_scale**2
+    return -0.5 * chi2_value - good.sum() * np.log(noise_scale)
+
+
+# Redshift is fixed to the spectroscopic value, so it leaves the list; veldisp and noise_scale join it
+SPECTRAL_DIMS = []
+for dimension in DIMS:
+    if dimension != "z":
+        SPECTRAL_DIMS.append(dimension)
+SPECTRAL_DIMS.append("veldisp")
+SPECTRAL_DIMS.append("noise_scale")
+
+
+def spectral_components(cube, redshift):
+    """Bagpipes components, drawn parameters and noise scale for one spectral-fit unit-cube point.
+
+    The SFH, metallicity, dust and nebular part is the training prior (components) at the fixed
+    spectroscopic redshift; veldisp and noise_scale are the spectral nuisance parameters.
+    Inputs: cube: unit-cube values (dimensionless, in [0, 1)) ordered as SPECTRAL_DIMS;
+            redshift: spectroscopic redshift (dimensionless).
+    Returns: (bagpipes_components, drawn, noise_scale). The components are as in components() plus
+             veldisp [km/s]; drawn is as in components() plus veldisp [km/s]; noise_scale is the error
+             multiplier (dimensionless, 1 to 5).
+    """
+    cube_by_name = dict(zip(SPECTRAL_DIMS, cube))
+    unit_vector = np.zeros(len(DIMS))
+    for dimension_index, dimension in enumerate(DIMS):
+        if dimension == "z":
+            # components() ignores this value, because fixed_redshift replaces the drawn redshift
+            unit_vector[dimension_index] = IGNORED_REDSHIFT_DRAW
+        else:
+            unit_vector[dimension_index] = cube_by_name[dimension]
+
+    bagpipes_components, drawn = components(unit_vector, fixed_redshift=redshift)
+    veldisp = uniform(cube_by_name["veldisp"], *VELDISP_RANGE)
+    bagpipes_components["veldisp"] = veldisp
+    drawn["veldisp"] = veldisp
+    # Uniform in log10 so that small and large error multipliers are equally likely per decade
+    noise_scale = 10 ** uniform(cube_by_name["noise_scale"], *LOG_NOISE_SCALE_RANGE)
+    return bagpipes_components, drawn, noise_scale
+
+
+def compare_with_firefly(bagpipes_age_gyr, bagpipes_metallicity, firefly_age_years, firefly_metallicity):
+    """Bagpipes vs Firefly mass-weighted age and metallicity (Z/Z_sun, both linear).
+
+    Firefly missing values (-9999) become NaN, and the consistency flag is then NA, not False.
+    Inputs: bagpipes_age_gyr [Gyr]; bagpipes_metallicity [Z/Z_sun]; firefly_age_years [yr];
+            firefly_metallicity [Z/Z_sun]; arrays of equal length.
+    Returns: DataFrame with delta_log_age and delta_log_metallicity [dex] (Bagpipes minus Firefly)
+             and firefly_consistent (pandas boolean, NA where Firefly is missing).
+    """
+    firefly_age_years = np.where(firefly_age_years > FIREFLY_MISSING, firefly_age_years, np.nan)
+    firefly_metallicity = np.where(firefly_metallicity > FIREFLY_MISSING, firefly_metallicity, np.nan)
+
+    delta_log_age = np.log10(bagpipes_age_gyr * GYR_TO_YEARS) - np.log10(firefly_age_years)
+    delta_log_metallicity = np.log10(bagpipes_metallicity) - np.log10(firefly_metallicity)
+
+    consistent = []
+    for age_offset, metallicity_offset in zip(delta_log_age, delta_log_metallicity):
+        if np.isnan(age_offset) or np.isnan(metallicity_offset):
+            consistent.append(pd.NA)
+        else:
+            consistent.append(bool(abs(age_offset) < MAX_DELTA_LOG_AGE
+                                   and abs(metallicity_offset) < MAX_DELTA_LOG_METALLICITY))
+
+    return pd.DataFrame({
+        "delta_log_age": delta_log_age,
+        "delta_log_metallicity": delta_log_metallicity,
+        "firefly_consistent": pd.array(consistent, dtype="boolean"),
+    })
+
+
+def split_by_hash(specobjid):
+    """'validation' or 'test' from a hash of the SDSS specobjid.
+
+    Depends only on the galaxy itself, so adding galaxies later never moves an existing one.
+    Inputs: specobjid: SDSS spectroscopic object identifier (integer).
+    Returns: the string "validation" or "test", about half of the galaxies each.
+    """
+    digest = hashlib.md5(str(int(specobjid)).encode()).hexdigest()
+    hash_value = int(digest[:HASH_HEX_DIGITS], 16)     # base 16: the digest is hexadecimal
+    if hash_value % SPLIT_MODULUS == 0:
+        return "validation"
+    return "test"
