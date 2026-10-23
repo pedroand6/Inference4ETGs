@@ -1083,20 +1083,24 @@ def make_mock_spectrum(cube, redshift, template_spectrum, rng):
 
 
 def save_fit(path, posterior, unit_cube_samples, metadata):
-    """Write posterior labels, unit-cube samples and fit metadata to one HDF5 file.
+    """Write posterior labels, unit-cube samples and fit metadata to one HDF5 file, all or nothing.
 
+    The file is written as path + ".tmp" and renamed to path only once complete, so an interrupted
+    or failed write never leaves a partial file at path (which would count as a finished job).
     Inputs: path: output file path (str); posterior: DataFrame of labels, one column per label;
             unit_cube_samples: unit-cube points (dimensionless, shape (n_samples, len(SPECTRAL_DIMS)));
             metadata: dict of scalars (converged, run_time [s], n_iterations, log_evidence, redshift).
-    Returns: None. An existing file at path is overwritten.
+    Returns: None. An existing file at path is replaced.
     """
-    with h5py.File(path, "w") as output:
+    temporary_path = path + ".tmp"
+    with h5py.File(temporary_path, "w") as output:
         output.create_dataset("unit_cube_samples", data=unit_cube_samples)
         labels_group = output.create_group("posterior")
         for column in posterior.columns:
             labels_group.create_dataset(column, data=posterior[column].to_numpy(dtype=float))
         for key, value in metadata.items():
             output.attrs[key] = value
+    os.replace(temporary_path, path)
 
 
 def load_fit(path):
@@ -1119,8 +1123,9 @@ def load_fit(path):
 def fit_and_save(job, output_directory, max_iterations, n_live_points=N_LIVE_POINTS):
     """Fit one job and save <output_directory>/<job_id>.h5. Never raises.
 
-    Skips jobs whose file already exists, so a batch can be re-run with more galaxies. A failed fit
-    comes back with status "failed" and the error text instead of an exception.
+    Skips jobs whose readable file already exists, so a batch can be re-run with more galaxies. An
+    unreadable file does not count as finished: the job is fitted again and the file replaced. A failed
+    fit comes back with status "failed" and the error text instead of an exception.
     Inputs: job: dict with job_id (str), spectrum (dict as from prepare_spectrum) and redshift (dimensionless);
             output_directory: folder for the .h5 file and the MultiNest files (str); max_iterations: MultiNest
             iteration limit (count); n_live_points: live points (count).
@@ -1132,12 +1137,16 @@ def fit_and_save(job, output_directory, max_iterations, n_live_points=N_LIVE_POI
     summary = {"job_id": job["job_id"], "status": None, "converged": None,
                "run_time": None, "n_iterations": None, "error": None}
 
-    # 2. Skip finished jobs; their run details come from the file
+    # 2. Skip finished jobs; their run details come from the file. Any failure to read it (damaged,
+    # truncated or missing fields) means the job is not finished, so it is fitted again below
     if os.path.exists(output_path):
-        _, metadata = load_fit(output_path)
-        summary.update(status="skipped", converged=metadata["converged"],
-                       run_time=metadata["run_time"], n_iterations=metadata["n_iterations"])
-        return summary
+        try:
+            _, metadata = load_fit(output_path)
+            summary.update(status="skipped", converged=metadata["converged"],
+                           run_time=metadata["run_time"], n_iterations=metadata["n_iterations"])
+            return summary
+        except Exception:
+            pass
 
     # 3. Fit, label the posterior and save; any error is recorded rather than raised
     try:

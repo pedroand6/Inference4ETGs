@@ -1,6 +1,7 @@
 """Tests for synthetic_model.py. Run from Synthetic_domain/: ../.venv/bin/python -m pytest -v"""
 
 import json
+import os
 
 import extinction
 import numpy as np
@@ -422,6 +423,32 @@ def test_fit_and_save_skips_existing_output(tmp_path):
 
     assert summary["status"] == "skipped"
     assert summary["run_time"] == 5.0
+
+
+def test_save_fit_failure_leaves_no_file_at_the_final_path(tmp_path):
+    """A write that fails part-way leaves no file at the final path, so the job is not taken as done."""
+    posterior = pd.DataFrame({"mw_age": [1.0, 2.0]})
+    path = str(tmp_path / "failed_write.h5")
+    with pytest.raises(TypeError):
+        sm.save_fit(path, posterior, np.zeros((2, len(sm.SPECTRAL_DIMS))), {"converged": object()})
+    assert not os.path.exists(path)
+
+
+def test_fit_and_save_refits_a_truncated_output_file(tmp_path):
+    """An unreadable .h5 left by an interrupted run is not counted as done: the job is fitted again."""
+    job, _ = mock_job("truncated", np.random.default_rng(12))
+    posterior = pd.DataFrame({"mw_age": [1.0, 2.0]})
+    metadata = {"converged": True, "run_time": 5.0, "n_iterations": 10, "log_evidence": -1.0}
+    path = str(tmp_path / "truncated.h5")
+    sm.save_fit(path, posterior, np.zeros((2, len(sm.SPECTRAL_DIMS))), metadata)
+    with open(path, "r+b") as damaged:
+        damaged.truncate(os.path.getsize(path) // 2)
+
+    summary = sm.fit_and_save(job, str(tmp_path), max_iterations=100, n_live_points=40)
+
+    assert summary["status"] == "fitted", summary["error"]
+    posterior, _ = sm.load_fit(path)
+    assert len(posterior) > 0
 
 
 def test_summarise_posterior_percentiles():
