@@ -391,14 +391,104 @@ def test_compare_with_firefly_missing_values_are_na():
 
 
 def test_split_by_hash_is_stable():
-    identifiers = [299489677444933632, 299490502078654464, 1237645879578460255, 42]
-    first = []
-    for identifier in identifiers:
-        first.append(sm.split_by_hash(identifier))
-    # Same answer when asked again, in another order, with other galaxies around
-    for identifier, expected in zip(reversed(identifiers), reversed(first)):
-        assert sm.split_by_hash(identifier) == expected
-    assert set(first).issubset({"validation", "test"})
+    """Known string ids (as the notebook passes them, one above the int64 range) keep their label forever."""
+    expected_labels = {
+        "299489677444933632": "validation",
+        "299490502078654464": "validation",
+        "1237645879578460255": "test",
+        "42": "validation",
+        "10310136606464692224": "test",    # eBOSS id above the int64 maximum (9.22e18)
+    }
+    for identifier, expected in expected_labels.items():
+        assert sm.split_by_hash(identifier) == expected, identifier
+    # Same answer in another order and as an integer, with other galaxies around
+    for identifier in reversed(list(expected_labels)):
+        assert sm.split_by_hash(int(identifier)) == expected_labels[identifier]
+
+
+def test_split_by_hash_is_balanced():
+    """About half of 1,000+ ids go to validation, as the notebook's split assumes."""
+    n_ids = 2000
+    labels = [sm.split_by_hash(str(299489677444933632 + 1000003 * index)) for index in range(n_ids)]
+    validation_fraction = labels.count("validation") / n_ids
+    assert set(labels) == {"validation", "test"}
+    assert 0.4 < validation_fraction < 0.6
+
+
+def write_ev_file(basename, modes):
+    """Write an ev.dat in MultiNest's format: parameters, log-likelihood, log-weight, then the mode number.
+
+    Inputs: basename: directory prefix (str); modes: mode number of each row (list of int), in file order.
+    Returns: None.
+    """
+    n_parameters = 3
+    rows = []
+    for row_index, mode in enumerate(modes):
+        rows.append([0.5] * n_parameters + [-100.0 + row_index, -5.0, mode])
+    np.savetxt(basename + "ev.dat", np.array(rows), fmt="%28.18E")
+
+
+def test_multinest_iterations_of_a_single_mode_run_is_the_row_count(tmp_path):
+    basename = str(tmp_path) + "/"
+    write_ev_file(basename, [1] * 7)
+    assert sm.multinest_iterations(basename) == 7
+
+
+def test_multinest_iterations_counts_one_iteration_for_all_modes_of_a_step(tmp_path):
+    """Two modes alive for 3 iterations, then mode 1 stops and mode 2 runs 2 more: 5 iterations, 8 rows."""
+    basename = str(tmp_path) + "/"
+    write_ev_file(basename, [1, 2, 1, 2, 1, 2, 2, 2])
+    assert sm.multinest_iterations(basename) == 5
+
+
+def test_multinest_iterations_handles_a_mode_that_appears_later(tmp_path):
+    """A mode that splits off in iteration 3 adds rows, not iterations: 1,1 then 1,2 then 1,2."""
+    basename = str(tmp_path) + "/"
+    write_ev_file(basename, [1, 1, 1, 2, 1, 2])
+    assert sm.multinest_iterations(basename) == 4
+
+
+def test_multinest_iterations_of_a_one_row_file(tmp_path):
+    basename = str(tmp_path) + "/"
+    write_ev_file(basename, [1])
+    assert sm.multinest_iterations(basename) == 1
+
+
+# =============================================================================
+# Mass rescaling
+# =============================================================================
+def label_table(n_rows):
+    """Table with every MASS_DEPENDENT_LABELS column at 10.0 and two columns that must not move."""
+    table = pd.DataFrame({"mw_age": np.full(n_rows, 5.0), "zmet_bin_00": np.full(n_rows, 1.0)})
+    for label in sm.MASS_DEPENDENT_LABELS:
+        table[label] = 10.0
+    return table
+
+
+def test_rescale_mass_labels_fainter_galaxy_has_lower_mass():
+    """An observed galaxy 2.5 mag fainter than its model has 10**-1 times the mass: -1 dex."""
+    table = label_table(3)
+    rescaled = sm.rescale_mass_labels(table, 2.5)
+    for label in sm.MASS_DEPENDENT_LABELS:
+        assert np.allclose(rescaled[label], 9.0), label
+
+
+def test_rescale_mass_labels_leaves_other_columns_and_the_input_alone():
+    table = label_table(3)
+    rescaled = sm.rescale_mass_labels(table, 2.5)
+    assert (rescaled["mw_age"] == 5.0).all()
+    assert (rescaled["zmet_bin_00"] == 1.0).all()
+    for label in sm.MASS_DEPENDENT_LABELS:
+        assert (table[label] == 10.0).all(), label    # the input is not modified
+
+
+def test_rescale_mass_labels_takes_one_offset_per_row_and_nan_gives_nan():
+    table = label_table(3)
+    rescaled = sm.rescale_mass_labels(table, np.array([-2.5, 0.0, np.nan]))
+    assert np.allclose(rescaled["log_mstar"].iloc[:2], [11.0, 10.0])
+    assert np.isnan(rescaled["log_mstar"].iloc[2])
+    assert np.isnan(rescaled["logsfr_bin_00"].iloc[2])
+    assert rescaled["mw_age"].iloc[2] == 5.0
 
 
 # =============================================================================
@@ -437,6 +527,8 @@ def test_fit_and_save_smoke_run(tmp_path):
     for column in ("mw_age", "Z_fin", "f_old", "frac_bin_00", "model_r", "veldisp"):
         assert column in posterior.columns
     assert metadata["converged"] in (True, False)
+    assert metadata["max_iterations"] == 100
+    assert metadata["n_iterations"] <= 100
 
 
 def test_fit_and_save_skips_existing_output(tmp_path):

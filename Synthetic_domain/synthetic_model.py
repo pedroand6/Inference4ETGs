@@ -32,7 +32,10 @@ UNIVERSE_AGE_MARGIN = 0.1        # [Gyr] oldest bin ends this long after the Big
 
 AGE_BIN_CENTRES = np.array([0.007, 0.021, 0.0425, 0.076, 0.1145, 0.1615, 0.23, 0.345,
                             0.545, 0.865, 1.37, 2.17, 3.44, 5.455, 8.645, 14.2])   # [Gyr ago]
-N_BINS = len(AGE_BIN_CENTRES)
+N_BINS = len(AGE_BIN_CENTRES)    # 16 labelled bins, but only 15 are ever populated (see below)
+# The last centre (14.2 Gyr) is older than the Universe for every z >= 0.002 (13.34 Gyr minus the margin), so
+# *_bin_15 is always padding. The oldest populated bin runs from 7.05 Gyr to the age of the Universe, which
+# caps the mass-weighted age (mw_age) at about 10.2 Gyr at z = 0.002. Kept as in the legacy notebook.
 LABEL_EDGES = [0.1, 1.0]         # [Gyr] f_young < 0.1 < f_mid < 1.0 < f_old
 
 Z_RANGE = (0.002, 0.7)                               # redshift
@@ -279,6 +282,7 @@ MODULE_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 FILTER_LIST_FILE = os.path.join(MODULE_DIRECTORY, "splus-filters", "splus_filters.txt")
 SPEED_OF_LIGHT = 2.99792458e18   # [Angstrom / s]
 MAGNITUDES_PER_DEX = 2.5         # [mag/dex] magnitude change per decade of flux
+DEX_PER_MAGNITUDE = 1 / MAGNITUDES_PER_DEX   # [dex/mag] = 0.4: flux ratio is 10**(-0.4 * magnitude)
 AB_ZERO_POINT = 48.60            # [mag] AB offset for flux density f_nu in erg/s/cm2/Hz
 
 # S-PLUS bands, in the order of splus_filters.txt
@@ -318,8 +322,25 @@ for bin_index in range(N_BINS):
     MASS_DEPENDENT_LABELS.append(f"logsfr_bin_{bin_index:02d}")
 
 
+def rescale_mass_labels(table, magnitude_offset):
+    """Copy of a label table with the mass-like labels moved to the brightness of an observed galaxy.
+
+    A galaxy fainter than its model by magnitude_offset has 10**(-0.4 * offset) times the mass,
+    so every MASS_DEPENDENT_LABELS column changes by -0.4 * offset dex.
+    Inputs: table: DataFrame with the MASS_DEPENDENT_LABELS columns [log M_sun or log M_sun/yr];
+            magnitude_offset: m_observed - m_model [mag], one number for every row or one per row.
+    Returns: new DataFrame, same columns and index; the mass-like columns shifted, the others
+             unchanged. A NaN offset gives NaN labels in that row.
+    """
+    shifted = table.copy()
+    offset = np.asarray(magnitude_offset, dtype=float)
+    for label in MASS_DEPENDENT_LABELS:
+        shifted[label] = table[label].to_numpy(dtype=float) - DEX_PER_MAGNITUDE * offset
+    return shifted
+
+
 def bin_labels(fractions, metallicities, edges, log_mass_formed=LOG_MASS_FORMED):
-    """16-bin labels, youngest bin first.
+    """Age-bin labels (N_BINS columns of each kind), youngest bin first.
 
     Inputs: fractions: mass formed per existing bin (any normalisation, dimensionless);
             metallicities: Z/Z_sun per existing bin; edges: bin edges [Gyr ago];
@@ -691,7 +712,6 @@ def coverage_test(observed_magnitudes, observed_errors, detected, observed_z, ob
 # 5. Spectra, spectral likelihood, Firefly comparison and split
 # =============================================================================
 R_V = 3.1                                # [dimensionless] CCM89 R_V = A_V / E(B-V), as in extinctions.py
-DEX_PER_MAGNITUDE = 1 / MAGNITUDES_PER_DEX   # [dex/mag] = 0.4: flux ratio is 10**(-0.4 * magnitude)
 GYR_TO_YEARS = 1e9                       # [yr/Gyr]
 
 # S-PLUS wavelengths [Angstrom] at which the CCM89 law is evaluated, as in extinctions.py
@@ -965,6 +985,26 @@ MEDIAN_PERCENTILE = 50           # central posterior summary (percent)
 HIGH_PERCENTILE = 84             # upper posterior summary (percent), 1 sigma
 
 
+def multinest_iterations(output_basename):
+    """Number of outer-loop iterations of a finished MultiNest run.
+
+    MultiNest writes one row to ev.dat for every dead point, and with multimodal=True it removes one
+    dead point per active mode in each iteration, so counting rows overstates the iterations as soon
+    as the posterior splits into several modes. Inside one iteration the rows follow the mode order
+    (the last column of ev.dat is the mode number, increasing), so every row whose mode number is not
+    larger than the previous row's starts a new iteration. This is the loop counter that the
+    max_iter limit is compared with in MultiNest's nested.F90 (the resume file only stores the
+    number of dead points, not the iterations).
+    Inputs: output_basename: directory prefix of the MultiNest files (str), as given to fit_spectrum.
+    Returns: iterations (count); 0 if ev.dat has no rows.
+    """
+    mode_of_each_row = np.loadtxt(output_basename + "ev.dat", usecols=-1, ndmin=1)
+    if len(mode_of_each_row) == 0:
+        return 0
+    starts_new_iteration = mode_of_each_row[1:] <= mode_of_each_row[:-1]
+    return 1 + int(starts_new_iteration.sum())
+
+
 def fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_points=N_LIVE_POINTS):
     """MultiNest fit of one prepared spectrum under the training prior at a fixed redshift.
 
@@ -976,7 +1016,8 @@ def fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_poi
             MultiNest files (str); max_iterations: MultiNest iteration limit (count);
             n_live_points: live points (count).
     Returns: dict with samples (unit-cube points, shape (n_samples, len(SPECTRAL_DIMS))), log_evidence
-             (dimensionless ln Z), n_iterations (count), converged (bool) and run_time [s].
+             (dimensionless ln Z), n_iterations (count, from multinest_iterations), converged (bool: the
+             run stopped before max_iterations) and run_time [s].
     """
     # pymultinest loads the MultiNest C library on import, so it needs LD_LIBRARY_PATH (set by the kernel)
     import pymultinest
@@ -1020,9 +1061,8 @@ def fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_poi
     )
     run_time = time.time() - start
 
-    # 4. Each ev.dat line is one MultiNest iteration (one dead point); hitting the limit means no convergence
-    with open(output_basename + "ev.dat") as dead_points:
-        n_iterations = sum(1 for _ in dead_points)
+    # 4. Hitting the iteration limit means the run stopped before it converged
+    n_iterations = multinest_iterations(output_basename)
     return {
         "samples": result["samples"],
         "log_evidence": result["logZ"],
@@ -1109,7 +1149,7 @@ def save_fit(path, posterior, unit_cube_samples, metadata):
     or failed write never leaves a partial file at path (which would count as a finished job).
     Inputs: path: output file path (str); posterior: DataFrame of labels, one column per label;
             unit_cube_samples: unit-cube points (dimensionless, shape (n_samples, len(SPECTRAL_DIMS)));
-            metadata: dict of scalars (converged, run_time [s], n_iterations, log_evidence, redshift).
+            metadata: dict of scalars (converged, run_time [s], n_iterations, max_iterations, log_evidence, redshift).
     Returns: None. An existing file at path is replaced.
     """
     temporary_path = path + ".tmp"
@@ -1174,8 +1214,8 @@ def fit_and_save(job, output_directory, max_iterations, n_live_points=N_LIVE_POI
         fit = fit_spectrum(job["spectrum"], job["redshift"], multinest_basename, max_iterations, n_live_points)
         posterior = posterior_labels(fit["samples"], job["redshift"])
         metadata = {"converged": fit["converged"], "run_time": fit["run_time"],
-                    "n_iterations": fit["n_iterations"], "log_evidence": fit["log_evidence"],
-                    "redshift": job["redshift"]}
+                    "n_iterations": fit["n_iterations"], "max_iterations": max_iterations,
+                    "log_evidence": fit["log_evidence"], "redshift": job["redshift"]}
         save_fit(output_path, posterior, fit["samples"], metadata)
         summary.update(status="fitted", converged=fit["converged"],
                        run_time=fit["run_time"], n_iterations=fit["n_iterations"])
