@@ -135,3 +135,69 @@ def test_simulate_models_returns_labels_and_magnitudes():
         fraction_columns.append(f"frac_bin_{bin_index:02d}")
     assert np.allclose(models[fraction_columns].sum(axis=1), 1.0)
     assert np.isfinite(models[sm.BANDS].to_numpy()).all()
+
+
+# =============================================================================
+# Detection rule and noise model
+# =============================================================================
+DR3_FILE = "dr3_corrected.csv"
+
+
+@pytest.fixture(scope="module")
+def dr3_galaxies():
+    catalogue = pd.read_csv(DR3_FILE)
+    return catalogue[catalogue["PROB_GAL"] > 0.8].reset_index(drop=True)
+
+
+def test_detected_bands_rule():
+    magnitudes = np.array([[20.0, 99.0, 20.0, np.nan]])
+    errors = np.array([[0.1, 0.1, 1.5, 0.1]])
+    assert sm.detected_bands(magnitudes, errors).tolist() == [[True, False, False, False]]
+
+
+def test_noise_model_reproduces_dr3_detection_rate_and_median_error(dr3_galaxies):
+    noise_table = sm.fit_noise_model(dr3_galaxies)
+    rng = np.random.default_rng(3)
+
+    # Use DR3's own measured magnitudes as "true" magnitudes
+    true_magnitudes = np.full((len(dr3_galaxies), len(sm.BANDS)), np.nan)
+    observed_errors = np.full((len(dr3_galaxies), len(sm.BANDS)), np.nan)
+    for band_index, band in enumerate(sm.BANDS):
+        magnitudes = dr3_galaxies[f"{band}_auto"].to_numpy()
+        errors = dr3_galaxies[f"e_{band}_auto"].to_numpy()
+        measured = (magnitudes > 0) & (magnitudes < sm.UNDETECTED_MAGNITUDE) & (errors > 0)
+        true_magnitudes[measured, band_index] = magnitudes[measured]
+        observed_errors[measured, band_index] = errors[measured]
+
+    _, simulated_errors, simulated_detected = sm.add_splus_noise(true_magnitudes, noise_table, rng)
+
+    for band_index, band in enumerate(sm.BANDS):
+        measured = np.isfinite(true_magnitudes[:, band_index])
+        observed_detected = observed_errors[measured, band_index] < sm.MAX_DETECTED_ERROR
+        observed_rate = observed_detected.mean()
+        simulated_rate = simulated_detected[measured, band_index].mean()
+        assert abs(simulated_rate - observed_rate) < 0.05, band
+
+        observed_median = np.median(observed_errors[measured, band_index][observed_detected])
+        simulated_median = np.nanmedian(simulated_errors[measured & simulated_detected[:, band_index], band_index])
+        assert abs(simulated_median / observed_median - 1) < 0.05, band
+
+
+def test_noise_model_marks_very_faint_models_undetected(dr3_galaxies):
+    noise_table = sm.fit_noise_model(dr3_galaxies)
+    very_faint = np.full((10, len(sm.BANDS)), 35.0)
+    noisy, errors, detected = sm.add_splus_noise(very_faint, noise_table, np.random.default_rng(4))
+    assert not detected.any()
+    assert np.isnan(noisy).all()
+
+
+def test_scale_to_observed_r_takes_r_from_galaxies_at_similar_redshift():
+    model_magnitudes = np.full((5, len(sm.BANDS)), 25.0)
+    model_z = np.full(5, 0.3)
+    catalogue_r = np.array([18.0, 19.0, 30.0])
+    catalogue_z = np.array([0.31, 0.29, 0.9])     # the third galaxy is outside the window
+    scaled, offsets = sm.scale_to_observed_r(model_magnitudes, model_z, catalogue_r, catalogue_z,
+                                             np.random.default_rng(5))
+    r_index = sm.BANDS.index("r")
+    assert set(scaled[:, r_index]).issubset({18.0, 19.0})
+    assert np.allclose(scaled[:, 0] - model_magnitudes[:, 0], offsets)

@@ -363,3 +363,167 @@ def simulate_models(unit_vectors):
             row[band] = magnitude
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+# =============================================================================
+# 3. Detection rule and S-PLUS noise model
+# =============================================================================
+UNDETECTED_MAGNITUDE = 50.0      # S-PLUS writes 99 for non-detections
+MAX_DETECTED_ERROR = 1.0         # [mag] error >= 1 mag (S/N < 1) counts as a non-detection
+ERROR_FLOOR = 0.05               # [mag] added in quadrature; stands in for model error
+MIN_DETECTED_BANDS = 6
+
+Z_SIGMA = 2.0                    # redshift window: |z_model - zml| < Z_SIGMA * zml_error,
+DZ_MIN, DZ_MAX = 0.02, 0.10      # limited to [DZ_MIN, DZ_MAX]
+SIGMA_Z = 0.025                  # assumed zml_error = SIGMA_Z * (1 + zml)
+
+NOISE_MAGNITUDE_RANGE = (10.0, 30.0)   # [mag] range of the noise-model bins
+NOISE_BIN_WIDTH = 0.25                 # [mag]
+NOISE_MIN_GALAXIES = 20                # bins with fewer galaxies are not used
+NOISE_N_QUANTILES = 21                 # quantiles of log10(error) stored per bin
+MAGNITUDE_TO_RELATIVE_FLUX = 2.5 / np.log(10)   # sigma_mag = 1.0857 * sigma_flux / flux
+SCALING_MAX_DZ = 0.05                  # redshift window for borrowing a real r magnitude
+
+
+def detected_bands(magnitudes, errors):
+    """True where a band is detected: magnitude measured and 0 < error < MAX_DETECTED_ERROR (NaN -> False)."""
+    measured = magnitudes < UNDETECTED_MAGNITUDE
+    good_error = (errors > 0) & (errors < MAX_DETECTED_ERROR)
+    return measured & good_error
+
+
+def redshift_window(photometric_z):
+    """Half-width of the model redshift window around each photometric redshift."""
+    assumed_error = SIGMA_Z * (1 + photometric_z)
+    return np.clip(Z_SIGMA * assumed_error, DZ_MIN, DZ_MAX)
+
+
+def noise_bin_index(magnitudes):
+    """Index of the noise-model bin of each magnitude (may fall outside the table)."""
+    return np.floor((magnitudes - NOISE_MAGNITUDE_RANGE[0]) / NOISE_BIN_WIDTH).astype(int)
+
+
+def quantile_column_names():
+    """Names of the stored log-error quantile columns: log_error_q00 ... log_error_q20."""
+    names = []
+    for quantile_index in range(NOISE_N_QUANTILES):
+        names.append(f"log_error_q{quantile_index:02d}")
+    return names
+
+
+def fit_noise_model(catalogue):
+    """Empirical error distribution per band and 0.25 mag bin of measured magnitude.
+
+    catalogue: S-PLUS table with <band>_auto and e_<band>_auto columns.
+    Returns one row per populated (band, bin) with 21 quantiles of log10(error).
+    A band is later detected when its drawn error is below MAX_DETECTED_ERROR, so each bin's
+    detection probability is the share of its errors below 1 mag.
+    """
+    quantile_levels = np.linspace(0, 1, NOISE_N_QUANTILES)
+    n_bins = int(round((NOISE_MAGNITUDE_RANGE[1] - NOISE_MAGNITUDE_RANGE[0]) / NOISE_BIN_WIDTH))
+    rows = []
+    for band in BANDS:
+        magnitudes = catalogue[f"{band}_auto"].to_numpy()
+        errors = catalogue[f"e_{band}_auto"].to_numpy()
+        measured = (magnitudes > 0) & (magnitudes < UNDETECTED_MAGNITUDE) & (errors > 0)
+        bin_of_galaxy = noise_bin_index(magnitudes[measured])
+        log_errors = np.log10(errors[measured])
+
+        for bin_index in range(n_bins):
+            in_bin = bin_of_galaxy == bin_index
+            if in_bin.sum() < NOISE_MIN_GALAXIES:
+                continue
+            row = {
+                "band": band,
+                "magnitude_low": NOISE_MAGNITUDE_RANGE[0] + bin_index * NOISE_BIN_WIDTH,
+                "magnitude_high": NOISE_MAGNITUDE_RANGE[0] + (bin_index + 1) * NOISE_BIN_WIDTH,
+                "n_galaxies": int(in_bin.sum()),
+            }
+            quantiles = np.quantile(log_errors[in_bin], quantile_levels)
+            for name, value in zip(quantile_column_names(), quantiles):
+                row[name] = value
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def draw_log_errors(magnitudes, band_table, rng):
+    """Draw log10(error) for each magnitude from its bin's quantiles (inverse-CDF sampling).
+
+    Magnitudes brighter than the first populated bin use that bin; fainter than the last one,
+    or NaN, get NaN (undetected).
+    """
+    table_bins = noise_bin_index(band_table["magnitude_low"].to_numpy() + NOISE_BIN_WIDTH / 2)
+    quantile_table = band_table[quantile_column_names()].to_numpy()
+
+    log_errors = np.full(len(magnitudes), np.nan)
+    finite = np.isfinite(magnitudes)
+    model_bins = np.full(len(magnitudes), -1)
+    model_bins[finite] = noise_bin_index(magnitudes[finite])
+
+    for model_index in np.flatnonzero(finite):
+        if model_bins[model_index] > table_bins[-1]:
+            continue    # fainter than any S-PLUS galaxy with a measurement
+        # Nearest populated bin at or below this one; the brightest bin covers anything brighter
+        row_index = np.searchsorted(table_bins, model_bins[model_index], side="right") - 1
+        row_index = max(row_index, 0)
+        quantile_position = rng.random() * (NOISE_N_QUANTILES - 1)
+        lower = int(np.floor(quantile_position))
+        upper = min(lower + 1, NOISE_N_QUANTILES - 1)
+        weight = quantile_position - lower
+        row = quantile_table[row_index]
+        log_errors[model_index] = row[lower] + weight * (row[upper] - row[lower])
+    return log_errors
+
+
+def add_splus_noise(magnitudes, noise_table, rng):
+    """S-PLUS-like errors, flux noise and non-detections for model magnitudes (n_models, 12).
+
+    Returns (noisy_magnitudes, errors, detected); undetected entries are NaN in the first two.
+    """
+    n_models = len(magnitudes)
+    noisy_magnitudes = np.full(magnitudes.shape, np.nan)
+    errors = np.full(magnitudes.shape, np.nan)
+    detected = np.zeros(magnitudes.shape, dtype=bool)
+
+    for band_index, band in enumerate(BANDS):
+        band_table = noise_table[noise_table["band"] == band]
+        true_magnitudes = magnitudes[:, band_index]
+        band_errors = 10 ** draw_log_errors(true_magnitudes, band_table, rng)
+
+        # Gaussian noise in flux, converted back to magnitudes
+        relative_flux_error = band_errors / MAGNITUDE_TO_RELATIVE_FLUX
+        flux_ratio = 1 + rng.normal(0, 1, n_models) * relative_flux_error
+        positive_flux = flux_ratio > 0
+        band_detected = (band_errors < MAX_DETECTED_ERROR) & positive_flux
+
+        noisy_band = np.full(n_models, np.nan)
+        noisy_band[band_detected] = true_magnitudes[band_detected] - 2.5 * np.log10(flux_ratio[band_detected])
+        noisy_magnitudes[:, band_index] = noisy_band
+        errors[band_detected, band_index] = band_errors[band_detected]
+        detected[:, band_index] = band_detected
+    return noisy_magnitudes, errors, detected
+
+
+def scale_to_observed_r(model_magnitudes, model_z, catalogue_r, catalogue_z, rng, max_dz=SCALING_MAX_DZ):
+    """Shift each model to the r magnitude of a random real galaxy with |zml - z| < max_dz.
+
+    Gives synthetic galaxies a realistic brightness (and so realistic errors) at each redshift.
+    Returns (scaled_magnitudes, offsets) with offsets = m_scaled - m_model; NaN if no galaxy is close.
+    """
+    r_index = BANDS.index("r")
+    usable = np.isfinite(catalogue_r) & (catalogue_r < UNDETECTED_MAGNITUDE) & np.isfinite(catalogue_z)
+    order = np.argsort(catalogue_z[usable])
+    sorted_z = catalogue_z[usable][order]
+    sorted_r = catalogue_r[usable][order]
+
+    offsets = np.full(len(model_magnitudes), np.nan)
+    for model_index in range(len(model_magnitudes)):
+        first = np.searchsorted(sorted_z, model_z[model_index] - max_dz)
+        last = np.searchsorted(sorted_z, model_z[model_index] + max_dz)
+        if last == first:
+            continue
+        chosen = rng.integers(first, last)
+        offsets[model_index] = sorted_r[chosen] - model_magnitudes[model_index, r_index]
+
+    scaled_magnitudes = model_magnitudes + offsets[:, np.newaxis]
+    return scaled_magnitudes, offsets
