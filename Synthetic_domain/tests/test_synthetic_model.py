@@ -82,3 +82,56 @@ def test_fixed_redshift_overrides_the_drawn_redshift():
 
     assert bagpipes_components["redshift"] == 0.123
     assert drawn["z"] == 0.123
+
+
+# =============================================================================
+# Labels and magnitudes
+# =============================================================================
+def test_bin_labels_pad_missing_old_bins():
+    u = np.full(len(sm.DIMS), 0.5)
+    bagpipes_components, _ = sm.components(u, fixed_redshift=0.69)
+    fractions, metallicities, edges = sm.bins_from_components(bagpipes_components)
+    labels = sm.bin_labels(fractions, metallicities, edges)
+
+    n_existing = len(fractions)
+    assert n_existing < sm.N_BINS
+    total = 0.0
+    for bin_index in range(sm.N_BINS):
+        suffix = f"{bin_index:02d}"
+        total += labels[f"frac_bin_{suffix}"]
+        if bin_index < n_existing:
+            assert np.isfinite(labels[f"logsfr_bin_{suffix}"])
+            assert np.isfinite(labels[f"zmet_bin_{suffix}"])
+        else:
+            assert labels[f"frac_bin_{suffix}"] == 0.0
+            assert np.isnan(labels[f"logsfr_bin_{suffix}"])
+            assert np.isnan(labels[f"zmet_bin_{suffix}"])
+    assert np.isclose(total, 1.0)
+    assert list(labels) == sm.BIN_LABEL_COLUMNS
+
+
+def test_mass_weighted_metallicity_of_equal_bins_is_the_mean():
+    fractions = np.array([0.5, 0.5])
+    metallicities = np.array([1.0, 2.0])
+    assert np.isclose(sm.mass_weighted_metallicity(fractions, metallicities), 1.5)
+
+
+def test_ab_magnitudes_are_nan_when_any_flux_is_not_positive():
+    flux = np.full(len(sm.BANDS), 1e-17)
+    assert np.all(np.isfinite(sm.ab_magnitudes(flux)))
+    flux[3] = 0.0
+    assert np.all(np.isnan(sm.ab_magnitudes(flux)))
+
+
+def test_simulate_models_returns_labels_and_magnitudes():
+    unit_vectors = np.random.default_rng(2).random((4, len(sm.DIMS)))
+    models = sm.simulate_models(unit_vectors)
+
+    assert len(models) == 4
+    for column in ["z", "sfh_type", *sm.SUMMARY_LABEL_COLUMNS, *sm.BIN_LABEL_COLUMNS, *sm.BANDS]:
+        assert column in models.columns, column
+    fraction_columns = []
+    for bin_index in range(sm.N_BINS):
+        fraction_columns.append(f"frac_bin_{bin_index:02d}")
+    assert np.allclose(models[fraction_columns].sum(axis=1), 1.0)
+    assert np.isfinite(models[sm.BANDS].to_numpy()).all()

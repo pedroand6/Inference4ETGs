@@ -226,3 +226,140 @@ def bins_from_components(bagpipes_components):
         edges[bin_index] = component["age_min"]
         edges[bin_index + 1] = component["age_max"]
     return fractions, metallicities, edges
+
+
+# =============================================================================
+# 2. Labels, S-PLUS magnitudes and model simulation
+# =============================================================================
+MODULE_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+FILTER_LIST_FILE = os.path.join(MODULE_DIRECTORY, "splus-filters", "splus_filters.txt")
+SPEED_OF_LIGHT = 2.99792458e18   # [Angstrom / s]
+AB_ZERO_POINT = 48.60
+
+# S-PLUS bands, in the order of splus_filters.txt
+BANDS = ["u", "J0378", "J0395", "J0410", "J0430", "g", "J0515", "r", "J0660", "i", "J0861", "z"]
+
+FILTER_FILES = []
+for relative_path in np.loadtxt(FILTER_LIST_FILE, dtype="str"):
+    FILTER_FILES.append(os.path.join(MODULE_DIRECTORY, relative_path))
+
+
+def pivot_wavelength(filter_file):
+    """Pivot wavelength [Angstrom] of a filter curve file (wavelength, transmission)."""
+    wavelength, transmission = np.loadtxt(filter_file, unpack=True)
+    numerator = simpson(transmission * wavelength, x=wavelength)
+    denominator = simpson(transmission / wavelength, x=wavelength)
+    return np.sqrt(numerator / denominator)
+
+
+PIVOT_WAVELENGTHS = np.zeros(len(FILTER_FILES))
+for band_index, filter_file in enumerate(FILTER_FILES):
+    PIVOT_WAVELENGTHS[band_index] = pivot_wavelength(filter_file)
+
+SUMMARY_LABEL_COLUMNS = ["log_mstar", "log_sfr", "mw_age", "f_young", "f_mid", "f_old"]
+
+BIN_LABEL_COLUMNS = []
+for label_kind in ("frac_bin", "logsfr_bin", "zmet_bin"):
+    for bin_index in range(N_BINS):
+        BIN_LABEL_COLUMNS.append(f"{label_kind}_{bin_index:02d}")
+
+# Labels that scale with brightness: log value - 0.4 * (m_obs - m_model)
+MASS_DEPENDENT_LABELS = ["log_mstar", "log_sfr"]
+for bin_index in range(N_BINS):
+    MASS_DEPENDENT_LABELS.append(f"logsfr_bin_{bin_index:02d}")
+
+
+def bin_labels(fractions, metallicities, edges, log_mass_formed=LOG_MASS_FORMED):
+    """16-bin labels, youngest bin first.
+
+    fractions: mass formed per existing bin (any normalisation); metallicities: Z/Z_sun;
+    edges: [Gyr ago]. Bins that do not exist at this redshift get frac 0, logsfr and zmet NaN.
+    Returns a dict ordered as BIN_LABEL_COLUMNS.
+    """
+    n_existing = len(fractions)
+    normalised_fractions = fractions / fractions.sum()
+    widths_in_years = np.diff(edges) * 1e9
+
+    labels = {}
+    for bin_index in range(N_BINS):
+        if bin_index < n_existing:
+            labels[f"frac_bin_{bin_index:02d}"] = normalised_fractions[bin_index]
+        else:
+            labels[f"frac_bin_{bin_index:02d}"] = 0.0
+
+    for bin_index in range(N_BINS):
+        if bin_index < n_existing:
+            mass_in_bin = 10**log_mass_formed * normalised_fractions[bin_index]
+            labels[f"logsfr_bin_{bin_index:02d}"] = np.log10(mass_in_bin / widths_in_years[bin_index])
+        else:
+            labels[f"logsfr_bin_{bin_index:02d}"] = np.nan
+
+    for bin_index in range(N_BINS):
+        if bin_index < n_existing:
+            labels[f"zmet_bin_{bin_index:02d}"] = metallicities[bin_index]
+        else:
+            labels[f"zmet_bin_{bin_index:02d}"] = np.nan
+    return labels
+
+
+def summary_labels(bagpipes_sfh):
+    """log_mstar (living), log_sfr (last 100 Myr), mw_age [Gyr] and f_young/f_mid/f_old."""
+    mass_per_age_step = bagpipes_sfh.sfh * bagpipes_sfh.age_widths
+    total_mass = mass_per_age_step.sum()
+    fraction_younger_than = []
+    for edge in LABEL_EDGES:
+        younger = bagpipes_sfh.ages < edge * 1e9
+        fraction_younger_than.append(mass_per_age_step[younger].sum() / total_mass)
+
+    sfr_floor = SFR_FLOOR * 10**bagpipes_sfh.stellar_mass
+    log_sfr = np.log10(max(bagpipes_sfh.sfr, sfr_floor))
+    return {
+        "log_mstar": bagpipes_sfh.stellar_mass,
+        "log_sfr": log_sfr,
+        "mw_age": bagpipes_sfh.mass_weighted_age,
+        "f_young": fraction_younger_than[0],
+        "f_mid": fraction_younger_than[1] - fraction_younger_than[0],
+        "f_old": 1 - fraction_younger_than[1],
+    }
+
+
+def mass_weighted_metallicity(fractions, metallicities):
+    """Mean Z/Z_sun weighted by the mass formed in each bin."""
+    return np.sum(fractions * metallicities) / np.sum(fractions)
+
+
+def ab_magnitudes(flux_per_angstrom):
+    """AB magnitudes from Bagpipes photometry [erg/s/cm2/A]; all NaN if any flux is not positive."""
+    if not np.all(flux_per_angstrom > 0):
+        return np.full(len(PIVOT_WAVELENGTHS), np.nan)
+    flux_per_hertz = flux_per_angstrom * PIVOT_WAVELENGTHS**2 / SPEED_OF_LIGHT
+    return -2.5 * np.log10(flux_per_hertz) - AB_ZERO_POINT
+
+
+def simulate_models(unit_vectors):
+    """Drawn parameters, labels and AB magnitudes (10^10 M_sun formed) for a block of unit-cube vectors.
+
+    One Bagpipes model is kept per number of bins: update() is ~70x faster than building a new one.
+    """
+    models_by_bin_count = {}
+    rows = []
+    for u in unit_vectors:
+        bagpipes_components, drawn = components(u)
+        fractions, metallicities, edges = bins_from_components(bagpipes_components)
+
+        n_bins = len(fractions)
+        if n_bins in models_by_bin_count:
+            model = models_by_bin_count[n_bins]
+            model.update(bagpipes_components)
+        else:
+            model = pipes.model_galaxy(bagpipes_components, filt_list=FILTER_FILES)
+            models_by_bin_count[n_bins] = model
+
+        row = dict(drawn)
+        row.update(summary_labels(model.sfh))
+        row.update(bin_labels(fractions, metallicities, edges))
+        magnitudes = ab_magnitudes(model.photometry)
+        for band, magnitude in zip(BANDS, magnitudes):
+            row[band] = magnitude
+        rows.append(row)
+    return pd.DataFrame(rows)
