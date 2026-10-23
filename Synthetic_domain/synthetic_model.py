@@ -199,7 +199,7 @@ def components(u, fixed_redshift=None):
 
     Inputs: u: unit-cube vector (dimensionless, in [0, 1)) ordered as DIMS;
             fixed_redshift: if given, replaces the redshift drawn from u (spectral fits); dimensionless z.
-    Returns: (bagpipes_components, drawn). drawn holds z (dimensionless), sfh_type (0, 1 or 2),
+    Returns: (bagpipes_components, drawn). drawn holds redshift (dimensionless), sfh_type (0, 1 or 2),
              Z_fin (Z/Z_sun), Av_ism and Av_bc (mag), logU (dimensionless).
     """
     params = dict(zip(DIMS, u))
@@ -241,7 +241,7 @@ def components(u, fixed_redshift=None):
             "metallicity": metallicities[bin_index],
         }
 
-    drawn = {"z": redshift, "sfh_type": sfh_type, "Z_fin": z_final,
+    drawn = {"redshift": redshift, "sfh_type": sfh_type, "Z_fin": z_final,
              "Av_ism": av_ism, "Av_bc": av_birth_cloud, "logU": log_u}
     return bagpipes_components, drawn
 
@@ -404,8 +404,9 @@ def simulate_models(unit_vectors):
     """Drawn parameters, labels and AB magnitudes (10^10 M_sun formed) for a block of unit-cube vectors.
 
     Inputs: unit_vectors: iterable of unit-cube vectors (dimensionless, in [0, 1)), each ordered as DIMS.
-    Returns: DataFrame with one row per model: the drawn parameters, SUMMARY_LABEL_COLUMNS, BIN_LABEL_COLUMNS
-             and the AB magnitudes [mag] in BANDS order (NaN where a flux is not positive).
+    Returns: DataFrame with one row per model: the drawn parameters (redshift, sfh_type, Z_fin, ...),
+             SUMMARY_LABEL_COLUMNS, BIN_LABEL_COLUMNS and the AB magnitudes [mag] in BANDS order
+             (NaN where a flux is not positive). The "z" column is the z-band magnitude, not the redshift.
 
     One Bagpipes model is kept per number of bins: update() is ~70x faster than building a new one.
     """
@@ -720,6 +721,7 @@ FIREFLY_MISSING = -999.0                 # [same units as Firefly] Firefly write
 MAX_DELTA_LOG_AGE = 0.3                  # [dex]
 MAX_DELTA_LOG_METALLICITY = 0.3          # [dex]
 
+LOG_ZERO = -1e100                        # log-likelihood of an impossible point (MultiNest convention)
 HASH_HEX_DIGITS = 8                      # digits of the md5 digest used for the split (32 bits)
 SPLIT_MODULUS = 2                        # even hash goes to validation, odd to test: half each
 
@@ -851,6 +853,23 @@ def spectral_log_likelihood(model_flux, data_flux, data_ivar, noise_scale):
     return -0.5 * chi2_value - good.sum() * np.log(noise_scale)
 
 
+def safe_spectral_log_likelihood(model_flux, data_flux, data_ivar, noise_scale):
+    """spectral_log_likelihood that returns LOG_ZERO instead of raising for an impossible model.
+
+    PyMultiNest calls sys.exit if the likelihood raises, which would kill a whole fitting batch.
+    A model with non-finite flux, or one whose calibration fit is singular (for example all zeros),
+    is an impossible point, not an error.
+    Inputs: as in spectral_log_likelihood.
+    Returns: log-likelihood (dimensionless), or LOG_ZERO for an impossible model.
+    """
+    if not np.all(np.isfinite(model_flux)):
+        return LOG_ZERO
+    try:
+        return spectral_log_likelihood(model_flux, data_flux, data_ivar, noise_scale)
+    except np.linalg.LinAlgError:
+        return LOG_ZERO
+
+
 # Redshift is fixed to the spectroscopic value, so it leaves the list; veldisp and noise_scale join it
 SPECTRAL_DIMS = []
 for dimension in DIMS:
@@ -973,12 +992,13 @@ def fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_poi
     def log_likelihood(cube):
         """Log-likelihood of the spectrum for one unit-cube point.
 
-        Inputs: cube: unit-cube point (dimensionless, SPECTRAL_DIMS order). Returns: log-likelihood (dimensionless).
+        Inputs: cube: unit-cube point (dimensionless, SPECTRAL_DIMS order).
+        Returns: log-likelihood (dimensionless), LOG_ZERO for an impossible model.
         """
         bagpipes_components, _, noise_scale = spectral_components(cube, redshift)
         model.update(bagpipes_components)
         model_flux = model.spectrum[:, 1]
-        return spectral_log_likelihood(model_flux, spectrum["flux"], spectrum["ivar"], noise_scale)
+        return safe_spectral_log_likelihood(model_flux, spectrum["flux"], spectrum["ivar"], noise_scale)
 
     def unit_cube_prior(cube):
         """Identity map: the training prior is already uniform on the unit cube.

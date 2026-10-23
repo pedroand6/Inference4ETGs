@@ -11,6 +11,8 @@ import pytest
 import synthetic_model as sm
 
 LEGACY_FIXTURE = "tests/legacy_components.json"
+MIN_PLAUSIBLE_MAGNITUDE = 5.0    # [mag] AB, for 10^10 M_sun formed
+MAX_PLAUSIBLE_MAGNITUDE = 40.0   # [mag] AB
 
 
 # =============================================================================
@@ -37,7 +39,9 @@ def test_components_match_legacy_notebook():
             for key in ("age_min", "age_max", "massformed", "metallicity"):
                 assert np.isclose(new_components[name][key], legacy_components[name][key], rtol=1e-12), (name, key)
 
-        for key, legacy_value in case["params"].items():
+        for legacy_key, legacy_value in case["params"].items():
+            # The notebook called the drawn redshift "z"; here it is "redshift" (the z band owns "z")
+            key = "redshift" if legacy_key == "z" else legacy_key
             assert np.isclose(new_params[key], legacy_value, rtol=1e-12), key
 
 
@@ -83,7 +87,7 @@ def test_fixed_redshift_overrides_the_drawn_redshift():
     bagpipes_components, drawn = sm.components(u, fixed_redshift=0.123)
 
     assert bagpipes_components["redshift"] == 0.123
-    assert drawn["z"] == 0.123
+    assert drawn["redshift"] == 0.123
 
 
 # =============================================================================
@@ -130,13 +134,22 @@ def test_simulate_models_returns_labels_and_magnitudes():
     models = sm.simulate_models(unit_vectors)
 
     assert len(models) == 4
-    for column in ["z", "sfh_type", *sm.SUMMARY_LABEL_COLUMNS, *sm.BIN_LABEL_COLUMNS, *sm.BANDS]:
+    for column in ["redshift", "sfh_type", *sm.SUMMARY_LABEL_COLUMNS, *sm.BIN_LABEL_COLUMNS, *sm.BANDS]:
         assert column in models.columns, column
     fraction_columns = []
     for bin_index in range(sm.N_BINS):
         fraction_columns.append(f"frac_bin_{bin_index:02d}")
     assert np.allclose(models[fraction_columns].sum(axis=1), 1.0)
     assert np.isfinite(models[sm.BANDS].to_numpy()).all()
+
+
+def test_simulated_redshift_and_z_band_are_distinct_columns():
+    unit_vectors = np.random.default_rng(3).random((4, len(sm.DIMS)))
+    models = sm.simulate_models(unit_vectors)
+
+    assert models["redshift"].between(*sm.Z_RANGE).all()
+    # The z band is an AB magnitude; before the fix it held the redshift (below 1)
+    assert models["z"].between(MIN_PLAUSIBLE_MAGNITUDE, MAX_PLAUSIBLE_MAGNITUDE).all()
 
 
 # =============================================================================
@@ -328,6 +341,20 @@ def test_log_likelihood_is_highest_for_the_true_model():
     wrong_value = sm.spectral_log_likelihood(wrong_model, data_flux, data_ivar, noise_scale=1.0)
 
     assert true_value > wrong_value
+
+
+def test_spectral_log_likelihood_guard_returns_log_zero():
+    model_flux = 1 + 0.5 * np.sin(np.linspace(0, 20, 1000))
+    data_flux = model_flux
+    data_ivar = np.ones(1000)
+    nan_model = model_flux.copy()
+    nan_model[10] = np.nan
+
+    # An all-zero model makes the normal matrix singular, so np.linalg.solve raises LinAlgError
+    assert sm.safe_spectral_log_likelihood(np.zeros(1000), data_flux, data_ivar, 1.0) == sm.LOG_ZERO
+    assert sm.safe_spectral_log_likelihood(nan_model, data_flux, data_ivar, 1.0) == sm.LOG_ZERO
+    expected = sm.spectral_log_likelihood(model_flux, data_flux, data_ivar, 1.0)
+    assert sm.safe_spectral_log_likelihood(model_flux, data_flux, data_ivar, 1.0) == expected
 
 
 def test_spectral_components_fix_redshift_and_add_veldisp():
