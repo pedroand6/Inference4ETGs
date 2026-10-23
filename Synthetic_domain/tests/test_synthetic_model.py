@@ -2,6 +2,8 @@
 
 import json
 import os
+import subprocess
+import sys
 
 import extinction
 import numpy as np
@@ -600,3 +602,142 @@ def test_summarise_posterior_percentiles():
     assert summary["mw_age_median"] == 50.0
     assert summary["mw_age_p16"] == 16.0
     assert summary["mw_age_p84"] == 84.0
+
+
+# =============================================================================
+# Job files and the calibration test
+# =============================================================================
+def test_export_and_load_job_round_trip(tmp_path):
+    job, _ = mock_job("round_trip", np.random.default_rng(13))
+    path = sm.export_job(job, str(tmp_path / "jobs"))    # the folder does not exist yet
+
+    assert path == str(tmp_path / "jobs" / "round_trip.npz")
+    loaded = sm.load_job(path)
+    assert loaded["job_id"] == "round_trip"
+    assert loaded["redshift"] == job["redshift"]
+    for key in ("wavelength", "flux", "ivar"):
+        assert np.array_equal(loaded["spectrum"][key], job["spectrum"][key]), key
+
+
+def test_calibration_cubes_are_deterministic_and_use_every_sfh_branch():
+    """The rare burst branch has probability P_BURST per draw, so some seeds miss it in 60 draws; seed 0 does not."""
+    first = sm.draw_calibration_cubes(60, np.random.default_rng(0))
+    second = sm.draw_calibration_cubes(60, np.random.default_rng(0))
+    assert np.array_equal(first, second)
+    assert first.shape == (60, len(sm.SPECTRAL_DIMS))
+
+    sfh_draws = first[:, sm.SPECTRAL_DIMS.index("sfh_type")]
+    branches = {sm.choose_sfh_branch(draw) for draw in sfh_draws}
+    assert branches == set(sm.SFH_BRANCHES)
+
+
+def test_draw_calibration_mocks_ids_count_and_seed():
+    wavelength_vacuum = 10 ** np.arange(np.log10(3700), np.log10(9300), 1e-4)
+    template = sm.prepare_spectrum(wavelength_vacuum, np.ones_like(wavelength_vacuum),
+                                   np.full_like(wavelength_vacuum, 100.0), ebv=0.0)
+    templates = [(template, 0.1), (template, 0.2)]
+
+    jobs, truths = sm.draw_calibration_mocks(3, templates, np.random.default_rng(4))
+    repeat_jobs, _ = sm.draw_calibration_mocks(3, templates, np.random.default_rng(4))
+
+    assert [job["job_id"] for job in jobs] == ["calib_000", "calib_001", "calib_002"]
+    assert set(truths) == {job["job_id"] for job in jobs}
+    assert {job["redshift"] for job in jobs} <= {0.1, 0.2}
+    for job, repeat in zip(jobs, repeat_jobs):
+        assert np.array_equal(job["spectrum"]["flux"], repeat["spectrum"]["flux"])
+        assert job["redshift"] == repeat["redshift"]
+
+
+def test_calibration_coverage_of_a_calibrated_and_a_biased_label():
+    """Truths drawn from the posterior itself are covered at about the level; shifted truths never are."""
+    rng = np.random.default_rng(5)
+    posteriors, truths = {}, {}
+    for job_index in range(400):
+        posteriors[f"job_{job_index}"] = pd.DataFrame({"good": rng.normal(0, 1, 2000),
+                                                       "biased": rng.normal(0, 1, 2000)})
+        truths[f"job_{job_index}"] = pd.Series({"good": rng.normal(0, 1), "biased": 10.0})
+
+    table = sm.calibration_coverage(posteriors, truths, ["good", "biased"], levels=(0.68, 0.95))
+
+    assert list(table.columns) == ["label", "level", "coverage", "n_jobs"]
+    assert len(table) == 4
+    good = table[table["label"] == "good"].set_index("level")
+    assert abs(good.loc[0.68, "coverage"] - 0.68) < 0.07
+    assert abs(good.loc[0.95, "coverage"] - 0.95) < 0.04
+    assert (table[table["label"] == "biased"]["coverage"] == 0.0).all()
+    assert (table["n_jobs"] == 400).all()
+
+
+def test_calibration_coverage_known_small_case_and_unusable_jobs():
+    samples = pd.DataFrame({"mw_age": np.arange(101.0)})    # 68% interval: 16 to 84; 95%: 2.5 to 97.5
+    posteriors = {"a": samples, "b": samples, "c": samples, "d": samples}
+    truths = {"a": pd.Series({"mw_age": 50.0}), "b": pd.Series({"mw_age": 99.0}),
+              "c": pd.Series({"mw_age": np.nan})}    # c has no finite truth and d has no truth at all
+
+    table = sm.calibration_coverage(posteriors, truths, ["mw_age"]).set_index("level")
+
+    assert table.loc[0.68, "coverage"] == 0.5 and table.loc[0.68, "n_jobs"] == 2
+    assert table.loc[0.95, "coverage"] == 0.5 and table.loc[0.95, "n_jobs"] == 2
+
+
+def test_calibration_coverage_without_jobs_is_nan():
+    table = sm.calibration_coverage({}, {}, ["mw_age"])
+    assert table["coverage"].isna().all()
+    assert (table["n_jobs"] == 0).all()
+
+
+# =============================================================================
+# run_spectral_fits.py (run with LD_LIBRARY_PATH=../.venv/lib)
+# =============================================================================
+def run_script(*arguments):
+    """Run run_spectral_fits.py in a subprocess, as a user would.
+
+    Inputs: arguments: command-line options (str).
+    Returns: the CompletedProcess, with stdout and stderr as text.
+    """
+    return subprocess.run([sys.executable, "run_spectral_fits.py", *arguments],
+                          capture_output=True, text=True, timeout=600)
+
+
+def test_run_script_fits_an_exported_job_and_logs_it(tmp_path):
+    job, _ = mock_job("calib_smoke", np.random.default_rng(14))
+    sm.export_job(job, str(tmp_path / "jobs"))
+
+    result = run_script("--jobs-dir", str(tmp_path / "jobs"), "--output-dir", str(tmp_path),
+                        "--max-iterations", "100", "--n-live", "40", "--workers", "1")
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "calib_smoke.h5").exists()
+    log = pd.read_csv(tmp_path / "fit_log.csv")
+    assert list(log["job_id"]) == ["calib_smoke"]
+    assert list(log["status"]) == ["fitted"]
+    assert log["n_iterations"].iloc[0] <= 100
+
+
+def test_run_script_status_counts_done_and_pending_jobs(tmp_path):
+    for job_id in ("calib_000", "calib_001", "galaxy_1"):
+        sm.export_job(mock_job(job_id, np.random.default_rng(15))[0], str(tmp_path / "jobs"))
+    (tmp_path / "calib_000.h5").write_bytes(b"")    # presence is what counts as done
+
+    result = run_script("--jobs-dir", str(tmp_path / "jobs"), "--output-dir", str(tmp_path), "--status")
+
+    assert result.returncode == 0, result.stderr
+    assert "3 jobs: 1 done, 2 pending" in result.stdout
+
+
+def test_run_script_interleaves_calibration_mocks_and_galaxies():
+    import run_spectral_fits
+    order = run_spectral_fits.interleave_calibration_and_galaxies(
+        ["calib_000", "calib_001", "calib_002", "galaxy_a", "galaxy_b"])
+    assert order == ["calib_000", "galaxy_a", "calib_001", "galaxy_b", "calib_002"]
+
+
+def test_run_script_rejects_too_long_output_path_and_bad_task_index(tmp_path):
+    sm.export_job(mock_job("calib_000", np.random.default_rng(16))[0], str(tmp_path / "jobs"))
+
+    long_output = str(tmp_path / ("x" * 100))    # MultiNest accepts under 100 characters in all
+    too_long = run_script("--jobs-dir", str(tmp_path / "jobs"), "--output-dir", long_output)
+    bad_index = run_script("--jobs-dir", str(tmp_path / "jobs"), "--output-dir", str(tmp_path), "--task-index", "5")
+
+    assert too_long.returncode != 0 and "shorter relative --output-dir" in too_long.stderr
+    assert bad_index.returncode != 0 and "--task-index 5 is outside 0..0" in bad_index.stderr

@@ -983,6 +983,7 @@ UNIT_NOISE_CUBE_VALUE = 0.0      # unit-cube value of noise_scale that gives an 
 LOW_PERCENTILE = 16              # lower posterior summary (percent), 1 sigma
 MEDIAN_PERCENTILE = 50           # central posterior summary (percent)
 HIGH_PERCENTILE = 84             # upper posterior summary (percent), 1 sigma
+MAX_ITERATIONS = 50000           # MultiNest iteration limit of a production fit (count)
 
 
 def multinest_iteration_bounds(output_basename):
@@ -1262,3 +1263,99 @@ def summarise_posterior(posterior, columns):
         summary[f"{column}_median"] = np.nanpercentile(values, MEDIAN_PERCENTILE)
         summary[f"{column}_p{HIGH_PERCENTILE}"] = np.nanpercentile(values, HIGH_PERCENTILE)
     return summary
+
+
+# =============================================================================
+# 7. Job files and the calibration test
+# =============================================================================
+N_CALIBRATION_MOCKS = 33         # mocks drawn from the prior to test the fitter (count)
+MIN_COVERAGE_95 = 0.85           # smallest acceptable share of truths inside the 95% interval (fraction)
+CALIBRATION_LABELS = ["mw_age", "Z_fin", "f_old"]   # labels the calibration test checks
+CALIBRATION_LEVELS = (0.68, 0.95)                   # central-interval probabilities reported (fractions)
+CALIBRATION_ID_PREFIX = "calib_"                    # job ids are calib_000, calib_001, ...
+PERCENT = 100                    # percent per unit fraction
+
+
+def export_job(job, jobs_directory):
+    """Write one fit job to <jobs_directory>/<job_id>.npz, a portable file for run_spectral_fits.py.
+
+    Inputs: job: dict with job_id (str), spectrum (dict with wavelength [Angstrom, observed], flux and
+            ivar) and redshift (dimensionless); jobs_directory: folder for the file (str), created if missing.
+    Returns: path of the written file (str).
+    """
+    os.makedirs(jobs_directory, exist_ok=True)
+    path = os.path.join(jobs_directory, f"{job['job_id']}.npz")
+    np.savez(path, wavelength=job["spectrum"]["wavelength"], flux=job["spectrum"]["flux"],
+             ivar=job["spectrum"]["ivar"], redshift=job["redshift"], job_id=str(job["job_id"]))
+    return path
+
+
+def load_job(path):
+    """Read a file written by export_job.
+
+    Inputs: path: file path (str).
+    Returns: job dict in the format fit_and_save takes: job_id (str), spectrum (wavelength, flux, ivar)
+             and redshift (dimensionless float).
+    """
+    with np.load(path) as source:
+        spectrum = {"wavelength": source["wavelength"], "flux": source["flux"], "ivar": source["ivar"]}
+        return {"job_id": str(source["job_id"]), "spectrum": spectrum, "redshift": float(source["redshift"])}
+
+
+def draw_calibration_cubes(n_mocks, rng):
+    """Unit-cube points of the calibration mocks: uniform over every SPECTRAL_DIMS coordinate.
+
+    sfh_type is drawn too, so the mocks follow the training prior and use all three SFH branches.
+    Inputs: n_mocks: number of points (count); rng: numpy Generator.
+    Returns: array of shape (n_mocks, len(SPECTRAL_DIMS)), values in [0, 1) (dimensionless).
+    """
+    return rng.random((n_mocks, len(SPECTRAL_DIMS)))
+
+
+def draw_calibration_mocks(n_mocks, templates, rng):
+    """Mock spectra with known labels, each on the wavelengths, mask and errors of a random real galaxy.
+
+    Inputs: n_mocks: number of mocks (count); templates: list of (spectrum dict from prepare_spectrum,
+            redshift (dimensionless)); rng: numpy Generator.
+    Returns: (jobs, truths): jobs is a list of dicts as fit_and_save takes (job_id calib_000, calib_001, ...);
+             truths maps each job_id to its true labels (Series, as posterior_labels columns).
+    """
+    cubes = draw_calibration_cubes(n_mocks, rng)
+    jobs = []
+    truths = {}
+    for mock_index, cube in enumerate(cubes):
+        job_id = f"{CALIBRATION_ID_PREFIX}{mock_index:03d}"
+        template_spectrum, redshift = templates[rng.integers(len(templates))]
+        spectrum, truth = make_mock_spectrum(cube, redshift, template_spectrum, rng)
+        jobs.append({"job_id": job_id, "spectrum": spectrum, "redshift": redshift})
+        truths[job_id] = truth
+    return jobs, truths
+
+
+def calibration_coverage(posteriors, truths, labels, levels=CALIBRATION_LEVELS):
+    """Share of mocks whose true label lies inside the central posterior interval, per label and level.
+
+    A calibrated fitter gives a share close to the level (0.95 of truths inside the 95% interval).
+    A mock counts for a label only if its truth and its posterior samples for that label are finite.
+    Inputs: posteriors: dict job_id -> posterior DataFrame (one row per sample); truths: dict job_id -> Series
+            of true labels; labels: label names to check; levels: interval probabilities (fractions).
+    Returns: DataFrame with one row per (label, level): label, level, coverage (fraction, NaN if no mock
+             was usable) and n_jobs (count of mocks used).
+    """
+    rows = []
+    for label in labels:
+        for level in levels:
+            half_width = PERCENT * level / 2
+            lower_percentile = MEDIAN_PERCENTILE - half_width
+            upper_percentile = MEDIAN_PERCENTILE + half_width
+            inside = []
+            for job_id, posterior in posteriors.items():
+                samples = posterior[label].to_numpy(dtype=float)
+                samples = samples[np.isfinite(samples)]
+                if job_id not in truths or len(samples) == 0 or not np.isfinite(truths[job_id][label]):
+                    continue
+                lower, upper = np.percentile(samples, [lower_percentile, upper_percentile])
+                inside.append(lower <= truths[job_id][label] <= upper)
+            coverage = np.mean(inside) if inside else np.nan
+            rows.append({"label": label, "level": level, "coverage": coverage, "n_jobs": len(inside)})
+    return pd.DataFrame(rows)
