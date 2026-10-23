@@ -10,3 +10,10 @@ dustmaps
 synphot
 joblib
 seaborn
+pymultinest
+h5py
+pyarrow
+splusdata
+pytest
+nbconvert
+ipykernel
