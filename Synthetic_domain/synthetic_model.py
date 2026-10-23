@@ -64,12 +64,20 @@ DIMS = ["z", "sfh_type", *DIRICHLET_DIMS, "peak", "width", "skew",
 
 
 def uniform(draw, low, high):
-    """Map a unit-interval draw onto [low, high)."""
+    """Map a unit-interval draw onto [low, high).
+
+    Inputs: draw in [0, 1) (dimensionless); low, high: bounds in the units of the parameter.
+    Returns: parameter value in [low, high), in the same units as low and high.
+    """
     return low + (high - low) * draw
 
 
 def positive_normal(draw, mean, sigma):
-    """Map a unit-interval draw onto N(mean, sigma) truncated to positive values (inverse CDF)."""
+    """Map a unit-interval draw onto N(mean, sigma) truncated to positive values (inverse CDF).
+
+    Inputs: draw in [0, 1) (dimensionless); mean, sigma: of the untruncated normal, in the parameter's units.
+    Returns: positive value in the same units as mean and sigma.
+    """
     probability_below_zero = norm.cdf(0, mean, sigma)
     return norm.ppf(probability_below_zero + draw * (1 - probability_below_zero), mean, sigma)
 
@@ -79,6 +87,9 @@ def bin_edges(redshift):
 
     Bins centred beyond the age of the Universe (minus the margin) are dropped,
     so high-redshift galaxies have fewer bins.
+
+    Inputs: redshift: dimensionless redshift z.
+    Returns: edges [Gyr ago], youngest first: 0.0 (today) up to the maximum age (Universe age minus margin).
     """
     maximum_age = COSMOLOGY.age(redshift).value - UNIVERSE_AGE_MARGIN
     centres = AGE_BIN_CENTRES[AGE_BIN_CENTRES <= maximum_age]
@@ -90,7 +101,12 @@ def bin_edges(redshift):
 # SFH branches: same signature, each returns mass fractions per bin (sum 1)
 # -----------------------------------------------------------------------------
 def dirichlet_fractions(params, edges):
-    """Dirichlet(1) fractions: normalised exponential draws, one per bin."""
+    """Dirichlet(1) fractions: normalised exponential draws, one per bin.
+
+    Inputs: params: dict of unit-cube draws keyed by DIMS names (dimensionless);
+            edges: bin edges [Gyr ago] from bin_edges.
+    Returns: mass fraction per bin (dimensionless, sums to 1), youngest bin first.
+    """
     n_bins = len(edges) - 1
     exponential_draws = np.zeros(n_bins)
     for bin_index in range(n_bins):
@@ -99,7 +115,12 @@ def dirichlet_fractions(params, edges):
 
 
 def skew_normal_fractions(params, edges):
-    """Fractions from one skew-normal episode in lookback time (typically old)."""
+    """Fractions from one skew-normal episode in lookback time (typically old).
+
+    Inputs: params: dict of unit-cube draws (uses peak, width, skew; dimensionless);
+            edges: bin edges [Gyr ago] from bin_edges.
+    Returns: mass fraction per bin (dimensionless, sums to 1); flat if the episode lies outside all bins.
+    """
     peak = norm.ppf(params["peak"], SKEW_PEAK_MEAN, SKEW_PEAK_SIGMA)
     width = positive_normal(params["width"], SKEW_WIDTH_MEAN, SKEW_WIDTH_SIGMA)
     shape = uniform(params["skew"], *SKEW_SHAPE_RANGE)
@@ -115,7 +136,12 @@ def skew_normal_fractions(params, edges):
 
 
 def skew_normal_burst_fractions(params, edges):
-    """Skew-normal fractions plus a short recent burst holding 1-10% of the mass."""
+    """Skew-normal fractions plus a short recent burst holding 1-10% of the mass.
+
+    Inputs: params: dict of unit-cube draws (the skew-normal keys plus burst_age, burst_width,
+            burst_frac; dimensionless); edges: bin edges [Gyr ago] from bin_edges.
+    Returns: mass fraction per bin (dimensionless, sums to 1), youngest bin first.
+    """
     base_fractions = skew_normal_fractions(params, edges)
     burst_age = 10 ** uniform(params["burst_age"], *LOG_BURST_AGE_RANGE)
     burst_half_width = uniform(params["burst_width"], *BURST_WIDTH_RANGE) / 2
@@ -140,7 +166,11 @@ SFH_BRANCHES = {
 
 
 def choose_sfh_branch(sfh_type_draw):
-    """SFH branch for a unit draw: 0 Dirichlet, 1 skew-normal, 2 skew-normal + burst."""
+    """SFH branch for a unit draw: 0 Dirichlet, 1 skew-normal, 2 skew-normal + burst.
+
+    Inputs: sfh_type_draw: unit-cube draw in [0, 1) (dimensionless).
+    Returns: integer branch index 0, 1 or 2, a key of SFH_BRANCHES.
+    """
     if sfh_type_draw < 1 - P_SKEW:
         return 0
     if sfh_type_draw < 1 - P_BURST:
@@ -149,7 +179,12 @@ def choose_sfh_branch(sfh_type_draw):
 
 
 def bin_metallicities(fractions, z_final):
-    """Z/Z_sun of each bin: rises from Z_ini to Z_final with the mass already formed."""
+    """Z/Z_sun of each bin: rises from Z_ini to Z_final with the mass already formed.
+
+    Inputs: fractions: mass fraction per bin, youngest first (any normalisation);
+            z_final: final metallicity Z_fin in Z/Z_sun.
+    Returns: Z/Z_sun per bin (same length as fractions), youngest first.
+    """
     z_initial = ZINI_FRACTION * z_final
     # Bins run youngest first, so the mass formed before a bin is the sum of the older ones
     mass_before = np.cumsum(fractions[::-1])[::-1] - fractions
@@ -160,8 +195,10 @@ def bin_metallicities(fractions, z_final):
 def components(u, fixed_redshift=None):
     """Bagpipes components and drawn parameters for one unit-cube vector u (order of DIMS).
 
-    fixed_redshift: if given, replaces the redshift drawn from u (spectral fits).
-    Returns (bagpipes_components, drawn) where drawn holds z, sfh_type, Z_fin, Av_ism, Av_bc, logU.
+    Inputs: u: unit-cube vector (dimensionless, in [0, 1)) ordered as DIMS;
+            fixed_redshift: if given, replaces the redshift drawn from u (spectral fits); dimensionless z.
+    Returns: (bagpipes_components, drawn). drawn holds z (dimensionless), sfh_type (0, 1 or 2),
+             Z_fin (Z/Z_sun), Av_ism and Av_bc (mag), logU (dimensionless).
     """
     params = dict(zip(DIMS, u))
 
@@ -208,7 +245,12 @@ def components(u, fixed_redshift=None):
 
 
 def bins_from_components(bagpipes_components):
-    """Mass fractions, metallicities and edges [Gyr ago] read back from the constant components."""
+    """Mass fractions, metallicities and edges [Gyr ago] read back from the constant components.
+
+    Inputs: bagpipes_components: dict from components() with constant* entries (massformed in log M_sun).
+    Returns: (fractions, metallicities, edges): mass fraction per bin (dimensionless), Z/Z_sun per bin,
+             and n_bins + 1 bin edges [Gyr ago], youngest first.
+    """
     names = []
     for name in bagpipes_components:
         if name.startswith("constant"):
@@ -234,7 +276,8 @@ def bins_from_components(bagpipes_components):
 MODULE_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 FILTER_LIST_FILE = os.path.join(MODULE_DIRECTORY, "splus-filters", "splus_filters.txt")
 SPEED_OF_LIGHT = 2.99792458e18   # [Angstrom / s]
-AB_ZERO_POINT = 48.60
+MAGNITUDES_PER_DEX = 2.5         # [mag/dex] magnitude change per decade of flux
+AB_ZERO_POINT = 48.60            # [mag] AB offset for flux density f_nu in erg/s/cm2/Hz
 
 # S-PLUS bands, in the order of splus_filters.txt
 BANDS = ["u", "J0378", "J0395", "J0410", "J0430", "g", "J0515", "r", "J0660", "i", "J0861", "z"]
@@ -245,7 +288,11 @@ for relative_path in np.loadtxt(FILTER_LIST_FILE, dtype="str"):
 
 
 def pivot_wavelength(filter_file):
-    """Pivot wavelength [Angstrom] of a filter curve file (wavelength, transmission)."""
+    """Pivot wavelength [Angstrom] of a filter curve file (wavelength, transmission).
+
+    Inputs: filter_file: path to a text file with wavelength [Angstrom] and transmission (dimensionless) columns.
+    Returns: pivot wavelength [Angstrom] as a float.
+    """
     wavelength, transmission = np.loadtxt(filter_file, unpack=True)
     numerator = simpson(transmission * wavelength, x=wavelength)
     denominator = simpson(transmission / wavelength, x=wavelength)
@@ -272,9 +319,11 @@ for bin_index in range(N_BINS):
 def bin_labels(fractions, metallicities, edges, log_mass_formed=LOG_MASS_FORMED):
     """16-bin labels, youngest bin first.
 
-    fractions: mass formed per existing bin (any normalisation); metallicities: Z/Z_sun;
-    edges: [Gyr ago]. Bins that do not exist at this redshift get frac 0, logsfr and zmet NaN.
-    Returns a dict ordered as BIN_LABEL_COLUMNS.
+    Inputs: fractions: mass formed per existing bin (any normalisation, dimensionless);
+            metallicities: Z/Z_sun per existing bin; edges: bin edges [Gyr ago];
+            log_mass_formed: total mass formed [log M_sun].
+    Returns: dict ordered as BIN_LABEL_COLUMNS: frac (dimensionless, sums to 1), logsfr [log M_sun/yr]
+             and zmet (Z/Z_sun). Bins that do not exist at this redshift get frac 0 and NaN for logsfr and zmet.
     """
     n_existing = len(fractions)
     normalised_fractions = fractions / fractions.sum()
@@ -303,7 +352,12 @@ def bin_labels(fractions, metallicities, edges, log_mass_formed=LOG_MASS_FORMED)
 
 
 def summary_labels(bagpipes_sfh):
-    """log_mstar (living), log_sfr (last 100 Myr), mw_age [Gyr] and f_young/f_mid/f_old."""
+    """Summary labels of a Bagpipes star formation history.
+
+    Inputs: bagpipes_sfh: fitted model's sfh object (ages in yr, sfh in M_sun/yr, stellar_mass in log M_sun).
+    Returns: dict ordered as SUMMARY_LABEL_COLUMNS: log_mstar [log M_sun] (living stars), log_sfr [log M_sun/yr]
+             (last 100 Myr), mw_age [Gyr], and dimensionless f_young (< 0.1 Gyr), f_mid (0.1-1 Gyr), f_old (> 1 Gyr).
+    """
     mass_per_age_step = bagpipes_sfh.sfh * bagpipes_sfh.age_widths
     total_mass = mass_per_age_step.sum()
     fraction_younger_than = []
@@ -324,20 +378,32 @@ def summary_labels(bagpipes_sfh):
 
 
 def mass_weighted_metallicity(fractions, metallicities):
-    """Mean Z/Z_sun weighted by the mass formed in each bin."""
+    """Mean Z/Z_sun weighted by the mass formed in each bin.
+
+    Inputs: fractions: mass formed per bin (any normalisation); metallicities: Z/Z_sun per bin.
+    Returns: mass-weighted Z/Z_sun (dimensionless).
+    """
     return np.sum(fractions * metallicities) / np.sum(fractions)
 
 
 def ab_magnitudes(flux_per_angstrom):
-    """AB magnitudes from Bagpipes photometry [erg/s/cm2/A]; all NaN if any flux is not positive."""
+    """AB magnitudes from Bagpipes photometry [erg/s/cm2/A]; all NaN if any flux is not positive.
+
+    Inputs: flux_per_angstrom: F_lambda [erg/s/cm2/Angstrom], one per filter in PIVOT_WAVELENGTHS.
+    Returns: AB magnitude per filter [mag], in the order of PIVOT_WAVELENGTHS.
+    """
     if not np.all(flux_per_angstrom > 0):
         return np.full(len(PIVOT_WAVELENGTHS), np.nan)
     flux_per_hertz = flux_per_angstrom * PIVOT_WAVELENGTHS**2 / SPEED_OF_LIGHT
-    return -2.5 * np.log10(flux_per_hertz) - AB_ZERO_POINT
+    return -MAGNITUDES_PER_DEX * np.log10(flux_per_hertz) - AB_ZERO_POINT
 
 
 def simulate_models(unit_vectors):
     """Drawn parameters, labels and AB magnitudes (10^10 M_sun formed) for a block of unit-cube vectors.
+
+    Inputs: unit_vectors: iterable of unit-cube vectors (dimensionless, in [0, 1)), each ordered as DIMS.
+    Returns: DataFrame with one row per model: the drawn parameters, SUMMARY_LABEL_COLUMNS, BIN_LABEL_COLUMNS
+             and the AB magnitudes [mag] in BANDS order (NaN where a flux is not positive).
 
     One Bagpipes model is kept per number of bins: update() is ~70x faster than building a new one.
     """
@@ -381,30 +447,48 @@ NOISE_MAGNITUDE_RANGE = (10.0, 30.0)   # [mag] range of the noise-model bins
 NOISE_BIN_WIDTH = 0.25                 # [mag]
 NOISE_MIN_GALAXIES = 20                # bins with fewer galaxies are not used
 NOISE_N_QUANTILES = 21                 # quantiles of log10(error) stored per bin
-MAGNITUDE_TO_RELATIVE_FLUX = 2.5 / np.log(10)   # sigma_mag = 1.0857 * sigma_flux / flux
+MAGNITUDE_TO_RELATIVE_FLUX = MAGNITUDES_PER_DEX / np.log(10)   # sigma_mag = 1.0857 * sigma_flux / flux
 SCALING_MAX_DZ = 0.05                  # redshift window for borrowing a real r magnitude
 
 
 def detected_bands(magnitudes, errors):
-    """True where a band is detected: magnitude measured and 0 < error < MAX_DETECTED_ERROR (NaN -> False)."""
+    """True where a band is detected: magnitude measured and 0 < error < MAX_DETECTED_ERROR (NaN -> False).
+
+    Inputs: magnitudes: [mag] array (n, 12), non-detections at or above UNDETECTED_MAGNITUDE;
+            errors: [mag] array of the same shape.
+    Returns: boolean array of the same shape, True where the band is detected.
+    """
     measured = magnitudes < UNDETECTED_MAGNITUDE
     good_error = (errors > 0) & (errors < MAX_DETECTED_ERROR)
     return measured & good_error
 
 
 def redshift_window(photometric_z):
-    """Half-width of the model redshift window around each photometric redshift."""
+    """Half-width of the model redshift window around each photometric redshift.
+
+    Inputs: photometric_z: array of photometric redshifts (dimensionless).
+    Returns: half-width dz (dimensionless) per galaxy, clipped to [DZ_MIN, DZ_MAX].
+    """
     assumed_error = SIGMA_Z * (1 + photometric_z)
     return np.clip(Z_SIGMA * assumed_error, DZ_MIN, DZ_MAX)
 
 
 def noise_bin_index(magnitudes):
-    """Index of the noise-model bin of each magnitude (may fall outside the table)."""
+    """Index of the noise-model bin of each magnitude (may fall outside the table).
+
+    Inputs: magnitudes: finite magnitudes [mag] (array).
+    Returns: integer bin index per magnitude, NOISE_BIN_WIDTH wide from NOISE_MAGNITUDE_RANGE[0];
+             can be negative or beyond the last bin.
+    """
     return np.floor((magnitudes - NOISE_MAGNITUDE_RANGE[0]) / NOISE_BIN_WIDTH).astype(int)
 
 
 def quantile_column_names():
-    """Names of the stored log-error quantile columns: log_error_q00 ... log_error_q20."""
+    """Names of the stored log-error quantile columns: log_error_q00 ... log_error_q20.
+
+    Inputs: none.
+    Returns: list of NOISE_N_QUANTILES column names (str).
+    """
     names = []
     for quantile_index in range(NOISE_N_QUANTILES):
         names.append(f"log_error_q{quantile_index:02d}")
@@ -414,8 +498,10 @@ def quantile_column_names():
 def fit_noise_model(catalogue):
     """Empirical error distribution per band and 0.25 mag bin of measured magnitude.
 
-    catalogue: S-PLUS table with <band>_auto and e_<band>_auto columns.
-    Returns one row per populated (band, bin) with 21 quantiles of log10(error).
+    Inputs: catalogue: S-PLUS DataFrame with <band>_auto magnitudes [mag] and e_<band>_auto errors [mag].
+    Returns: DataFrame with one row per populated (band, bin): band, magnitude_low and magnitude_high [mag],
+             n_galaxies, and 21 quantiles of log10(error [mag]) (log_error_q00 ... log_error_q20).
+
     A band is later detected when its drawn error is below MAX_DETECTED_ERROR, so each bin's
     detection probability is the share of its errors below 1 mag.
     """
@@ -449,8 +535,11 @@ def fit_noise_model(catalogue):
 def draw_log_errors(magnitudes, band_table, rng):
     """Draw log10(error) for each magnitude from its bin's quantiles (inverse-CDF sampling).
 
-    Magnitudes brighter than the first populated bin use that bin; fainter than the last one,
-    or NaN, get NaN (undetected).
+    Inputs: magnitudes: model magnitudes [mag] for one band (array, NaN allowed);
+            band_table: rows of the noise table for that band; rng: numpy Generator.
+    Returns: log10(error [mag]) per magnitude; NaN where the magnitude is NaN or fainter than the last populated bin.
+
+    Magnitudes brighter than the first populated bin use that bin.
     """
     table_bins = noise_bin_index(band_table["magnitude_low"].to_numpy() + NOISE_BIN_WIDTH / 2)
     quantile_table = band_table[quantile_column_names()].to_numpy()
@@ -478,7 +567,10 @@ def draw_log_errors(magnitudes, band_table, rng):
 def add_splus_noise(magnitudes, noise_table, rng):
     """S-PLUS-like errors, flux noise and non-detections for model magnitudes (n_models, 12).
 
-    Returns (noisy_magnitudes, errors, detected); undetected entries are NaN in the first two.
+    Inputs: magnitudes: noiseless model magnitudes [mag], shape (n_models, 12) in BANDS order;
+            noise_table: output of fit_noise_model; rng: numpy Generator.
+    Returns: (noisy_magnitudes [mag], errors [mag], detected), each (n_models, 12); detected is a bool array.
+             Undetected entries are NaN in the first two.
     """
     n_models = len(magnitudes)
     noisy_magnitudes = np.full(magnitudes.shape, np.nan)
@@ -497,7 +589,7 @@ def add_splus_noise(magnitudes, noise_table, rng):
         band_detected = (band_errors < MAX_DETECTED_ERROR) & positive_flux
 
         noisy_band = np.full(n_models, np.nan)
-        noisy_band[band_detected] = true_magnitudes[band_detected] - 2.5 * np.log10(flux_ratio[band_detected])
+        noisy_band[band_detected] = true_magnitudes[band_detected] - MAGNITUDES_PER_DEX * np.log10(flux_ratio[band_detected])
         noisy_magnitudes[:, band_index] = noisy_band
         errors[band_detected, band_index] = band_errors[band_detected]
         detected[:, band_index] = band_detected
@@ -507,8 +599,13 @@ def add_splus_noise(magnitudes, noise_table, rng):
 def scale_to_observed_r(model_magnitudes, model_z, catalogue_r, catalogue_z, rng, max_dz=SCALING_MAX_DZ):
     """Shift each model to the r magnitude of a random real galaxy with |zml - z| < max_dz.
 
+    Inputs: model_magnitudes: [mag] array (n_models, 12) in BANDS order; model_z: model redshifts (dimensionless);
+            catalogue_r: real r magnitudes [mag]; catalogue_z: photometric redshifts of those galaxies (dimensionless);
+            rng: numpy Generator; max_dz: redshift half-window (dimensionless).
+    Returns: (scaled_magnitudes [mag], offsets [mag]); offsets is the shift applied to every band (real r minus
+             model r) and both are NaN where no real galaxy lies within max_dz.
+
     Gives synthetic galaxies a realistic brightness (and so realistic errors) at each redshift.
-    Returns (scaled_magnitudes, offsets) with offsets = m_scaled - m_model; NaN if no galaxy is close.
     """
     r_index = BANDS.index("r")
     usable = np.isfinite(catalogue_r) & (catalogue_r < UNDETECTED_MAGNITUDE) & np.isfinite(catalogue_z)
