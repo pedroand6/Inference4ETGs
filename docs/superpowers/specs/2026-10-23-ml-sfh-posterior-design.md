@@ -144,3 +144,7 @@ All in `Synthetic_domain/`:
 - Hyper-parameter searches beyond the MLP-vs-CNN comparison, ensembles, and transformer embeddings (a later pass if the calibration plots call for it).
 - Changing the prior, including the 16th-bin issue and any DR3/DR4 photometric re-baselining; these are open decisions recorded in the parts 1–2 ledger.
 - Training on real galaxies (domain adaptation).
+
+## Amendment (2026-10-24): the redshift is a 19th target
+
+Decoding a posterior sample into per-bin labels needs the galaxy's redshift. The bin edges, the existence of bin 14 (z < 0.48) and the SFR per bin all depend on it. For photometric-redshift galaxies the true redshift is uncertain, so it becomes a learned target: θ gains `redshift` (19 numbers). Each posterior sample is decoded at its own sampled redshift, clipped to the prior range. For spectroscopic redshifts the posterior on z is simply narrow. Everything else in this spec is unchanged.
