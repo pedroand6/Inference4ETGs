@@ -8,7 +8,8 @@
 # env/activate.sh; run `source env/activate.sh` afterwards to get the Python and the MultiNest library.
 #
 # Environment variables (all optional):
-#   OUT_DIR   folder of the job results; the build log and the build time are kept there   [default /work/out]
+#   OUT_DIR        folder of the job results; the build log and the build time are kept there   [default /work/out]
+#   INSTALL_TORCH  set to 1 to also install PyTorch (CUDA 12.1 build) and zuko, for the GPU training jobs   [default 0]
 set -euo pipefail
 
 # 1. Settings
@@ -17,6 +18,10 @@ ENV_DIR="$BUNDLE_DIR/env"
 VENV_DIR="$ENV_DIR/venv"
 MULTINEST_PREFIX="$ENV_DIR/multinest"            # where libmultinest.so ends up
 OUT_DIR="${OUT_DIR:-/work/out}"
+INSTALL_TORCH="${INSTALL_TORCH:-0}"
+TORCH_VERSION="2.5.1"                            # same versions as requirements.txt
+ZUKO_VERSION="1.2.0"
+TORCH_INDEX_URL="https://download.pytorch.org/whl/cu121"
 PYTHON_VERSION="3.10"
 BUILD_JOBS="$(nproc)"
 # Same versions as the notebook's environment
@@ -44,6 +49,15 @@ uv venv --quiet --python "$PYTHON_VERSION" "$VENV_DIR"
 # 4. The pinned packages
 echo "== 4. Installing the pinned packages"
 uv pip install --quiet --python "$VENV_DIR/bin/python" "${PINNED_PACKAGES[@]}"
+
+# 4b. PyTorch and zuko for the training jobs (the GPU build of torch lives on PyTorch's own package index; the
+# venv made by uv has no pip, so uv installs into it)
+if [[ "$INSTALL_TORCH" == "1" ]]; then
+    echo "== 4b. Installing PyTorch $TORCH_VERSION and zuko $ZUKO_VERSION"
+    uv pip install --quiet --python "$VENV_DIR/bin/python" "torch==$TORCH_VERSION" --index-url "$TORCH_INDEX_URL"
+    uv pip install --quiet --python "$VENV_DIR/bin/python" "zuko==$ZUKO_VERSION"
+    "$VENV_DIR/bin/python" -c "import torch; print('cuda available:', torch.cuda.is_available())"
+fi
 
 # 5. MultiNest, built from the shipped source. Its CMake script writes into the source folder,
 # so the build happens in a copy; only the shared library is needed (the MPI one is not used).

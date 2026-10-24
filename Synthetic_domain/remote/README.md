@@ -54,3 +54,43 @@ job stopped starts again from the beginning.
 - `uv` installs Python 3.10 from the network; the pinned package versions are those of the local environment.
 - The container has no BLAS development symlink, so `build_env.sh` points CMake at `libflexiblas.so.3`.
 - Benchmark numbers (400 iterations per fit) are in the Task 12 report.
+
+# Training the ML posterior estimator (GPU)
+
+One GPU job trains both embeddings (MLP and CNN) one after the other with `train_ml_model.py`.
+
+| File | Runs | Does |
+|---|---|---|
+| `submit_training.sh` | locally | packs the bundle (code, training and validation sets, noise model, a 3-column copy of the DR3 catalogue, MultiNest source), submits a detached GPU job, prints the job id |
+| `train_job.sh` | in the job | unpacks, runs `build_env.sh` with `INSTALL_TORCH=1` (PyTorch 2.5.1 CUDA 12.1 and zuko 1.2.0), trains each embedding, writes `out/ml_runs/<embedding>/` and `out/train_<embedding>.log` |
+
+## Submit
+
+    Synthetic_domain/remote/submit_training.sh
+
+Defaults: GPU, 8 cores, 7000 MB, 08:00:00, `EMBEDDINGS="mlp cnn"`. Change them with environment variables, for
+example `EMBEDDINGS=mlp TIME_LIMIT=04:00:00 submit_training.sh`; extra arguments go to `hljob run`. Only one job runs
+at a time, so submit it after the spectral fits have finished. `BUNDLE_ONLY=<folder> submit_training.sh` writes the
+bundle there and submits nothing (to check what travels).
+
+## Follow
+
+    hljob logs ID -f          # the job log, including the environment build
+    hljob wait ID
+
+The training log of each embedding (one line per epoch) is `out/train_<embedding>.log`; it comes back with the fetch.
+
+## Fetch
+
+    hljob fetch ID -o /tmp/ml_job
+    cp -r /tmp/ml_job/out/ml_runs/* Synthetic_domain/ml_runs/
+
+The runs land in `Synthetic_domain/ml_runs/<embedding>/` as `model.pt`, `config.json` and `history.csv`. The weights
+(`model.pt`) are ignored by git; `config.json` and `history.csv` are committed. A run that finished before a timeout
+is already in `out/ml_runs/`, so it can be fetched after a timeout too.
+
+## Test locally (CPU, a few minutes)
+
+    cd Synthetic_domain
+    python train_ml_model.py --embedding mlp --output-dir /tmp/ml_test --epochs 2 \
+        --max-train-rows 3000 --max-validation-rows 500 --device cpu

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Helpers shared by fit_job.sh and benchmark_job.sh (source this file; it only defines functions).
+# Helpers shared by fit_job.sh, benchmark_job.sh and train_job.sh (source this file; it only defines functions).
 #
 # The memory numbers come from the job's cgroup (the limit the job is killed at), not from `ps`, because the
 # job is killed when the cgroup passes its limit, whatever the sum of the process sizes says.
