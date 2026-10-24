@@ -791,3 +791,76 @@ def test_slurm_tasks_write_one_log_file_each(tmp_path):
     assert not (tmp_path / "fit_log.csv").exists()
     for job_id in ("calib_000", "calib_001"):
         assert list(pd.read_csv(tmp_path / "fit_logs" / f"{job_id}.csv")["job_id"]) == [job_id]
+
+
+# =============================================================================
+# Vectorised helpers for the ML phase
+# =============================================================================
+def legacy_draw_log_errors(magnitudes, band_table, rng):
+    """The original per-model loop of sm.draw_log_errors, kept as the reference."""
+    table_bins = sm.noise_bin_index(band_table["magnitude_low"].to_numpy() + sm.NOISE_BIN_WIDTH / 2)
+    quantile_table = band_table[sm.quantile_column_names()].to_numpy()
+    log_errors = np.full(len(magnitudes), np.nan)
+    finite = np.isfinite(magnitudes)
+    model_bins = np.full(len(magnitudes), -1)
+    model_bins[finite] = sm.noise_bin_index(magnitudes[finite])
+    for model_index in np.flatnonzero(finite):
+        if model_bins[model_index] > table_bins[-1]:
+            continue
+        row_index = max(np.searchsorted(table_bins, model_bins[model_index], side="right") - 1, 0)
+        quantile_position = rng.random() * (sm.NOISE_N_QUANTILES - 1)
+        lower = int(np.floor(quantile_position))
+        upper = min(lower + 1, sm.NOISE_N_QUANTILES - 1)
+        weight = quantile_position - lower
+        row = quantile_table[row_index]
+        log_errors[model_index] = row[lower] + weight * (row[upper] - row[lower])
+    return log_errors
+
+
+def test_vectorised_draw_log_errors_matches_the_legacy_loop(dr3_galaxies):
+    noise_table = sm.fit_noise_model(dr3_galaxies)
+    band_table = noise_table[noise_table["band"] == "g"]
+    magnitudes = np.random.default_rng(20).uniform(8, 32, 5000)
+    magnitudes[::17] = np.nan
+    expected = legacy_draw_log_errors(magnitudes, band_table, np.random.default_rng(21))
+    result = sm.draw_log_errors(magnitudes, band_table, np.random.default_rng(21))
+    assert np.array_equal(np.isnan(expected), np.isnan(result))
+    assert np.allclose(expected[np.isfinite(expected)], result[np.isfinite(result)])
+
+
+def test_vectorised_scale_to_observed_r_draws_from_the_window():
+    rng = np.random.default_rng(22)
+    catalogue_z = rng.uniform(0, 1, 3000)
+    catalogue_r = 15 + 5 * catalogue_z + rng.normal(0, 0.1, 3000)
+    model_magnitudes = np.full((400, len(sm.BANDS)), 25.0)
+    model_z = rng.uniform(0, 0.7, 400)
+    scaled, offsets = sm.scale_to_observed_r(model_magnitudes, model_z, catalogue_r, catalogue_z, rng)
+    r_index = sm.BANDS.index("r")
+    for model_index in range(len(model_z)):
+        in_window = np.abs(catalogue_z - model_z[model_index]) < sm.SCALING_MAX_DZ
+        assert np.any(np.isclose(catalogue_r[in_window], scaled[model_index, r_index]))
+    assert np.allclose(scaled[:, 0] - model_magnitudes[:, 0], offsets)
+
+
+def test_bin_edges_array_matches_bin_edges():
+    redshifts = np.random.default_rng(23).uniform(*sm.Z_RANGE, 300)
+    edges_array = sm.bin_edges_array(redshifts)
+    assert edges_array.shape == (300, sm.N_BINS + 1)
+    for row_index, redshift in enumerate(redshifts):
+        expected = sm.bin_edges(redshift)
+        assert np.allclose(edges_array[row_index, :len(expected)], expected)
+        assert np.all(np.isnan(edges_array[row_index, len(expected):]))
+
+
+def test_bin_metallicities_array_matches_bin_metallicities():
+    rng = np.random.default_rng(24)
+    redshifts = rng.uniform(*sm.Z_RANGE, 200)
+    n_existing = np.isfinite(sm.bin_edges_array(redshifts)).sum(axis=1) - 1
+    fractions = rng.dirichlet(np.ones(sm.N_BINS), 200)
+    z_final = rng.uniform(0.1, 2.5, 200)
+    result = sm.bin_metallicities_array(fractions, n_existing, z_final)
+    for row_index in range(200):
+        n_bins = n_existing[row_index]
+        expected = sm.bin_metallicities(fractions[row_index, :n_bins], z_final[row_index])
+        assert np.allclose(result[row_index, :n_bins], expected)
+        assert np.all(np.isnan(result[row_index, n_bins:]))

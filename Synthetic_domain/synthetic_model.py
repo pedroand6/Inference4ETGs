@@ -102,6 +102,26 @@ def bin_edges(redshift):
     return np.concatenate([[0.0], midpoints, [maximum_age]])
 
 
+def bin_edges_array(redshifts):
+    """Vectorised bin_edges: one row of age-bin edges per redshift.
+
+    Inputs: redshifts: array of dimensionless redshifts (n,).
+    Returns: array (n, N_BINS + 1) of edges [Gyr ago], youngest first, as bin_edges gives them;
+             entries beyond a row's last edge (bins that do not exist at that redshift) are NaN.
+    """
+    redshifts = np.asarray(redshifts, dtype=float)
+    maximum_ages = COSMOLOGY.age(redshifts).value - UNIVERSE_AGE_MARGIN
+    all_midpoints = (AGE_BIN_CENTRES[:-1] + AGE_BIN_CENTRES[1:]) / 2
+
+    edges = np.full((len(redshifts), N_BINS + 1), np.nan)
+    for row_index, maximum_age in enumerate(maximum_ages):
+        n_existing = int(np.sum(AGE_BIN_CENTRES <= maximum_age))
+        edges[row_index, 0] = 0.0
+        edges[row_index, 1:n_existing] = all_midpoints[:n_existing - 1]
+        edges[row_index, n_existing] = maximum_age
+    return edges
+
+
 # -----------------------------------------------------------------------------
 # SFH branches: same signature, each returns mass fractions per bin (sum 1)
 # -----------------------------------------------------------------------------
@@ -195,6 +215,29 @@ def bin_metallicities(fractions, z_final):
     mass_before = np.cumsum(fractions[::-1])[::-1] - fractions
     enrichment = (mass_before + fractions / 2) / fractions.sum()
     return z_initial + (z_final - z_initial) * enrichment
+
+
+def bin_metallicities_array(fractions, n_existing, z_final):
+    """Vectorised bin_metallicities for many galaxies whose number of existing bins differs.
+
+    Inputs: fractions: mass fraction per bin (n, N_BINS), youngest first (entries beyond n_existing ignored);
+            n_existing: number of existing bins per row (n,); z_final: Z_fin per row in Z/Z_sun (n,).
+    Returns: Z/Z_sun per bin (n, N_BINS); NaN for bins that do not exist.
+    """
+    fractions = np.asarray(fractions, dtype=float)
+    bin_index = np.arange(fractions.shape[1])
+    exists = bin_index[np.newaxis, :] < np.asarray(n_existing)[:, np.newaxis]
+    existing_fractions = np.where(exists, fractions, 0.0)
+
+    # Mass formed before each bin = sum of the older existing bins (bins run youngest first)
+    older_mass = np.cumsum(existing_fractions[:, ::-1], axis=1)[:, ::-1] - existing_fractions
+    total = existing_fractions.sum(axis=1, keepdims=True)
+    enrichment = (older_mass + existing_fractions / 2) / total
+
+    z_final = np.asarray(z_final, dtype=float)[:, np.newaxis]
+    z_initial = ZINI_FRACTION * z_final
+    metallicities = z_initial + (z_final - z_initial) * enrichment
+    return np.where(exists, metallicities, np.nan)
 
 
 def components(u, fixed_redshift=None):
@@ -564,6 +607,7 @@ def draw_log_errors(magnitudes, band_table, rng):
     Returns: log10(error [mag]) per magnitude; NaN where the magnitude is NaN or fainter than the last populated bin.
 
     Magnitudes brighter than the first populated bin use that bin.
+    Vectorised: it draws in the same order as the original per-model loop, so the same rng gives the same errors.
     """
     table_bins = noise_bin_index(band_table["magnitude_low"].to_numpy() + NOISE_BIN_WIDTH / 2)
     quantile_table = band_table[quantile_column_names()].to_numpy()
@@ -573,18 +617,22 @@ def draw_log_errors(magnitudes, band_table, rng):
     model_bins = np.full(len(magnitudes), -1)
     model_bins[finite] = noise_bin_index(magnitudes[finite])
 
-    for model_index in np.flatnonzero(finite):
-        if model_bins[model_index] > table_bins[-1]:
-            continue    # fainter than any S-PLUS galaxy with a measurement
-        # Nearest populated bin at or below this one; the brightest bin covers anything brighter
-        row_index = np.searchsorted(table_bins, model_bins[model_index], side="right") - 1
-        row_index = max(row_index, 0)
-        quantile_position = rng.random() * (NOISE_N_QUANTILES - 1)
-        lower = int(np.floor(quantile_position))
-        upper = min(lower + 1, NOISE_N_QUANTILES - 1)
-        weight = quantile_position - lower
-        row = quantile_table[row_index]
-        log_errors[model_index] = row[lower] + weight * (row[upper] - row[lower])
+    # Models fainter than the faintest populated bin get no error (undetected)
+    drawable = finite & (model_bins <= table_bins[-1])
+    drawable_indices = np.flatnonzero(drawable)
+
+    # Nearest populated bin at or below each model's bin; the brightest bin covers anything brighter
+    row_indices = np.searchsorted(table_bins, model_bins[drawable_indices], side="right") - 1
+    row_indices = np.maximum(row_indices, 0)
+
+    # One uniform draw per drawable model, in the same order as the original loop
+    quantile_positions = rng.random(len(drawable_indices)) * (NOISE_N_QUANTILES - 1)
+    lower = np.floor(quantile_positions).astype(int)
+    upper = np.minimum(lower + 1, NOISE_N_QUANTILES - 1)
+    weights = quantile_positions - lower
+    lower_values = quantile_table[row_indices, lower]
+    upper_values = quantile_table[row_indices, upper]
+    log_errors[drawable_indices] = lower_values + weights * (upper_values - lower_values)
     return log_errors
 
 
@@ -637,14 +685,15 @@ def scale_to_observed_r(model_magnitudes, model_z, catalogue_r, catalogue_z, rng
     sorted_z = catalogue_z[usable][order]
     sorted_r = catalogue_r[usable][order]
 
+    # Window of real galaxies around each model's redshift
+    first = np.searchsorted(sorted_z, model_z - max_dz)
+    last = np.searchsorted(sorted_z, model_z + max_dz)
+    has_neighbours = last > first
+
     offsets = np.full(len(model_magnitudes), np.nan)
-    for model_index in range(len(model_magnitudes)):
-        first = np.searchsorted(sorted_z, model_z[model_index] - max_dz)
-        last = np.searchsorted(sorted_z, model_z[model_index] + max_dz)
-        if last == first:
-            continue
-        chosen = rng.integers(first, last)
-        offsets[model_index] = sorted_r[chosen] - model_magnitudes[model_index, r_index]
+    chosen = rng.integers(first[has_neighbours], last[has_neighbours])
+    model_r = model_magnitudes[has_neighbours, r_index]
+    offsets[has_neighbours] = sorted_r[chosen] - model_r
 
     scaled_magnitudes = model_magnitudes + offsets[:, np.newaxis]
     return scaled_magnitudes, offsets
