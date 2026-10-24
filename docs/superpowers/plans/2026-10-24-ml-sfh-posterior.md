@@ -1799,7 +1799,34 @@ for mode, seed in TEST_SEEDS.items():
 summary = pd.DataFrame(summary_rows)
 display(summary.round(3))
 ```
-Also add, in the same cell, a plot of `width_ratio` against bin index for `frac_bin_*` (spectroscopic mode) titled "information per age bin (1 = prior only)". Add bias / NMAD against r magnitude in 4 r-magnitude quartile bins for `mw_age` and `log_mstar`, as a small table.
+Then add Cell 5b:
+```python
+# Information per age bin: posterior width / prior width (1 = the colours say nothing about that bin)
+spectroscopic_rows = summary[(summary["mode"] == "spectroscopic") & summary["label"].str.startswith("frac_bin_")]
+figure, axis = plt.subplots(figsize=(8, 4))
+axis.plot(range(ml_data.N_FRACTION_BINS), spectroscopic_rows["width_ratio"], marker="o")
+axis.axhline(1, color="grey", ls=":")
+axis.set_xticks(range(ml_data.N_FRACTION_BINS))
+axis.set_xticklabels([f"{centre:g}" for centre in sm.AGE_BIN_CENTRES[:ml_data.N_FRACTION_BINS]], rotation=60)
+axis.set(xlabel="bin centre [Gyr ago]", ylabel="posterior / prior 68% width",
+         title="information per age bin (1 = prior only)")
+plt.show()
+
+# Accuracy against brightness, spectroscopic mode (the loop above ended on the photometric posteriors)
+spectroscopic_rng = np.random.default_rng(TEST_SEEDS["spectroscopic"])
+observations = ml_data.validation_observations(test_table, "spectroscopic", spectroscopic_rng)
+posteriors, truths = labelled_posteriors(runs[CHOSEN], observations, N_POSTERIOR_SAMPLES, SAMPLING_SEED)
+r_magnitude = observations["flat"][observations["valid"], 33]
+r_quartile = pd.qcut(r_magnitude, 4, labels=["brightest", "second", "third", "faintest"])
+accuracy_rows = []
+for label in ("mw_age", "log_mstar"):
+    medians = np.nanmedian(posteriors[label], axis=1)
+    for quartile in r_quartile.categories:
+        in_quartile = np.asarray(r_quartile == quartile)
+        bias, nmad = ev.bias_and_nmad(medians[in_quartile], truths[label].to_numpy()[in_quartile])
+        accuracy_rows.append({"label": label, "r_quartile": quartile, "bias": bias, "nmad": nmad})
+display(pd.DataFrame(accuracy_rows).round(3))
+```
 
 - [ ] **Step 4: Cells 6–7: agreement with the Bagpipes spectral posteriors and the Firefly cross-check**
 
