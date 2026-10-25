@@ -137,6 +137,12 @@ def test_light_weighted_age_of_a_single_populated_bin_lies_in_that_bin():
     assert np.log10(edges[10] * sm.GYR_TO_YEARS) - 0.1 <= log_age <= np.log10(edges[11] * sm.GYR_TO_YEARS) + 0.1
 
 
+def test_light_weighted_log_mean_is_log_of_the_mean_not_mean_of_the_log():
+    result = sv.light_weighted_log_mean([0.1e9, 10e9], [1.0, 1.0])
+    assert np.isclose(result, np.log10(5.05e9))
+    assert abs(result - 9.0) > 0.5
+
+
 def test_speagle_main_sequence_value():
     assert np.isclose(sv.speagle_log_sfr(10.0, 13.7), (0.84 - 0.026 * 13.7) * 10 - (6.51 - 0.11 * 13.7))
 

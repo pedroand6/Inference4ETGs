@@ -259,14 +259,22 @@ N_LIGHT_WEIGHT_SAMPLES = 50
 LIGHT_WEIGHT_REDSHIFT = 0.001   # near rest frame: the r band then samples rest-frame r-band light
 
 
+def light_weighted_log_mean(values, luminosities):
+    """log10 of the luminosity-weighted linear mean, log10(sum(L v) / sum(L)): the log of the mean, not the mean of the log."""
+    values = np.asarray(values, dtype=float)
+    luminosities = np.asarray(luminosities, dtype=float)
+    return np.log10(np.sum(luminosities * values) / np.sum(luminosities))
+
+
 def light_weighted_age_and_metallicity(unit_cube_samples, redshift, n_samples=N_LIGHT_WEIGHT_SAMPLES):
-    """r-band light-weighted log age and log metallicity of posterior samples.
+    """r-band light-weighted log age and log metallicity of posterior samples (Gallazzi et al. 2005 definition).
 
     Each existing age bin is modelled alone (dust-free, no nebular emission, near rest frame) to get its r-band
-    luminosity L_i; the light-weighted values are sum(L_i * log10 x_i) / sum(L_i) with x_i the bin's mid age [yr]
-    or metallicity [Z/Z_sun]. Gallazzi et al. (2005) quote the r-band light-weighted mean of log age and log Z;
-    this computes the same using each bin's linear mid-age. The mid-age approximation costs <~0.05 dex (mostly in
-    young bins), and the S-PLUS r filter stands in for SDSS r (negligible difference).
+    luminosity L_i. Gallazzi et al. (2005, section 3.1) define the r-band light-weighted age as the linear mean
+    t_r = sum(L_i t_i) / sum(L_i), quoted as log10(t_r), and one light-weighted Z per model; so both outputs are
+    the log of a linear weighted mean (t_i = the bin's linear mid-age [yr], Z_i in Z/Z_sun). The mid-age
+    approximation costs <~0.05 dex (mostly in young bins), and the S-PLUS r filter stands in for SDSS r
+    (negligible difference).
     Inputs: unit-cube samples; the galaxy redshift (sets the bins). Returns: DataFrame with log_age_light [log yr]
             and log_metallicity_light [log Z/Z_sun], one row per kept sample.
     """
@@ -292,9 +300,8 @@ def light_weighted_age_and_metallicity(unit_cube_samples, redshift, n_samples=N_
             # Bagpipes returns a 0-d array for a one-filter list, so promote it before indexing
             luminosities[bin_index] = np.atleast_1d(model.photometry)[0]
         mid_ages = (edges[:-1] + edges[1:]) / 2 * sm.GYR_TO_YEARS
-        weights = luminosities / luminosities.sum()
-        rows.append({"log_age_light": np.sum(weights * np.log10(mid_ages)),
-                     "log_metallicity_light": np.sum(weights * np.log10(metallicities))})
+        rows.append({"log_age_light": light_weighted_log_mean(mid_ages, luminosities),
+                     "log_metallicity_light": light_weighted_log_mean(metallicities, luminosities)})
     return pd.DataFrame(rows)
 
 
@@ -302,10 +309,6 @@ def light_weighted_age_and_metallicity(unit_cube_samples, redshift, n_samples=N_
 # 5. Scaling relations
 # =============================================================================
 SPEAGLE_SCATTER = 0.2           # [dex] intrinsic scatter of the main sequence (Speagle et al. 2014)
-# [dex] log M* Chabrier minus Kroupa (Madau & Dickinson 2014: 0.63/0.67). Use ONLY to place our Kroupa masses on a
-# Chabrier-based axis (e.g. Gallazzi et al. 2005 masses). Bagpipes bc03_miles, MPA-JHU SFRs (Brinchmann et al. 2004)
-# and Speagle et al. (2014) are all Kroupa, so it does NOT apply to the H-alpha SFR comparison or the main sequence.
-KROUPA_TO_CHABRIER_DEX = -0.027
 MIN_POINTS_PER_BIN = 10         # relation bins with fewer points are dropped (percentiles too noisy)
 PERCENTILES = (16, 50, 84)
 
