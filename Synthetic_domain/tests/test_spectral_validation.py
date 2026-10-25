@@ -1,10 +1,12 @@
 """Tests for spectral_validation.py. Run from Synthetic_domain/."""
 
+import bagpipes as pipes
 import numpy as np
 import pandas as pd
 import pytest
 
 import spectral_validation as sv
+import synthetic_model as sm
 
 GRID = np.arange(3700.0, 5600.0, 1.0)      # rest-frame air Angstrom, 1 A pixels
 
@@ -62,12 +64,8 @@ def test_measurement_error_shrinks_with_signal_to_noise():
     assert precise["Hdelta_A_err"] < noisy["Hdelta_A_err"] / 5
 
 
-import synthetic_model as sm
-
-
 def model_galaxy_spectrum(cube, redshift):
     """Noise-free model spectrum of one cube point on a 1 A observed air grid, and that grid."""
-    import bagpipes as pipes
     observed_grid = np.arange(sm.OBSERVED_RANGE[0], sm.OBSERVED_RANGE[1], 1.0)
     components, _, _ = sm.spectral_components(cube, redshift)
     model = pipes.model_galaxy(components, spec_wavs=observed_grid)
@@ -113,6 +111,17 @@ def test_index_comparison_z_and_p():
     comparison = sv.index_comparison(measured, predictive)
     assert abs(comparison["D4000_n_z"]) < 0.1
     assert comparison["D4000_n_p"] > 0.8
+
+
+def test_index_comparison_p_uses_replicated_data_with_observational_noise():
+    measured = {name: 1.1 for name in sv.INDEX_NAMES}
+    for name in sv.INDEX_NAMES:
+        measured[f"{name}_err"] = 0.1
+    rng = np.random.default_rng(4)
+    predictive = pd.DataFrame({name: rng.normal(1.0, 0.001, 2000) for name in sv.INDEX_NAMES})
+    comparison = sv.index_comparison(measured, predictive)
+    assert abs(comparison["D4000_n_z"] - 1.0) < 0.05
+    assert abs(comparison["D4000_n_p"] - 0.32) < 0.03
 
 
 def test_light_weighted_age_of_a_single_populated_bin_lies_in_that_bin():

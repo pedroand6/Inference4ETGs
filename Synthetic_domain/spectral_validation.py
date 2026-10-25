@@ -9,6 +9,7 @@ import bagpipes as pipes
 import numpy as np
 import pandas as pd
 from astropy.io import fits
+from scipy.stats import norm
 
 import synthetic_model as sm
 
@@ -200,6 +201,8 @@ def predictive_indices(unit_cube_samples, redshift, observed_wavelength_air, dat
 
     Inputs: unit-cube posterior samples (n, SPECTRAL_DIMS); redshift; the galaxy's native observed air
             wavelength grid [Angstrom] and its flux/ivar on that grid (restricted to sm.OBSERVED_RANGE by the caller).
+    The calibration polynomial basis is uniform in pixel index, which differs slightly from the fit's 5 A bins
+    (negligible for the indices).
     Returns: DataFrame (samples x INDEX_NAMES); a sample whose model flux is not positive in a band gets NaN there.
     """
     kept = evenly_spaced_rows(unit_cube_samples, n_samples)
@@ -226,6 +229,9 @@ def index_comparison(measured, predictive):
     Inputs: measured (measure_indices output); predictive (predictive_indices output).
     Returns: dict with <name>_model_median, <name>_model_std, <name>_z = (obs - median)/sqrt(err^2 + std^2) and
              <name>_p (two-sided posterior-predictive p-value) for every name; NaN where either side is missing.
+    The p-value is checked against replicated data = model + observational noise: for each posterior sample the
+    replicate is N(model, err), so P(replicate < observed) = Phi((observed - model) / err), averaged over samples.
+    Comparing with the noise-free model alone would flag every well-measured index as a misfit.
     """
     comparison = {}
     for name in INDEX_NAMES:
@@ -241,7 +247,7 @@ def index_comparison(measured, predictive):
         comparison[f"{name}_model_median"] = median
         comparison[f"{name}_model_std"] = spread
         comparison[f"{name}_z"] = (observed - median) / np.sqrt(measured[f"{name}_err"] ** 2 + spread**2)
-        below = np.mean(model_values < observed)
+        below = np.mean(norm.cdf((observed - model_values) / measured[f"{name}_err"]))
         comparison[f"{name}_p"] = 2 * min(below, 1 - below)
     return comparison
 
@@ -258,8 +264,9 @@ def light_weighted_age_and_metallicity(unit_cube_samples, redshift, n_samples=N_
 
     Each existing age bin is modelled alone (dust-free, no nebular emission, near rest frame) to get its r-band
     luminosity L_i; the light-weighted values are sum(L_i * log10 x_i) / sum(L_i) with x_i the bin's mid age [yr]
-    or metallicity [Z/Z_sun]. Check this convention against Gallazzi et al. (2005) §2 (they quote r-band
-    light-weighted log age and log Z) and keep both definitions identical.
+    or metallicity [Z/Z_sun]. Gallazzi et al. (2005) quote the r-band light-weighted mean of log age and log Z;
+    this computes the same using each bin's linear mid-age. The mid-age approximation costs <~0.05 dex (mostly in
+    young bins), and the S-PLUS r filter stands in for SDSS r (negligible difference).
     Inputs: unit-cube samples; the galaxy redshift (sets the bins). Returns: DataFrame with log_age_light [log yr]
             and log_metallicity_light [log Z/Z_sun], one row per kept sample.
     """
@@ -295,7 +302,11 @@ def light_weighted_age_and_metallicity(unit_cube_samples, redshift, n_samples=N_
 # 5. Scaling relations
 # =============================================================================
 SPEAGLE_SCATTER = 0.2           # [dex] intrinsic scatter of the main sequence (Speagle et al. 2014)
-KROUPA_TO_CHABRIER_DEX = -0.027 # [dex] log SFR (or M*) Chabrier minus Kroupa (Madau & Dickinson 2014: 0.63/0.67)
+# [dex] log M* Chabrier minus Kroupa (Madau & Dickinson 2014: 0.63/0.67). Use ONLY to place our Kroupa masses on a
+# Chabrier-based axis (e.g. Gallazzi et al. 2005 masses). Bagpipes bc03_miles, MPA-JHU SFRs (Brinchmann et al. 2004)
+# and Speagle et al. (2014) are all Kroupa, so it does NOT apply to the H-alpha SFR comparison or the main sequence.
+KROUPA_TO_CHABRIER_DEX = -0.027
+MIN_POINTS_PER_BIN = 10         # relation bins with fewer points are dropped (percentiles too noisy)
 PERCENTILES = (16, 50, 84)
 
 
@@ -313,12 +324,12 @@ def speagle_main_sequence(log_mstar, redshift):
 def relation_band(x, y, bin_edges):
     """Median and 16-84th percentiles of y in bins of x (a literature relation from a large sample).
 
-    Returns: DataFrame with x_low, x_high, n, y_p16, y_median, y_p84 (bins with < 10 points are dropped).
+    Returns: DataFrame with x_low, x_high, n, y_p16, y_median, y_p84 (bins with < MIN_POINTS_PER_BIN points are dropped).
     """
     rows = []
     for low, high in zip(bin_edges[:-1], bin_edges[1:]):
         in_bin = (x >= low) & (x < high) & np.isfinite(y)
-        if in_bin.sum() < 10:
+        if in_bin.sum() < MIN_POINTS_PER_BIN:
             continue
         p16, p50, p84 = np.percentile(y[in_bin], PERCENTILES)
         rows.append({"x_low": low, "x_high": high, "n": int(in_bin.sum()),
@@ -328,6 +339,8 @@ def relation_band(x, y, bin_edges):
 
 def inside_band(x, y, band):
     """Whether each (x, y) lies inside the 16-84th band of its x bin; NA outside the binned x range or for NaN."""
+    x = np.asarray(x, dtype=float)    # pandas nullable inputs become float with NaN
+    y = np.asarray(y, dtype=float)
     result = []
     for x_value, y_value in zip(x, y):
         matching = band[(band["x_low"] <= x_value) & (band["x_high"] > x_value)]
@@ -353,8 +366,10 @@ def mpa_jhu_query(specobjids):
     """SkyServer SQL selecting MPA-JHU indices and SFRs plus SDSS velocity dispersions for the given spectra.
 
     Inputs: SDSS specObjIDs as text (eBOSS ids exceed int64). Returns: the SQL string (one LEFT JOIN per table;
-            spectra without galSpec rows come back with NULLs).
+            spectra without galSpec rows come back with NULLs). Callers should chunk long lists (<= 200 ids).
     """
+    for specobjid in specobjids:
+        assert str(specobjid).isdigit(), f"specObjID must be a digit string, got {specobjid!r}"
     selected = ["CAST(s.specObjID AS VARCHAR(20)) AS specobjid_text", "s.velDisp", "s.velDispErr"]
     for column in MPA_JHU_COLUMNS["galSpecIndx"]:
         selected.append(f"i.{column}")
