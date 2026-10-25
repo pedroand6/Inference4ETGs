@@ -752,12 +752,13 @@ Code cell B (layer 2):
 mpa = pd.read_csv(os.path.join(LITERATURE_DIRECTORY, "mpa_jhu_reference.csv"), dtype={"specobjid": str})
 mpa = mpa.add_prefix("mpa_").rename(columns={"mpa_specobjid": "specobjid"})
 reference = reference.merge(mpa, on="specobjid", how="left")
-STAR_FORMING_BPT_CLASS = 1      # MPA-JHU BPT class 1 = star-forming
+STAR_FORMING_BPT_CLASSES = (1, 2)   # MPA-JHU BPT classes: 1 star-forming, 2 low-S/N star-forming (ruling Q7)
 FIBRE_YOUNG_BIN = "logsfr_bin_00_median"   # Bagpipes SFR over 0-14 Myr, the time scale Halpha traces
 reference["bagpipes_log_sfr_young"] = reference[FIBRE_YOUNG_BIN]
 reference["delta_log_sfr_halpha"] = (reference["bagpipes_log_sfr_young"]
                                      - (reference["mpa_sfr_fib_p50"]))   # both Kroupa: no IMF offset (ruling Q6)
-halpha_usable = reference["mpa_bptclass"].eq(STAR_FORMING_BPT_CLASS) & reference["delta_log_sfr_halpha"].notna()
+halpha_usable = (reference["mpa_bptclass"].isin(STAR_FORMING_BPT_CLASSES)
+                 & reference["delta_log_sfr_halpha"].notna())
 
 # Layer 2b: Gallazzi et al. (2005) light-weighted ages and metallicities
 gallazzi = pd.read_csv(os.path.join(LITERATURE_DIRECTORY, "gallazzi_reference.csv"), dtype={"specobjid": str})
@@ -781,8 +782,11 @@ Code cell C (layer 3):
 ```python
 # Layer 3: our galaxies on literature scaling relations. Relations use total masses: the 3" aperture mass is
 # scaled to the total S-PLUS r magnitude assuming a constant mass-to-light ratio across the galaxy
-splus_catalogue = pd.read_csv(SPLUS_FILE, usecols=["r_auto"])
-reference["r_auto"] = splus_catalogue["r_auto"].to_numpy()[reference["splus_index"].astype(int)]
+# splus_index points into the in-memory splus table of cell 3 (filtered on PROB_GAL and re-indexed), not into
+# the file's rows, so r_auto is taken from that table; the total magnitude must be the brighter one
+reference["r_auto"] = splus["r_auto"].to_numpy()[reference["splus_index"].astype(int)]
+total_minus_aperture = (reference["r_auto"] - reference["r_aper"]).dropna()
+assert (total_minus_aperture < 0).mean() >= 0.95, "r_auto fainter than r_aper: wrong galaxies (check splus_index)"
 aperture_to_total = -sm.DEX_PER_MAGNITUDE * (reference["r_auto"] - reference["r_aper"])
 reference["log_mstar_total"] = reference["log_mstar_median"] + aperture_to_total
 reference["log_sfr_total"] = reference["log_sfr_median"] + aperture_to_total
