@@ -83,6 +83,7 @@ The training log of each embedding (one line per epoch) is `out/train_<embedding
 ## Fetch
 
     hljob fetch ID -o /tmp/ml_job
+    mkdir -p Synthetic_domain/ml_runs
     cp -r /tmp/ml_job/out/ml_runs/* Synthetic_domain/ml_runs/
 
 The runs land in `Synthetic_domain/ml_runs/<embedding>/` as `model.pt`, `config.json` and `history.csv`. The weights

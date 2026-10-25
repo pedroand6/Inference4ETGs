@@ -8,10 +8,12 @@
 #
 # Environment variables (set by submit_training.sh with hljob -e):
 #   EMBEDDINGS   embeddings to train, one after the other   [default "mlp cnn"]
+#   ALLOW_CPU_TRAINING  set to 1 to train on the CPU when no GPU is usable   [default: fail without a GPU]
 set -euo pipefail
 
 # 1. Settings
 EMBEDDINGS="${EMBEDDINGS:-mlp cnn}"
+ALLOW_CPU_TRAINING="${ALLOW_CPU_TRAINING:-0}"
 JOB_DIR="/work"
 export OUT_DIR="$JOB_DIR/out"
 RUN_DIR="$JOB_DIR/run"
@@ -28,7 +30,25 @@ source job_common.sh
 echo "== 3. Building the environment"
 INSTALL_TORCH=1 bash build_env.sh
 source env/activate.sh
-nvidia-smi || echo "WARNING: nvidia-smi not found; the training will run on the CPU"
+
+# 3b. GPU check. Without it `--device auto` would silently fall back to the CPU and burn the whole time limit
+# (up to 8 h), so fail fast unless CPU training was explicitly allowed. Both the driver (nvidia-smi) and the
+# torch build in the venv (a CPU-only wheel cannot see the GPU) must work.
+if [[ "$ALLOW_CPU_TRAINING" == "1" ]]; then
+    echo "ALLOW_CPU_TRAINING=1: training on the CPU, no GPU check"
+    DEVICE="cpu"
+else
+    if ! nvidia-smi; then
+        echo "ERROR: nvidia-smi failed: no GPU visible to the job. Set ALLOW_CPU_TRAINING=1 to train on the CPU." >&2
+        exit 1
+    fi
+    if ! python -c "import torch; assert torch.cuda.is_available()"; then
+        echo "ERROR: torch cannot use CUDA (CPU-only build or unseen GPU). Set ALLOW_CPU_TRAINING=1 to train on the CPU." >&2
+        exit 1
+    fi
+    DEVICE="cuda"
+fi
+echo "Training device: $DEVICE"
 
 # 4. Memory samples, written to out/ for the record; the sampler is stopped however the script ends
 start_memory_sampler "$OUT_DIR/memory_samples.csv"
@@ -41,6 +61,7 @@ for embedding in $EMBEDDINGS; do
     set_stage "train_$embedding" "$OUT_DIR/memory_samples.csv"
     training_exit_code=0
     python train_ml_model.py --embedding "$embedding" --output-dir "$OUT_DIR/ml_runs" \
+        --device "$DEVICE" \
         >> "$OUT_DIR/train_$embedding.log" 2>&1 || training_exit_code=$?
     echo "'$embedding' finished with exit code $training_exit_code"
     if [[ "$training_exit_code" -ne 0 ]]; then

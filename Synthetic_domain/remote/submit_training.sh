@@ -8,6 +8,7 @@
 #   MEMORY_MB        memory limit in MB                                        [default 7000]
 #   TIME_LIMIT       wall-clock limit HH:MM:SS                                 [default 08:00:00]
 #   EMBEDDINGS       embeddings to train, one after the other                  [default "mlp cnn"]
+#   ALLOW_CPU_TRAINING set to 1 to let the job train on the CPU if no GPU is usable    [default: the job fails]
 #   JOB_NAME         name shown in `hljob ls`                                  [default ml_training]
 #   MULTINEST_SOURCE the MultiNest source folder (build_env.sh builds it)      [default ~/Programs/MultiNest]
 #   BUNDLE_ONLY      set to a folder path to only write bundle.tar.gz there and NOT submit   [default: submit]
@@ -19,6 +20,7 @@ CORES="${CORES:-8}"
 MEMORY_MB="${MEMORY_MB:-7000}"
 TIME_LIMIT="${TIME_LIMIT:-08:00:00}"
 EMBEDDINGS="${EMBEDDINGS:-mlp cnn}"
+ALLOW_CPU_TRAINING="${ALLOW_CPU_TRAINING:-0}"
 JOB_NAME="${JOB_NAME:-ml_training}"
 MULTINEST_SOURCE="${MULTINEST_SOURCE:-$HOME/Programs/MultiNest}"
 BUNDLE_ONLY="${BUNDLE_ONLY:-}"
@@ -64,7 +66,7 @@ fi
 
 # 6. Submit (one GPU job that trains every embedding). Both files are uploaded to inputs/.
 job_id="$(hljob run --detach --gpu -n "$JOB_NAME" -c "$CORES" -m "$MEMORY_MB" -t "$TIME_LIMIT" \
-    -e EMBEDDINGS="$EMBEDDINGS" "$@" \
+    -e EMBEDDINGS="$EMBEDDINGS" -e ALLOW_CPU_TRAINING="$ALLOW_CPU_TRAINING" "$@" \
     -f "$scratch_dir/bundle.tar.gz" -f "$REMOTE_DIR/train_job.sh" -- bash inputs/train_job.sh)"
 
 echo "Submitted job $job_id (GPU, $CORES cores, $MEMORY_MB MB, $TIME_LIMIT, embeddings: $EMBEDDINGS)"
