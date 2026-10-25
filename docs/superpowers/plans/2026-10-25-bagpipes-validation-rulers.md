@@ -17,7 +17,7 @@
 - Observed indices: native SDSS resolution, air wavelengths, Milky-Way dereddened, rest frame; errors by 200 Monte-Carlo noise draws from ivar; any ivar = 0 pixel inside an index's bands → that index is NaN for that galaxy.
 - Model indices: 100 equal-weight posterior samples per galaxy, Bagpipes model spectrum on the galaxy's native observed grid (same components incl. `veldisp` and nebular emission) times the calibration polynomial fitted to that galaxy's data; same index code.
 - Statistics: z = (observed − model median) / √(σ_obs² + σ_model²); two-sided posterior-predictive p; report fraction |z| < 2, median z and z scatter by star-forming/passive and SDSS/BOSS.
-- Layer 2: MPA-JHU `galSpecIndx` (code cross-check), `galSpecExtra` `sfr_fib_p50` for BPT star-forming galaxies only vs Bagpipes `logsfr_bin_00` (aperture-normalised), Kroupa → Chabrier offset −0.027 dex; Gallazzi et al. (2005) r-band light-weighted log age and log Z/Z☉ vs Bagpipes light-weighted values from per-bin r-band luminosities. BOSS galaxies: "not available".
+- Layer 2: MPA-JHU `galSpecIndx` (code cross-check), `galSpecExtra` `sfr_fib_p50` for BPT star-forming galaxies only vs Bagpipes `logsfr_bin_00` (aperture-normalised), no IMF offset (all sources Kroupa; ruling Q6); Gallazzi et al. (2005) r-band light-weighted log age and log Z/Z☉ vs Bagpipes light-weighted values from per-bin r-band luminosities. BOSS galaxies: "not available".
 - Layer 3: stellar mass–metallicity (Gallazzi catalogue + its masses), Speagle et al. (2014) log SFR = (0.84 − 0.026 t) log M* − (6.51 − 0.11 t), ±0.2 dex, t = age of the Universe [Gyr]; Gallazzi age vs SDSS `velDisp` for passive galaxies; fraction of our galaxies inside each 16–84th band.
 - Report, never filter: the validation/test split stays "converged and covered". Firefly is removed from validation (columns, figure, flags, check functions) and stays only as the selection catalogue.
 - If the Gallazzi catalogue cannot be obtained, its comparisons are reported as unavailable — never replaced by an SED-fitting catalogue.
@@ -334,7 +334,7 @@ git commit -m "feat: model-independent spectral indices (D4000n, Hdelta_A, Lick 
 **Interfaces:**
 - Consumes: Task 1 functions; `sm.spectral_components`, `sm.calibration_polynomial`, `sm.bins_from_components`, `sm.OBSERVED_RANGE`, `sm.FILTER_FILES`, `sm.BANDS`, `sm.COSMOLOGY`, `sm.GYR_TO_YEARS`, `sm.LOG_MASS_FORMED`; `bagpipes`.
 - Produces:
-  - `N_PREDICTIVE_SAMPLES = 100`, `N_LIGHT_WEIGHT_SAMPLES = 50`, `MAX_Z_SCORE = 2.0`, `SPEAGLE_SCATTER = 0.2`, `KROUPA_TO_CHABRIER_DEX = -0.027`.
+  - `N_PREDICTIVE_SAMPLES = 100`, `N_LIGHT_WEIGHT_SAMPLES = 50`, `MAX_Z_SCORE = 2.0`, `SPEAGLE_SCATTER = 0.2` (no IMF constant: ruling Q6).
   - `predictive_indices(unit_cube_samples, redshift, observed_wavelength_air, data_flux, data_ivar, n_samples=N_PREDICTIVE_SAMPLES) -> pd.DataFrame` (rows = samples, columns = INDEX_NAMES).
   - `index_comparison(measured, predictive) -> dict` with `<name>_model_median`, `<name>_model_std`, `<name>_z`, `<name>_p` for every name.
   - `light_weighted_age_metallicity(unit_cube_samples, redshift, n_samples=N_LIGHT_WEIGHT_SAMPLES) -> pd.DataFrame` with `log_age_light` [log yr] and `log_metallicity_light` [log Z/Z☉].
@@ -757,7 +757,7 @@ STAR_FORMING_BPT_CLASS = 1      # MPA-JHU BPT class 1 = star-forming
 FIBRE_YOUNG_BIN = "logsfr_bin_00_median"   # Bagpipes SFR over 0-14 Myr, the time scale Halpha traces
 reference["bagpipes_log_sfr_young"] = reference[FIBRE_YOUNG_BIN]
 reference["delta_log_sfr_halpha"] = (reference["bagpipes_log_sfr_young"]
-                                     - (reference["mpa_sfr_fib_p50"] + sv.KROUPA_TO_CHABRIER_DEX))
+                                     - (reference["mpa_sfr_fib_p50"]))   # both Kroupa: no IMF offset (ruling Q6)
 halpha_usable = reference["mpa_bptclass"].eq(STAR_FORMING_BPT_CLASS) & reference["delta_log_sfr_halpha"].notna()
 
 # Layer 2b: Gallazzi et al. (2005) light-weighted ages and metallicities
@@ -866,7 +866,7 @@ plt.show()
 # Figure 2: Halpha SFR and Gallazzi light-weighted age and metallicity
 figure, axes = plt.subplots(1, 3, figsize=(16, 5))
 comparisons = [
-    (reference.loc[halpha_usable, "mpa_sfr_fib_p50"] + sv.KROUPA_TO_CHABRIER_DEX,
+    (reference.loc[halpha_usable, "mpa_sfr_fib_p50"],
      reference.loc[halpha_usable, "bagpipes_log_sfr_young"], "log SFR (Halpha, 3\" fibre)", "log SFR Bagpipes 0-14 Myr"),
     (reference["gallazzi_log_age_p50"], reference["log_age_light_median"], "Gallazzi log age_r [yr]", "Bagpipes log age_r [yr]"),
     (reference["gallazzi_log_z_p50"], reference["log_metallicity_light_median"], "Gallazzi log Z/Z_sun", "Bagpipes log Z/Z_sun"),
