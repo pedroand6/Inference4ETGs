@@ -13,6 +13,7 @@ NMAD_SCALE = 1.4826                          # makes the median absolute deviati
 ONE_SIGMA_LEVEL = 0.68                       # central probability of a "1 sigma" interval
 TWO_SIGMA_LEVEL = 0.95                       # central probability of a "2 sigma" interval
 PERCENT = 100
+WINDOW_STEPS = 5                             # redshift cells per prior window: a galaxy's window is centred within 1/5 of it
 
 
 # =============================================================================
@@ -64,16 +65,41 @@ def bias_and_nmad(estimates, truths):
     return bias, nmad
 
 
-def width_ratio(posterior_samples, prior_samples, level=ONE_SIGMA_LEVEL):
+def windowed_prior_widths(prior_redshift, prior_samples, galaxy_redshift, window, level=ONE_SIGMA_LEVEL):
+    """Prior central-interval width of one label around each galaxy's redshift.
+
+    Inputs: prior_redshift (k,) sorted ascending; prior_samples (k,) draws of the label, in the same order;
+            galaxy_redshift (n,); window: half-width in redshift (dimensionless); level: central probability.
+    Returns: widths (n,) in the label's units; NaN where no prior draw lies within the window.
+
+    Why a grid: galaxies are grouped in cells of window / WINDOW_STEPS and every cell uses the draws within
+    `window` of its centre, so the cost scales with the number of occupied cells, not galaxies.
+    """
+    cell_width = window / WINDOW_STEPS
+    cells = np.round(np.asarray(galaxy_redshift) / cell_width).astype(int)
+    widths = np.full(len(cells), np.nan)
+    for cell in np.unique(cells):
+        first = np.searchsorted(prior_redshift, cell * cell_width - window)
+        last = np.searchsorted(prior_redshift, cell * cell_width + window)
+        if last > first:
+            low, high = central_interval(prior_samples[first:last], level)
+            widths[cells == cell] = high - low
+    return widths
+
+
+def width_ratio(posterior_samples, prior_samples, level=ONE_SIGMA_LEVEL, prior_widths=None):
     """How much the data shrink a label: median over galaxies of posterior width / prior width.
 
     Inputs: posterior_samples (n, m); prior_samples (k,) draws of the same label from the prior;
-            level: central-interval probability.
+            level: central-interval probability; prior_widths: optional (n,) prior width of each galaxy
+            (e.g. windowed_prior_widths), used instead of the width of all prior_samples.
     Returns: ratio near 1 = prior-dominated, near 0 = well constrained.
     """
-    prior_low, prior_high = central_interval(prior_samples, level)
+    if prior_widths is None:
+        prior_low, prior_high = central_interval(prior_samples, level)
+        prior_widths = prior_high - prior_low
     posterior_low, posterior_high = central_interval(posterior_samples, level)
-    return float(np.nanmedian((posterior_high - posterior_low) / (prior_high - prior_low)))
+    return float(np.nanmedian((posterior_high - posterior_low) / prior_widths))
 
 
 # =============================================================================

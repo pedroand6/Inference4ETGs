@@ -47,3 +47,20 @@ def test_compare_with_spectral():
     assert not bool(result["inside_95"][1])
     assert abs(result["offset_in_widths"][0]) < 0.05
     assert result["offset_in_widths"][1] < -2.5
+
+
+def test_windowed_prior_widths_follow_the_local_prior():
+    rng = np.random.default_rng(44)
+    redshift = np.sort(rng.uniform(0, 1, 60000))
+    samples = rng.normal(0, 1, len(redshift)) * (1 + 2 * redshift)      # prior widens with redshift
+    widths = ev.windowed_prior_widths(redshift, samples, np.array([0.1, 0.9, 5.0]), window=0.05)
+    expected = 2 * 0.994 * np.array([1.2, 2.8])                          # 68% central interval of a normal
+    assert np.allclose(widths[:2], expected, rtol=0.1)
+    assert np.isnan(widths[2])                                           # no prior draws near z = 5
+
+
+def test_width_ratio_uses_per_galaxy_prior_widths():
+    rng = np.random.default_rng(45)
+    posterior = rng.normal(0, 1, (300, 2000))
+    wide = np.full(300, 2 * 0.994 * 2)                                   # prior twice as wide as the posterior
+    assert np.isclose(ev.width_ratio(posterior, None, prior_widths=wide), 0.5, atol=0.05)
