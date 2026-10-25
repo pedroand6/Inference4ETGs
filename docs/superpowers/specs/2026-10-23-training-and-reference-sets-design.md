@@ -216,3 +216,7 @@ Approved by the user after the first full run stopped at the inject-and-recover 
 - **Analysis.**
   - The notebook's analysis cells read whatever results exist (none yet is fine), report calibration coverage, and build the reference table and split as before.
   - Fits stored with a smaller iteration cap (the first run's) are moved to `spectral_fits/superseded/`, as are the first run's 6 fixed-branch mocks.
+
+## Amendment (2026-10-25): the Firefly comparison is a check, not a filter
+
+Decided by the user. The locked split takes every galaxy whose fit converged and that passes the coverage test. `firefly_consistent` stays in the CSV and the notebook reports the share of consistent fits as a sanity check of the spectral fits against the literature, but it no longer excludes galaxies from the validation and test sets. This supersedes the Firefly condition of Part 2 §8. The split stays a hash of `specobjid`, so the galaxies already assigned keep their half; the test half had not yet been used.
