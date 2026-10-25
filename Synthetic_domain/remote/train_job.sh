@@ -28,7 +28,7 @@ source job_common.sh
 
 # 3. Environment: the usual build plus PyTorch (GPU build) and zuko
 echo "== 3. Building the environment"
-INSTALL_TORCH=1 bash build_env.sh
+INSTALL_TORCH=1 SKIP_MULTINEST=1 bash build_env.sh
 source env/activate.sh
 
 # 3b. GPU check. Without it `--device auto` would silently fall back to the CPU and burn the whole time limit

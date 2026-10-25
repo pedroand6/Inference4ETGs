@@ -10,6 +10,7 @@
 # Environment variables (all optional):
 #   OUT_DIR        folder of the job results; the build log and the build time are kept there   [default /work/out]
 #   INSTALL_TORCH  set to 1 to also install PyTorch (CUDA 12.1 build) and zuko, for the GPU training jobs   [default 0]
+#   SKIP_MULTINEST set to 1 to skip building MultiNest (training jobs do not use it)                      [default 0]
 set -euo pipefail
 
 # 1. Settings
@@ -19,6 +20,7 @@ VENV_DIR="$ENV_DIR/venv"
 MULTINEST_PREFIX="$ENV_DIR/multinest"            # where libmultinest.so ends up
 OUT_DIR="${OUT_DIR:-/work/out}"
 INSTALL_TORCH="${INSTALL_TORCH:-0}"
+SKIP_MULTINEST="${SKIP_MULTINEST:-0}"
 TORCH_VERSION="2.5.1"                            # same versions as requirements.txt
 ZUKO_VERSION="1.2.0"
 TORCH_INDEX_URL="https://download.pytorch.org/whl/cu121"
@@ -63,23 +65,28 @@ fi
 # so the build happens in a copy; only the shared library is needed (the MPI one is not used).
 # The container has the FlexiBLAS runtime (BLAS and LAPACK in one library) but not the development symlink that
 # CMake searches for, so CMake is told the library file directly. The job is not root, so nothing can be installed.
-echo "== 5. Building MultiNest"
-blas_lapack_library="$(ldconfig -p | awk '/libflexiblas\.so\.3 / {print $NF; exit}')"
-if [[ -z "$blas_lapack_library" ]]; then
-    echo "ERROR: no BLAS/LAPACK runtime (libflexiblas.so.3) found in the container." >&2
-    exit 1
+# Training jobs never call MultiNest, and the GPU container lacks the BLAS runtime it needs: they skip this step.
+if [[ "$SKIP_MULTINEST" == "1" ]]; then
+    echo "== 5. Skipping MultiNest (SKIP_MULTINEST=1)"
+else
+    echo "== 5. Building MultiNest"
+    blas_lapack_library="$(ldconfig -p | awk '/libflexiblas\.so\.3 / {print $NF; exit}')"
+    if [[ -z "$blas_lapack_library" ]]; then
+        echo "ERROR: no BLAS/LAPACK runtime (libflexiblas.so.3) found in the container." >&2
+        exit 1
+    fi
+    echo "BLAS and LAPACK: $blas_lapack_library"
+    multinest_build_source="$ENV_DIR/multinest_source"
+    cp -r "$BUNDLE_DIR/multinest" "$multinest_build_source"
+    mkdir -p "$multinest_build_source/build"
+    (
+        cd "$multinest_build_source/build"
+        cmake .. -DBLAS_LIBRARIES="$blas_lapack_library" -DLAPACK_LIBRARIES="$blas_lapack_library"
+        make -j"$BUILD_JOBS" multinest_shared
+    )
+    mkdir -p "$MULTINEST_PREFIX/lib"
+    cp "$multinest_build_source"/lib/libmultinest.so* "$MULTINEST_PREFIX/lib/"
 fi
-echo "BLAS and LAPACK: $blas_lapack_library"
-multinest_build_source="$ENV_DIR/multinest_source"
-cp -r "$BUNDLE_DIR/multinest" "$multinest_build_source"
-mkdir -p "$multinest_build_source/build"
-(
-    cd "$multinest_build_source/build"
-    cmake .. -DBLAS_LIBRARIES="$blas_lapack_library" -DLAPACK_LIBRARIES="$blas_lapack_library"
-    make -j"$BUILD_JOBS" multinest_shared
-)
-mkdir -p "$MULTINEST_PREFIX/lib"
-cp "$multinest_build_source"/lib/libmultinest.so* "$MULTINEST_PREFIX/lib/"
 
 # 6. A file that sets the environment for the fits (the library folder must be on LD_LIBRARY_PATH for PyMultiNest)
 cat > "$ENV_DIR/activate.sh" <<ACTIVATE
@@ -109,9 +116,11 @@ import importlib.metadata
 for package in ["numpy", "scipy", "astropy", "pandas", "bagpipes", "pymultinest", "h5py", "joblib",
                 "pyarrow", "spectres", "extinction", "matplotlib", "corner", "nautilus-sampler"]:
     print(f"{package}=={importlib.metadata.version(package)}")
-import pymultinest    # fails here, not in the middle of a fit, if libmultinest.so is not found
-print("pymultinest imports and finds libmultinest.so")
 PRINT_VERSIONS
+if [[ "$SKIP_MULTINEST" != "1" ]]; then
+    # Fails here, not in the middle of a fit, if libmultinest.so is not found
+    python -c "import pymultinest; print('pymultinest imports and finds libmultinest.so')"
+fi
 
 build_seconds=$((SECONDS - build_start_seconds))
 echo "$build_seconds" > "$OUT_DIR/env_build_seconds.txt"
