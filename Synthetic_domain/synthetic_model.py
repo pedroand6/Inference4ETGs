@@ -1007,6 +1007,48 @@ def compare_with_firefly(bagpipes_age_gyr, bagpipes_metallicity, firefly_age_yea
     })
 
 
+def firefly_scatter_consistency(delta_log_age, delta_log_metallicity, groups):
+    """Firefly agreement judged by scatter: each group's median offset is removed first.
+
+    A code-to-code systematic shift (different SPS, priors, SFH) says little about a fit, so the shift is
+    measured per group and the 0.3 dex thresholds apply to the scatter around it. NaN values are ignored
+    when taking a median, and the flag is NA where either delta is NaN.
+    Inputs: delta_log_age, delta_log_metallicity [dex] (Bagpipes minus Firefly); groups: one string per
+            galaxy (e.g. "star-forming", "passive"); all arrays of equal length.
+    Returns: DataFrame with offset_corrected_delta_log_age and offset_corrected_delta_log_metallicity [dex]
+             and firefly_scatter_consistent (pandas boolean, NA where a delta is NaN).
+    """
+    delta_log_age = np.asarray(delta_log_age, dtype=float)
+    delta_log_metallicity = np.asarray(delta_log_metallicity, dtype=float)
+    groups = np.asarray(groups)
+
+    corrected_age = np.full(len(groups), np.nan)
+    corrected_metallicity = np.full(len(groups), np.nan)
+    for group in np.unique(groups):
+        in_group = groups == group
+        group_ages = delta_log_age[in_group]
+        group_metallicities = delta_log_metallicity[in_group]
+        # An all-NaN group has no median; its corrected values stay NaN
+        if np.isfinite(group_ages).any():
+            corrected_age[in_group] = group_ages - np.nanmedian(group_ages)
+        if np.isfinite(group_metallicities).any():
+            corrected_metallicity[in_group] = group_metallicities - np.nanmedian(group_metallicities)
+
+    consistent = []
+    for age_offset, metallicity_offset in zip(corrected_age, corrected_metallicity):
+        if np.isnan(age_offset) or np.isnan(metallicity_offset):
+            consistent.append(pd.NA)
+        else:
+            consistent.append(bool(abs(age_offset) < MAX_DELTA_LOG_AGE
+                                   and abs(metallicity_offset) < MAX_DELTA_LOG_METALLICITY))
+
+    return pd.DataFrame({
+        "offset_corrected_delta_log_age": corrected_age,
+        "offset_corrected_delta_log_metallicity": corrected_metallicity,
+        "firefly_scatter_consistent": pd.array(consistent, dtype="boolean"),
+    })
+
+
 def split_by_hash(specobjid):
     """'validation' or 'test' from a hash of the SDSS specobjid.
 

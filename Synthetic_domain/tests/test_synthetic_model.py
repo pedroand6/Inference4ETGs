@@ -864,3 +864,38 @@ def test_bin_metallicities_array_matches_bin_metallicities():
         expected = sm.bin_metallicities(fractions[row_index, :n_bins], z_final[row_index])
         assert np.allclose(result[row_index, :n_bins], expected)
         assert np.all(np.isnan(result[row_index, n_bins:]))
+
+
+# Firefly scatter consistency
+def test_constant_group_offset_is_removed_and_consistent():
+    ages = np.array([-0.5, -0.5, -0.5])
+    metallicities = np.array([0.4, 0.4, 0.4])
+    result = sm.firefly_scatter_consistency(ages, metallicities, ["passive"] * 3)
+    assert np.allclose(result["offset_corrected_delta_log_age"], 0.0)
+    assert np.allclose(result["offset_corrected_delta_log_metallicity"], 0.0)
+    assert result["firefly_scatter_consistent"].all()
+
+
+def test_scatter_beyond_threshold_is_inconsistent():
+    ages = np.array([0.0, 0.0, 0.5])      # median 0, so the third galaxy stays 0.5 dex away
+    metallicities = np.zeros(3)
+    result = sm.firefly_scatter_consistency(ages, metallicities, ["passive"] * 3)
+    assert list(result["firefly_scatter_consistent"]) == [True, True, False]
+
+
+def test_nan_delta_gives_na_and_is_ignored_by_the_median():
+    ages = np.array([0.1, np.nan, 0.1])
+    metallicities = np.zeros(3)
+    result = sm.firefly_scatter_consistency(ages, metallicities, ["passive"] * 3)
+    assert pd.isna(result["firefly_scatter_consistent"].iloc[1])
+    assert result["firefly_scatter_consistent"].iloc[0]
+    assert result["offset_corrected_delta_log_age"].iloc[0] == pytest.approx(0.0)
+
+
+def test_groups_are_corrected_separately():
+    ages = np.array([-0.5, -0.5, 0.2, 0.2])
+    metallicities = np.zeros(4)
+    groups = ["star-forming", "star-forming", "passive", "passive"]
+    result = sm.firefly_scatter_consistency(ages, metallicities, groups)
+    assert np.allclose(result["offset_corrected_delta_log_age"], 0.0)
+    assert result["firefly_scatter_consistent"].all()
