@@ -16,3 +16,4 @@ Synthetic_domain/*.parquet
 Synthetic_domain/ml_runs/*/model.pt
 Synthetic_domain/ml_sfh_catalogue.parquet
 Synthetic_domain/literature/raw/
+Synthetic_domain/notebook_job_logs/
