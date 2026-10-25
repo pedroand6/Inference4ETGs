@@ -27,15 +27,24 @@ Retrieved on 2026-10-25 by `fetch_literature.py` (run from `Synthetic_domain/`).
 ## MPA-JHU (SDSS galSpec) values
 
 - Queried from SkyServer DR16 (https://skyserver.sdss.org/dr16, tables `SpecObjAll`, `galSpecIndx`, `galSpecExtra`)
-  with `sv.mpa_jhu_query`, 100 specObjIDs per query. Documentation:
-  https://www.sdss4.org/dr17/spectro/galaxy_mpajhu/.
+  with `sv.mpa_jhu_query`, 100 specObjIDs per query. The queries run against DR16 (`SDSS_DATA_RELEASE = 16`); the
+  documentation URL https://www.sdss4.org/dr17/spectro/galaxy_mpajhu/ is the DR17 page (the galSpec tables are the same).
 - `mpa_jhu_reference.csv`: `specobjid` (text), `velDisp`, `velDispErr` [km/s] (SDSS pipeline), galSpecIndx `d4000_n`,
   `lick_hd_a`, `lick_mgb`, `lick_fe5270`, `lick_fe5335` (+ `_err`; Angstrom except D4000n), galSpecExtra `bptclass`
   (1 = star forming), `sfr_fib_p16/p50/p84` [log Msun/yr, fibre], `lgm_tot_p50`, `lgm_fib_p50` [log Msun].
   SDSS-I/II spectra (RUN2D 26) have these rows; BOSS spectra (RUN2D v5_13_0) come back with NULL (empty) galSpec columns
   but still carry `velDisp`. A legacy spectrum with no row (a low-S/N one) also has empty galSpec columns.
 
+Missing values: the script converts the placeholders -9999 and -99 to NaN in every numeric MPA-JHU column, and for D4000n
+and each Lick index sets value and error to NaN where the error is <= 0 (placeholder 0.0 with error -1). `bptclass` keeps
+-1, which is a genuine "unclassified" code. Spectra the SkyServer could not return (error pages on rows with non-finite
+floats) are listed in `dropped_ids.csv` (columns id, query), so one can check whether a reference galaxy was ever lost.
+
 ## Passive age-sigma relation
+
+Reproducibility: `age_sigma_passive.csv` is reproducible only to a few galaxies, because SkyServer chunk failures vary from run to
+run (a re-run differed by about 2 galaxies, about 0.001 dex).
+
 
 `relations/age_sigma_passive.csv`: 5 000 random Gallazzi galaxies (seed in the script) were looked up in SkyServer by their
 specObjID (rebuilt from plate, mjd, fiber with RUN2D 26); kept those with `d4000_n` > 1.6 and `velDisp` > 0.

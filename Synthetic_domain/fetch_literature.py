@@ -38,11 +38,16 @@ IDS_PER_QUERY = 100             # polite size; 200 ids make the GET URL too long
 RETRY_WAIT_SECONDS = 30         # wait before the single retry of a failed chunk
 LEGACY_RUN2D = 26               # SDSS-I/II spectra reprocessed in DR16 (the ones MPA-JHU covers)
 
+MISSING_VALUE_SENTINELS = [-9999.0, -99.0]   # MPA-JHU placeholders for "not measured"
+# Index columns whose value is a placeholder (0 with a non-positive error) when the index was not measured
+INDEX_COLUMNS = ["d4000_n", "lick_hd_a", "lick_mgb", "lick_fe5270", "lick_fe5335"]
+DROPPED_IDS_CSV = os.path.join(LITERATURE_DIR, "dropped_ids.csv")
+
 PASSIVE_D4000N_MIN = 1.6        # passive cut on the 4000 A break
 MAX_PASSIVE_SAMPLE = 5000       # random Gallazzi galaxies queried for the age-sigma relation
 RANDOM_SEED = 20261025
-MASS_BIN_EDGES = np.arange(8.5, 12.01, 0.25)    # log M* [Msun]
-SIGMA_BIN_EDGES = np.arange(1.8, 2.61, 0.1)     # log10 velocity dispersion [km/s]
+MASS_BIN_EDGES = np.round(np.arange(8.5, 12.01, 0.25), 3)    # log M* [Msun]
+SIGMA_BIN_EDGES = np.round(np.arange(1.8, 2.61, 0.1), 3)     # log10 velocity dispersion [km/s]
 
 
 def run_sql(sql):
@@ -75,12 +80,29 @@ def query_with_splitting(chunk, dropped):
     return query_with_splitting(chunk[:middle], dropped) + query_with_splitting(chunk[middle:], dropped)
 
 
+def clean_mpa_values(rows):
+    """Turn MPA-JHU missing-value placeholders into NaN.
+
+    -9999 and -99 become NaN in every numeric column except bptclass, whose -1 is a genuine "unclassified" code.
+    For each index (D4000n, Lick) a non-positive error marks a placeholder, so the value and its error become NaN.
+    Returns: the cleaned DataFrame.
+    """
+    rows = rows.copy()
+    numeric_columns = [c for c in rows.columns if c not in ["specobjid", "bptclass"]]
+    rows[numeric_columns] = rows[numeric_columns].replace(MISSING_VALUE_SENTINELS, np.nan)
+    for index in INDEX_COLUMNS:
+        not_measured = rows[f"{index}_err"] <= 0
+        rows.loc[not_measured, [index, f"{index}_err"]] = np.nan
+    return rows
+
+
 def query_in_chunks(specobjids):
     """MPA-JHU / SDSS rows for the given specObjIDs (digit strings), IDS_PER_QUERY per SkyServer query.
 
     A failed chunk is retried once after RETRY_WAIT_SECONDS, then split (see query_with_splitting); ids that fail
     alone are reported and left out. Returns: DataFrame with specobjid (stripped text) and the columns of
-    sv.mpa_jhu_query; spectra without a row are absent.
+    sv.mpa_jhu_query with placeholders as NaN; spectra without a row are absent.
+            Also the list of ids that could not be queried.
     """
     tables = []
     dropped = []
@@ -100,7 +122,7 @@ def query_in_chunks(specobjids):
     rows = pd.concat(tables, ignore_index=True)
     rows = rows.rename(columns={"specobjid_text": "specobjid"})
     rows["specobjid"] = rows["specobjid"].astype(str).str.strip()
-    return rows
+    return clean_mpa_values(rows), dropped
 
 
 def legacy_specobjid(plate, mjd, fiberid):
@@ -141,11 +163,11 @@ is_legacy = reference["RUN2D"] == str(LEGACY_RUN2D)
 # =============================================================================
 # 2. MPA-JHU rows (BOSS spectra come back with NULL galSpec columns, which documents their absence)
 # =============================================================================
-mpa_rows = query_in_chunks(list(reference["specobjid"]))
+mpa_rows, dropped_reference = query_in_chunks(list(reference["specobjid"]))
 mpa_rows.to_csv(os.path.join(LITERATURE_DIR, "mpa_jhu_reference.csv"), index=False)
 # SpecObjAll rows exist for every spectrum, so count galaxies with real MPA-JHU measurements (galSpecExtra join)
-has_mpa_values = mpa_rows["lgm_tot_p50"].notna()
-matched_ids = set(mpa_rows.loc[has_mpa_values, "specobjid"])
+mass_ids = set(mpa_rows.loc[mpa_rows["lgm_tot_p50"].notna(), "specobjid"])
+sfr_ids = set(mpa_rows.loc[mpa_rows["sfr_fib_p50"].notna(), "specobjid"])
 
 # =============================================================================
 # 3. Gallazzi et al. (2005) catalogue: download (once), match to our galaxies, build the relation bands
@@ -175,7 +197,10 @@ has_age = gallazzi.dropna(subset=["gallazzi_age_p50"])
 sample = has_age.sample(n=min(MAX_PASSIVE_SAMPLE, len(has_age)), random_state=RANDOM_SEED)
 sample_ids = [legacy_specobjid(p, m, f) for p, m, f in zip(sample["plate"], sample["mjd"], sample["fiberid"])]
 sample = sample.assign(specobjid=sample_ids)
-sdss_rows = query_in_chunks(sample_ids)[["specobjid", "velDisp", "d4000_n"]]
+sdss_rows, dropped_sample = query_in_chunks(sample_ids)
+sdss_rows = sdss_rows[["specobjid", "velDisp", "d4000_n"]]
+dropped = [(i, "reference") for i in dropped_reference] + [(i, "age_sigma_sample") for i in dropped_sample]
+pd.DataFrame(dropped, columns=["id", "query"]).to_csv(DROPPED_IDS_CSV, index=False)
 passive = sample.merge(sdss_rows, on="specobjid", how="inner")
 passive = passive[(passive["d4000_n"] > PASSIVE_D4000N_MIN) & (passive["velDisp"] > 0)]
 age_sigma = sv.relation_band(np.log10(passive["velDisp"].values), passive["gallazzi_age_p50"].values, SIGMA_BIN_EDGES)
@@ -185,9 +210,11 @@ age_sigma.to_csv(os.path.join(RELATIONS_DIR, "age_sigma_passive.csv"), index=Fal
 # 4. Counts
 # =============================================================================
 print(f"reference galaxies: {len(reference)} ({is_legacy.sum()} legacy, {(~is_legacy).sum()} BOSS)")
-print(f"with MPA-JHU measurements: {reference['specobjid'].isin(matched_ids).sum()} "
-      f"(legacy {reference.loc[is_legacy, 'specobjid'].isin(matched_ids).sum()}, "
-      f"BOSS {reference.loc[~is_legacy, 'specobjid'].isin(matched_ids).sum()})")
+for label, ids in [("finite lgm_tot_p50", mass_ids), ("finite sfr_fib_p50", sfr_ids)]:
+    print(f"with {label}: {reference['specobjid'].isin(ids).sum()} "
+          f"(legacy {reference.loc[is_legacy, 'specobjid'].isin(ids).sum()}, "
+          f"BOSS {reference.loc[~is_legacy, 'specobjid'].isin(ids).sum()})")
+print(f"ids not queryable: {len(dropped_reference)} reference, {len(dropped_sample)} age-sigma sample")
 print(f"with Gallazzi rows: {len(gallazzi_out)} ({gallazzi_out['gallazzi_log_age_p50'].notna().sum()} with an age)")
 print(f"mass-metallicity bins: {len(mass_metallicity)}; passive galaxies in age-sigma: {len(passive)}, "
       f"bins: {len(age_sigma)}")
