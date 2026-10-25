@@ -274,7 +274,7 @@ def test_coverage_galaxy_without_models_in_window(random_model_grid):
 
 
 # =============================================================================
-# Spectra, likelihood, Firefly and split
+# Spectra, likelihood and split
 # =============================================================================
 def test_vacuum_to_air_halpha():
     assert abs(sm.vacuum_to_air(np.array([6564.61]))[0] - 6562.80) < 0.02
@@ -368,28 +368,6 @@ def test_spectral_components_fix_redshift_and_add_veldisp():
     assert sm.VELDISP_RANGE[0] <= bagpipes_components["veldisp"] <= sm.VELDISP_RANGE[1]
     assert drawn["veldisp"] == bagpipes_components["veldisp"]
     assert 1.0 <= noise_scale <= 5.0
-
-
-def test_compare_with_firefly_flags_consistency():
-    result = sm.compare_with_firefly(
-        bagpipes_age_gyr=np.array([5.0, 5.0]),
-        bagpipes_metallicity=np.array([1.0, 1.0]),
-        firefly_age_years=np.array([5.5e9, 20e9]),
-        firefly_metallicity=np.array([0.9, 1.0]),
-    )
-    assert bool(result.loc[0, "firefly_consistent"])
-    assert not bool(result.loc[1, "firefly_consistent"])
-
-
-def test_compare_with_firefly_missing_values_are_na():
-    result = sm.compare_with_firefly(
-        bagpipes_age_gyr=np.array([5.0]),
-        bagpipes_metallicity=np.array([1.0]),
-        firefly_age_years=np.array([-9999.0]),
-        firefly_metallicity=np.array([1.0]),
-    )
-    assert pd.isna(result.loc[0, "firefly_consistent"])
-    assert np.isnan(result.loc[0, "delta_log_age"])
 
 
 def test_split_by_hash_is_stable():
@@ -864,38 +842,3 @@ def test_bin_metallicities_array_matches_bin_metallicities():
         expected = sm.bin_metallicities(fractions[row_index, :n_bins], z_final[row_index])
         assert np.allclose(result[row_index, :n_bins], expected)
         assert np.all(np.isnan(result[row_index, n_bins:]))
-
-
-# Firefly scatter consistency
-def test_constant_group_offset_is_removed_and_consistent():
-    ages = np.array([-0.5, -0.5, -0.5])
-    metallicities = np.array([0.4, 0.4, 0.4])
-    result = sm.firefly_scatter_consistency(ages, metallicities, ["passive"] * 3)
-    assert np.allclose(result["offset_corrected_delta_log_age"], 0.0)
-    assert np.allclose(result["offset_corrected_delta_log_metallicity"], 0.0)
-    assert result["firefly_scatter_consistent"].all()
-
-
-def test_scatter_beyond_threshold_is_inconsistent():
-    ages = np.array([0.0, 0.0, 0.5])      # median 0, so the third galaxy stays 0.5 dex away
-    metallicities = np.zeros(3)
-    result = sm.firefly_scatter_consistency(ages, metallicities, ["passive"] * 3)
-    assert list(result["firefly_scatter_consistent"]) == [True, True, False]
-
-
-def test_nan_delta_gives_na_and_is_ignored_by_the_median():
-    ages = np.array([0.1, np.nan, 0.1])
-    metallicities = np.zeros(3)
-    result = sm.firefly_scatter_consistency(ages, metallicities, ["passive"] * 3)
-    assert pd.isna(result["firefly_scatter_consistent"].iloc[1])
-    assert result["firefly_scatter_consistent"].iloc[0]
-    assert result["offset_corrected_delta_log_age"].iloc[0] == pytest.approx(0.0)
-
-
-def test_groups_are_corrected_separately():
-    ages = np.array([-0.5, -0.5, 0.2, 0.2])
-    metallicities = np.zeros(4)
-    groups = ["star-forming", "star-forming", "passive", "passive"]
-    result = sm.firefly_scatter_consistency(ages, metallicities, groups)
-    assert np.allclose(result["offset_corrected_delta_log_age"], 0.0)
-    assert result["firefly_scatter_consistent"].all()

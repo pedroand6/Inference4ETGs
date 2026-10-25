@@ -758,7 +758,7 @@ def coverage_test(observed_magnitudes, observed_errors, detected, observed_z, ob
 
 
 # =============================================================================
-# 5. Spectra, spectral likelihood, Firefly comparison and split
+# 5. Spectra, spectral likelihood and split
 # =============================================================================
 R_V = 3.1                                # [dimensionless] CCM89 R_V = A_V / E(B-V), as in extinctions.py
 GYR_TO_YEARS = 1e9                       # [yr/Gyr]
@@ -787,8 +787,6 @@ LOG_NOISE_SCALE_RANGE = (0.0, np.log10(5.0))   # [dex] log10 of the error multip
 IGNORED_REDSHIFT_DRAW = 0.5              # unit-cube value for the redshift slot, which fixed_redshift replaces
 
 FIREFLY_MISSING = -999.0                 # [same units as Firefly] Firefly writes -9999 for missing values
-MAX_DELTA_LOG_AGE = 0.3                  # [dex]
-MAX_DELTA_LOG_METALLICITY = 0.3          # [dex]
 
 LOG_ZERO = -1e100                        # log-likelihood of an impossible point (MultiNest convention)
 HASH_HEX_DIGITS = 8                      # digits of the md5 digest used for the split (32 bits)
@@ -975,78 +973,6 @@ def spectral_components(cube, redshift):
     # Uniform in log10 so that small and large error multipliers are equally likely per decade
     noise_scale = 10 ** uniform(cube_by_name["noise_scale"], *LOG_NOISE_SCALE_RANGE)
     return bagpipes_components, drawn, noise_scale
-
-
-def compare_with_firefly(bagpipes_age_gyr, bagpipes_metallicity, firefly_age_years, firefly_metallicity):
-    """Bagpipes vs Firefly mass-weighted age and metallicity (Z/Z_sun, both linear).
-
-    Firefly missing values (-9999) become NaN, and the consistency flag is then NA, not False.
-    Inputs: bagpipes_age_gyr [Gyr]; bagpipes_metallicity [Z/Z_sun]; firefly_age_years [yr];
-            firefly_metallicity [Z/Z_sun]; arrays of equal length.
-    Returns: DataFrame with delta_log_age and delta_log_metallicity [dex] (Bagpipes minus Firefly)
-             and firefly_consistent (pandas boolean, NA where Firefly is missing).
-    """
-    firefly_age_years = np.where(firefly_age_years > FIREFLY_MISSING, firefly_age_years, np.nan)
-    firefly_metallicity = np.where(firefly_metallicity > FIREFLY_MISSING, firefly_metallicity, np.nan)
-
-    delta_log_age = np.log10(bagpipes_age_gyr * GYR_TO_YEARS) - np.log10(firefly_age_years)
-    delta_log_metallicity = np.log10(bagpipes_metallicity) - np.log10(firefly_metallicity)
-
-    consistent = []
-    for age_offset, metallicity_offset in zip(delta_log_age, delta_log_metallicity):
-        if np.isnan(age_offset) or np.isnan(metallicity_offset):
-            consistent.append(pd.NA)
-        else:
-            consistent.append(bool(abs(age_offset) < MAX_DELTA_LOG_AGE
-                                   and abs(metallicity_offset) < MAX_DELTA_LOG_METALLICITY))
-
-    return pd.DataFrame({
-        "delta_log_age": delta_log_age,
-        "delta_log_metallicity": delta_log_metallicity,
-        "firefly_consistent": pd.array(consistent, dtype="boolean"),
-    })
-
-
-def firefly_scatter_consistency(delta_log_age, delta_log_metallicity, groups):
-    """Firefly agreement judged by scatter: each group's median offset is removed first.
-
-    A code-to-code systematic shift (different SPS, priors, SFH) says little about a fit, so the shift is
-    measured per group and the 0.3 dex thresholds apply to the scatter around it. NaN values are ignored
-    when taking a median, and the flag is NA where either delta is NaN.
-    Inputs: delta_log_age, delta_log_metallicity [dex] (Bagpipes minus Firefly); groups: one string per
-            galaxy (e.g. "star-forming", "passive"); all arrays of equal length.
-    Returns: DataFrame with offset_corrected_delta_log_age and offset_corrected_delta_log_metallicity [dex]
-             and firefly_scatter_consistent (pandas boolean, NA where a delta is NaN).
-    """
-    delta_log_age = np.asarray(delta_log_age, dtype=float)
-    delta_log_metallicity = np.asarray(delta_log_metallicity, dtype=float)
-    groups = np.asarray(groups)
-
-    corrected_age = np.full(len(groups), np.nan)
-    corrected_metallicity = np.full(len(groups), np.nan)
-    for group in np.unique(groups):
-        in_group = groups == group
-        group_ages = delta_log_age[in_group]
-        group_metallicities = delta_log_metallicity[in_group]
-        # An all-NaN group has no median; its corrected values stay NaN
-        if np.isfinite(group_ages).any():
-            corrected_age[in_group] = group_ages - np.nanmedian(group_ages)
-        if np.isfinite(group_metallicities).any():
-            corrected_metallicity[in_group] = group_metallicities - np.nanmedian(group_metallicities)
-
-    consistent = []
-    for age_offset, metallicity_offset in zip(corrected_age, corrected_metallicity):
-        if np.isnan(age_offset) or np.isnan(metallicity_offset):
-            consistent.append(pd.NA)
-        else:
-            consistent.append(bool(abs(age_offset) < MAX_DELTA_LOG_AGE
-                                   and abs(metallicity_offset) < MAX_DELTA_LOG_METALLICITY))
-
-    return pd.DataFrame({
-        "offset_corrected_delta_log_age": corrected_age,
-        "offset_corrected_delta_log_metallicity": corrected_metallicity,
-        "firefly_scatter_consistent": pd.array(consistent, dtype="boolean"),
-    })
 
 
 def split_by_hash(specobjid):

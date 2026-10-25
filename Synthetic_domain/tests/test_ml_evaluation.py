@@ -64,3 +64,13 @@ def test_width_ratio_uses_per_galaxy_prior_widths():
     posterior = rng.normal(0, 1, (300, 2000))
     wide = np.full(300, 2 * 0.994 * 2)                                   # prior twice as wide as the posterior
     assert np.isclose(ev.width_ratio(posterior, None, prior_widths=wide), 0.5, atol=0.05)
+
+
+def test_zero_prior_width_is_left_out_not_infinite():
+    rng = np.random.default_rng(46)
+    posterior = rng.normal(0, 1e-3, (300, 2000))                         # a bin absent at high redshift
+    widths = np.full(300, 2 * 0.994 * 2e-3)
+    widths[:200] = 0.0                                                   # most priors collapsed: inf would win
+    ratio = ev.width_ratio(posterior, None, prior_widths=widths)
+    assert np.isfinite(ratio)
+    assert np.isclose(ratio, 0.5, atol=0.05)

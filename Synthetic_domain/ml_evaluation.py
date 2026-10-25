@@ -13,7 +13,8 @@ NMAD_SCALE = 1.4826                          # makes the median absolute deviati
 ONE_SIGMA_LEVEL = 0.68                       # central probability of a "1 sigma" interval
 TWO_SIGMA_LEVEL = 0.95                       # central probability of a "2 sigma" interval
 PERCENT = 100
-WINDOW_STEPS = 5                             # redshift cells per prior window: a galaxy's window is centred within 1/5 of it
+WINDOW_STEPS = 5                             # cell width = window / 5, so a galaxy's prior window is centred
+                                             # within window / 10 of its redshift
 
 
 # =============================================================================
@@ -94,10 +95,14 @@ def width_ratio(posterior_samples, prior_samples, level=ONE_SIGMA_LEVEL, prior_w
             level: central-interval probability; prior_widths: optional (n,) prior width of each galaxy
             (e.g. windowed_prior_widths), used instead of the width of all prior_samples.
     Returns: ratio near 1 = prior-dominated, near 0 = well constrained.
+
+    A zero prior width (a bin that cannot exist at the galaxy's redshift, e.g. frac_bin_14 above z ~ 0.48)
+    carries no information and would give inf, so it becomes NaN and is left out of the median.
     """
     if prior_widths is None:
         prior_low, prior_high = central_interval(prior_samples, level)
         prior_widths = prior_high - prior_low
+    prior_widths = np.where(prior_widths > 0, prior_widths, np.nan)
     posterior_low, posterior_high = central_interval(posterior_samples, level)
     return float(np.nanmedian((posterior_high - posterior_low) / prior_widths))
 
