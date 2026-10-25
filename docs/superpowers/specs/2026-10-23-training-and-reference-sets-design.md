@@ -220,3 +220,49 @@ Approved by the user after the first full run stopped at the inject-and-recover 
 ## Amendment (2026-10-25): the Firefly comparison is a check, not a filter
 
 Decided by the user. The locked split takes every galaxy whose fit converged and that passes the coverage test. `firefly_consistent` stays in the CSV and the notebook reports the share of consistent fits as a sanity check of the spectral fits against the literature, but it no longer excludes galaxies from the validation and test sets. This supersedes the Firefly condition of Part 2 §8. The split stays a hash of `specobjid`, so the galaxies already assigned keep their half; the test half had not yet been used.
+
+## Amendment (2026-10-25): validating the Bagpipes spectral fits against independent rulers; Firefly dropped as a validation
+
+Decided by the user. Firefly is another full-spectrum fitting code, so disagreeing with it cannot tell which fit is wrong; it no longer validates anything. Firefly stays only as the catalogue the sample is drawn from (the SDSS spectrum list, redshifts and the age tertiles of the selection grid). Its comparison columns, figure and consistency flags are removed from notebook 2 and from `spectroscopic_reference.csv`. They neither filter nor report.
+
+No catalogue gives the true stellar age or metallicity of an unresolved galaxy. The validation therefore uses three rulers that are independent of full-spectrum SED fitting, in order of strength.
+
+### Layer 1 — model-independent spectral indices (primary; every fitted galaxy)
+- **Indices and passbands** (air wavelengths, rest frame):
+  - D4000ₙ (Balogh et al. 1999): the ratio of mean F_ν in 4000–4100 Å to 3850–3950 Å.
+  - Hδ_A (Worthey & Ottaviani 1997): feature 4083.500–4122.250, blue 4041.600–4079.750, red 4128.500–4161.000.
+  - Lick Mgb: 5160.125–5192.625 / 5142.625–5161.375 / 5191.375–5206.375.
+  - Lick Fe5270: 5245.650–5285.650 / 5233.150–5248.150 / 5285.650–5318.150.
+  - Lick Fe5335: 5312.125–5352.125 / 5304.625–5315.875 / 5353.375–5363.375.
+  - The combination [MgFe]′ = √(Mgb · (0.72 Fe5270 + 0.28 Fe5335)) (Thomas et al. 2003).
+  - Equivalent-width indices use the standard pseudo-continuum: a straight line between the mean fluxes of the blue and red bands.
+- **Observed values:** measured on each galaxy's SDSS spectrum at native resolution, in air wavelengths, corrected for Milky Way extinction and shifted to the rest frame. Uncertainties are propagated from the inverse variance by Monte Carlo (200 noise draws). Pixels with ivar = 0 inside a band invalidate that index for that galaxy (NaN).
+- **Model values (posterior predictive):** for 100 equal-weight posterior samples per galaxy, the Bagpipes model spectrum is computed on the galaxy's native observed wavelength grid. That means the same components, including `veldisp` and the nebular emission (which fills in Hδ in star-forming galaxies), and the calibration polynomial fitted to that galaxy's data. The same index code measures each sample.
+- **Statistics per galaxy and index:**
+  - z = (observed − model median) / √(σ_obs² + σ_model²);
+  - the posterior-predictive p-value (the fraction of model samples beyond the observed value, two-sided).
+- **Report:**
+  - the fraction of galaxies with |z| < 2 for each index;
+  - the median z (bias) and the z scatter, split by star-forming / passive and by SDSS / BOSS;
+  - plots of observed against model for D4000ₙ–Hδ_A and for [MgFe]′.
+- **Cross-check of the index code:** our measured indices against MPA-JHU `galSpecIndx` (d4000_n, lick_hd_a, lick_mgb, lick_fe5270, lick_fe5335) for SDSS-I/II spectra. The median difference and scatter are reported; a systematic difference larger than the MPA-JHU errors is a bug to investigate, not a result.
+
+### Layer 2 — independent physical tracers (SDSS-I/II galaxies; BOSS galaxies are marked "not available")
+- **SFR from Hα:** MPA-JHU `galSpecExtra` fibre SFR (`sfr_fib_p50`, Brinchmann et al. 2004; Balmer-decrement dust correction). It is compared only for galaxies whose MPA-JHU BPT class is star-forming. It traces the last ~10 Myr, so it is compared with Bagpipes' `logsfr_bin_00` (0–14 Myr) normalised to the 3″ aperture, with the Kroupa → Chabrier IMF offset stated in the notebook. Reported: the median offset and scatter.
+- **Stellar ages and metallicities from absorption-line indices:** Gallazzi et al. (2005), r-band light-weighted log age and log Z/Z☉, built on BC03 like Bagpipes, so differences reflect the method and not the stellar models. Bagpipes light-weighted r-band age and metallicity are computed per posterior sample from per-bin model luminosities (each age bin's r-band luminosity from a Bagpipes model containing only that bin). Reported: offset, scatter, and the fraction inside the combined 1σ and 2σ.
+- **Access:** MPA-JHU tables come from SkyServer SQL (astroquery, the way the S/N was queried). The Gallazzi catalogue comes from its public release; the first implementation step locates it (MPA-JHU DR4 release page or VizieR) and records the source. If it cannot be found, that sub-check is reported as unavailable, not replaced by an SED-fitting catalogue.
+
+### Layer 3 — consolidated scaling relations (population level)
+The fitted galaxies, overlaid on relations from large samples measured with independent methods:
+- **Stellar mass–metallicity relation:** median and 16–84th percentiles per stellar-mass bin, built from the full Gallazzi et al. (2005) catalogue with MPA-JHU masses, against our light-weighted metallicities and aperture-normalised masses (the aperture is stated).
+- **Star-forming main sequence:** Speagle et al. (2014), log SFR = (0.84 − 0.026 t) log M* − (6.51 − 0.11 t), with t the age of the Universe in Gyr at each galaxy's redshift, and its ±0.2 dex scatter, for the star-forming galaxies.
+- **Age–velocity dispersion of passive galaxies:** median and percentiles of Gallazzi age against SDSS `velDisp` from the large sample, against our passive galaxies with their SDSS `velDisp`.
+- Reported as figures with the fraction of our galaxies inside each relation's 16–84th band.
+
+### Where it runs and what it outputs
+A new tested module section (index definitions and measurement; light-weighted age and metallicity; Speagle relation) plus a new section of notebook 2 that computes all three layers for every fitted galaxy, including the coming +100. Outputs:
+- per-galaxy columns in `spectroscopic_reference.csv`: the observed and model indices with their z, the Hα-SFR and Gallazzi comparisons, and the relation flags;
+- a `validation_summary.csv`;
+- the figures.
+
+Like the Firefly check it replaces, it is a report, not a filter. The validation/test split remains "converged and covered".
