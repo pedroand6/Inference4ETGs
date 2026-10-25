@@ -571,7 +571,6 @@ def light_weighted_age_and_metallicity(unit_cube_samples, redshift, n_samples=N_
 # 5. Scaling relations
 # =============================================================================
 SPEAGLE_SCATTER = 0.2           # [dex] intrinsic scatter of the main sequence (Speagle et al. 2014)
-KROUPA_TO_CHABRIER_DEX = -0.027 # [dex] log SFR (or M*) Chabrier minus Kroupa (Madau & Dickinson 2014: 0.63/0.67)
 PERCENTILES = (16, 50, 84)
 
 
