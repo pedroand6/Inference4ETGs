@@ -1,0 +1,7 @@
+# Fit jobs deliberately left unfitted, one job_id per line ('#' starts a comment).
+# remote/submit_fits.sh does not send them, and the calibration test in spectroscopic_reference.ipynb gives its
+# verdict on the other mocks, listing these as skipped.
+# 2026-10-25: the three slowest calibration mocks, still sampling after 9.4 h (the other 30 took up to ~8 h).
+calib_013
+calib_021
+calib_026

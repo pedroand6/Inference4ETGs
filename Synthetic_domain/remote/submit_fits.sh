@@ -40,6 +40,16 @@ mkdir -p "$bundle_dir/spectral_fits" "$bundle_dir/finished_fits"
 cp "$SYNTHETIC_DIR/synthetic_model.py" "$SYNTHETIC_DIR/run_spectral_fits.py" "$bundle_dir/"
 cp -rL "$SYNTHETIC_DIR/splus-filters" "$bundle_dir/"
 cp -rL "$SYNTHETIC_DIR/spectral_fits/jobs" "$bundle_dir/spectral_fits/jobs"
+# Jobs listed in skipped_fit_jobs.txt are deliberately left unfitted, so they are not sent
+skipped_count=0
+if [[ -f "$SYNTHETIC_DIR/skipped_fit_jobs.txt" ]]; then
+    while read -r skipped_job_id; do
+        if [[ -n "$skipped_job_id" && -f "$bundle_dir/spectral_fits/jobs/$skipped_job_id.npz" ]]; then
+            rm "$bundle_dir/spectral_fits/jobs/$skipped_job_id.npz"
+            skipped_count=$((skipped_count + 1))
+        fi
+    done < <(sed 's/#.*//; s/[[:space:]]//g' "$SYNTHETIC_DIR/skipped_fit_jobs.txt" | grep -v '^$' || true)
+fi
 cp "$REMOTE_DIR/grid_md5.txt" "$REMOTE_DIR/build_env.sh" "$REMOTE_DIR/job_common.sh" \
    "$REMOTE_DIR/fit_job.sh" "$REMOTE_DIR/benchmark_job.sh" "$REMOTE_DIR/summarise_benchmark.py" "$bundle_dir/"
 
@@ -58,7 +68,7 @@ done
 
 # 5. The tarball
 tar -C "$bundle_dir" -czf "$scratch_dir/bundle.tar.gz" .
-echo "Bundle: $(du -h "$scratch_dir/bundle.tar.gz" | cut -f1), with $finished_count finished fit(s)"
+echo "Bundle: $(du -h "$scratch_dir/bundle.tar.gz" | cut -f1), with $finished_count finished fit(s), $skipped_count skipped job(s) left out"
 
 # 6. Submit. Both files are uploaded to inputs/; the job script unpacks the bundle itself.
 job_id="$(hljob run --detach --pause-llm -n "$JOB_NAME" -c "$CORES" -m "$MEMORY_MB" -t "$TIME_LIMIT" \
