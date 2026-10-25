@@ -5,6 +5,7 @@ metallicities (for Gallazzi et al. 2005), the Speagle et al. (2014) main sequenc
 literature scaling relations.
 """
 
+import bagpipes as pipes
 import numpy as np
 import pandas as pd
 from astropy.io import fits
@@ -169,3 +170,198 @@ def rest_frame_spectrum(sdss_fits_path, redshift, ebv):
     wavelength_air = sm.vacuum_to_air(wavelength_vacuum)
     flux, ivar = sm.deredden_spectrum(wavelength_air, flux, ivar, ebv)
     return wavelength_air / (1 + redshift), flux, ivar
+
+
+# =============================================================================
+# 3. Posterior-predictive indices
+# =============================================================================
+N_PREDICTIVE_SAMPLES = 100     # posterior samples per galaxy for the model indices
+MAX_Z_SCORE = 2.0              # an index agrees when |z| < MAX_Z_SCORE
+
+
+def evenly_spaced_rows(samples, n_samples):
+    """At most n_samples rows of samples, evenly spaced (posterior samples are equal-weight)."""
+    step = max(1, int(np.ceil(len(samples) / n_samples)))
+    return samples[::step][:n_samples]
+
+
+def model_flux_for_sample(model, cube, redshift, data_flux, data_ivar):
+    """Model spectrum of one posterior sample on the model's grid, times the calibration polynomial fitted to the data."""
+    components, _, _ = sm.spectral_components(cube, redshift)
+    model.update(components)
+    flux = model.spectrum[:, 1]
+    polynomial = sm.calibration_polynomial(flux, data_flux, data_ivar)
+    return flux * polynomial
+
+
+def predictive_indices(unit_cube_samples, redshift, observed_wavelength_air, data_flux, data_ivar,
+                       n_samples=N_PREDICTIVE_SAMPLES):
+    """Indices of the Bagpipes model spectra of posterior samples, measured exactly like the observed ones.
+
+    Inputs: unit-cube posterior samples (n, SPECTRAL_DIMS); redshift; the galaxy's native observed air
+            wavelength grid [Angstrom] and its flux/ivar on that grid (restricted to sm.OBSERVED_RANGE by the caller).
+    Returns: DataFrame (samples x INDEX_NAMES); a sample whose model flux is not positive in a band gets NaN there.
+    """
+    kept = evenly_spaced_rows(unit_cube_samples, n_samples)
+    first_components, _, _ = sm.spectral_components(kept[0], redshift)
+    model = pipes.model_galaxy(first_components, spec_wavs=observed_wavelength_air)
+    rest_wavelength = observed_wavelength_air / (1 + redshift)
+    rows = []
+    for cube in kept:
+        flux = model_flux_for_sample(model, cube, redshift, data_flux, data_ivar)
+        positive = np.where(flux > 0, 1.0, 0.0)
+        with np.errstate(divide="ignore", invalid="ignore"):    # a zero-flux sample gives NaN, handled below
+            values = index_values(rest_wavelength, flux)
+        validity = index_validity(rest_wavelength, positive)    # zero or negative model flux invalidates a band
+        for name in INDEX_NAMES:
+            if not validity[name] or not np.isfinite(values[name]):
+                values[name] = np.nan
+        rows.append(values)
+    return pd.DataFrame(rows, columns=INDEX_NAMES)
+
+
+def index_comparison(measured, predictive):
+    """Observed vs posterior-predictive indices of one galaxy.
+
+    Inputs: measured (measure_indices output); predictive (predictive_indices output).
+    Returns: dict with <name>_model_median, <name>_model_std, <name>_z = (obs - median)/sqrt(err^2 + std^2) and
+             <name>_p (two-sided posterior-predictive p-value) for every name; NaN where either side is missing.
+    """
+    comparison = {}
+    for name in INDEX_NAMES:
+        model_values = predictive[name].to_numpy(dtype=float)
+        model_values = model_values[np.isfinite(model_values)]
+        observed = measured[name]
+        if len(model_values) == 0 or not np.isfinite(observed):
+            for suffix in ("model_median", "model_std", "z", "p"):
+                comparison[f"{name}_{suffix}"] = np.nan
+            continue
+        median = np.median(model_values)
+        spread = np.std(model_values)
+        comparison[f"{name}_model_median"] = median
+        comparison[f"{name}_model_std"] = spread
+        comparison[f"{name}_z"] = (observed - median) / np.sqrt(measured[f"{name}_err"] ** 2 + spread**2)
+        below = np.mean(model_values < observed)
+        comparison[f"{name}_p"] = 2 * min(below, 1 - below)
+    return comparison
+
+
+# =============================================================================
+# 4. Light-weighted age and metallicity (for Gallazzi et al. 2005)
+# =============================================================================
+N_LIGHT_WEIGHT_SAMPLES = 50
+LIGHT_WEIGHT_REDSHIFT = 0.001   # near rest frame: the r band then samples rest-frame r-band light
+
+
+def light_weighted_age_and_metallicity(unit_cube_samples, redshift, n_samples=N_LIGHT_WEIGHT_SAMPLES):
+    """r-band light-weighted log age and log metallicity of posterior samples.
+
+    Each existing age bin is modelled alone (dust-free, no nebular emission, near rest frame) to get its r-band
+    luminosity L_i; the light-weighted values are sum(L_i * log10 x_i) / sum(L_i) with x_i the bin's mid age [yr]
+    or metallicity [Z/Z_sun]. Check this convention against Gallazzi et al. (2005) §2 (they quote r-band
+    light-weighted log age and log Z) and keep both definitions identical.
+    Inputs: unit-cube samples; the galaxy redshift (sets the bins). Returns: DataFrame with log_age_light [log yr]
+            and log_metallicity_light [log Z/Z_sun], one row per kept sample.
+    """
+    r_filter = [sm.FILTER_FILES[sm.BANDS.index("r")]]
+    kept = evenly_spaced_rows(unit_cube_samples, n_samples)
+    model = None
+    rows = []
+    for cube in kept:
+        components, _, _ = sm.spectral_components(cube, redshift)
+        fractions, metallicities, edges = sm.bins_from_components(components)
+        luminosities = np.zeros(len(fractions))
+        for bin_index in range(len(fractions)):
+            single_bin = {
+                "redshift": LIGHT_WEIGHT_REDSHIFT,
+                "constant": {"age_min": edges[bin_index], "age_max": edges[bin_index + 1],
+                             "massformed": sm.LOG_MASS_FORMED + np.log10(fractions[bin_index]),
+                             "metallicity": metallicities[bin_index]},
+            }
+            if model is None:
+                model = pipes.model_galaxy(single_bin, filt_list=r_filter)
+            else:
+                model.update(single_bin)
+            # Bagpipes returns a 0-d array for a one-filter list, so promote it before indexing
+            luminosities[bin_index] = np.atleast_1d(model.photometry)[0]
+        mid_ages = (edges[:-1] + edges[1:]) / 2 * sm.GYR_TO_YEARS
+        weights = luminosities / luminosities.sum()
+        rows.append({"log_age_light": np.sum(weights * np.log10(mid_ages)),
+                     "log_metallicity_light": np.sum(weights * np.log10(metallicities))})
+    return pd.DataFrame(rows)
+
+
+# =============================================================================
+# 5. Scaling relations
+# =============================================================================
+SPEAGLE_SCATTER = 0.2           # [dex] intrinsic scatter of the main sequence (Speagle et al. 2014)
+KROUPA_TO_CHABRIER_DEX = -0.027 # [dex] log SFR (or M*) Chabrier minus Kroupa (Madau & Dickinson 2014: 0.63/0.67)
+PERCENTILES = (16, 50, 84)
+
+
+def speagle_log_sfr(log_mstar, age_gyr):
+    """Speagle et al. (2014) main sequence: log SFR [M_sun/yr] = (0.84 - 0.026 t) log M* - (6.51 - 0.11 t)."""
+    return (0.84 - 0.026 * age_gyr) * np.asarray(log_mstar) - (6.51 - 0.11 * age_gyr)
+
+
+def speagle_main_sequence(log_mstar, redshift):
+    """Main-sequence log SFR at each galaxy's redshift (t = age of the Universe [Gyr] in the module cosmology)."""
+    age_gyr = sm.COSMOLOGY.age(np.asarray(redshift)).value
+    return speagle_log_sfr(log_mstar, age_gyr)
+
+
+def relation_band(x, y, bin_edges):
+    """Median and 16-84th percentiles of y in bins of x (a literature relation from a large sample).
+
+    Returns: DataFrame with x_low, x_high, n, y_p16, y_median, y_p84 (bins with < 10 points are dropped).
+    """
+    rows = []
+    for low, high in zip(bin_edges[:-1], bin_edges[1:]):
+        in_bin = (x >= low) & (x < high) & np.isfinite(y)
+        if in_bin.sum() < 10:
+            continue
+        p16, p50, p84 = np.percentile(y[in_bin], PERCENTILES)
+        rows.append({"x_low": low, "x_high": high, "n": int(in_bin.sum()),
+                     "y_p16": p16, "y_median": p50, "y_p84": p84})
+    return pd.DataFrame(rows)
+
+
+def inside_band(x, y, band):
+    """Whether each (x, y) lies inside the 16-84th band of its x bin; NA outside the binned x range or for NaN."""
+    result = []
+    for x_value, y_value in zip(x, y):
+        matching = band[(band["x_low"] <= x_value) & (band["x_high"] > x_value)]
+        if len(matching) == 0 or not np.isfinite(y_value):
+            result.append(pd.NA)
+        else:
+            row = matching.iloc[0]
+            result.append(bool(row["y_p16"] <= y_value <= row["y_p84"]))
+    return pd.array(result, dtype="boolean")
+
+
+# =============================================================================
+# 6. MPA-JHU (SDSS galSpec) query
+# =============================================================================
+MPA_JHU_COLUMNS = {
+    "galSpecIndx": ["d4000_n", "d4000_n_err", "lick_hd_a", "lick_hd_a_err", "lick_mgb", "lick_mgb_err",
+                    "lick_fe5270", "lick_fe5270_err", "lick_fe5335", "lick_fe5335_err"],
+    "galSpecExtra": ["bptclass", "sfr_fib_p16", "sfr_fib_p50", "sfr_fib_p84", "lgm_tot_p50", "lgm_fib_p50"],
+}
+
+
+def mpa_jhu_query(specobjids):
+    """SkyServer SQL selecting MPA-JHU indices and SFRs plus SDSS velocity dispersions for the given spectra.
+
+    Inputs: SDSS specObjIDs as text (eBOSS ids exceed int64). Returns: the SQL string (one LEFT JOIN per table;
+            spectra without galSpec rows come back with NULLs).
+    """
+    selected = ["CAST(s.specObjID AS VARCHAR(20)) AS specobjid_text", "s.velDisp", "s.velDispErr"]
+    for column in MPA_JHU_COLUMNS["galSpecIndx"]:
+        selected.append(f"i.{column}")
+    for column in MPA_JHU_COLUMNS["galSpecExtra"]:
+        selected.append(f"e.{column}")
+    id_list = ", ".join(specobjids)
+    return ("SELECT " + ", ".join(selected) + " FROM SpecObjAll AS s "
+            "LEFT JOIN galSpecIndx AS i ON i.specObjID = s.specObjID "
+            "LEFT JOIN galSpecExtra AS e ON e.specObjID = s.specObjID "
+            f"WHERE s.specObjID IN ({id_list})")
