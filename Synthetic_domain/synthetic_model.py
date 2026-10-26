@@ -946,6 +946,23 @@ SPECTRAL_DIMS.append("veldisp")
 SPECTRAL_DIMS.append("noise_scale")
 
 
+def training_unit_vector(cube_by_name):
+    """Unit-cube vector in DIMS order for a fit at fixed redshift, from the fit's own named coordinates.
+
+    Inputs: cube_by_name: dict of unit-cube values (dimensionless, in [0, 1)) holding every DIMS name but "z";
+            other names (the fit's nuisance parameters) are ignored.
+    Returns: array of len(DIMS) values (dimensionless); the "z" slot holds IGNORED_REDSHIFT_DRAW.
+    """
+    unit_vector = np.zeros(len(DIMS))
+    for dimension_index, dimension in enumerate(DIMS):
+        if dimension == "z":
+            # components() ignores this value, because fixed_redshift replaces the drawn redshift
+            unit_vector[dimension_index] = IGNORED_REDSHIFT_DRAW
+        else:
+            unit_vector[dimension_index] = cube_by_name[dimension]
+    return unit_vector
+
+
 def spectral_components(cube, redshift):
     """Bagpipes components, drawn parameters and noise scale for one spectral-fit unit-cube point.
 
@@ -958,14 +975,7 @@ def spectral_components(cube, redshift):
              multiplier (dimensionless, 1 to 5).
     """
     cube_by_name = dict(zip(SPECTRAL_DIMS, cube))
-    unit_vector = np.zeros(len(DIMS))
-    for dimension_index, dimension in enumerate(DIMS):
-        if dimension == "z":
-            # components() ignores this value, because fixed_redshift replaces the drawn redshift
-            unit_vector[dimension_index] = IGNORED_REDSHIFT_DRAW
-        else:
-            unit_vector[dimension_index] = cube_by_name[dimension]
-
+    unit_vector = training_unit_vector(cube_by_name)
     bagpipes_components, drawn = components(unit_vector, fixed_redshift=redshift)
     veldisp = uniform(cube_by_name["veldisp"], *VELDISP_RANGE)
     bagpipes_components["veldisp"] = veldisp
@@ -1001,6 +1011,14 @@ LOW_PERCENTILE = 16              # lower posterior summary (percent), 1 sigma
 MEDIAN_PERCENTILE = 50           # central posterior summary (percent)
 HIGH_PERCENTILE = 84             # upper posterior summary (percent), 1 sigma
 MAX_ITERATIONS = 50000           # MultiNest iteration limit of a production fit (count)
+OFFSET_DRAW_SEED = 0             # seed of the per-sample magnitude offsets of a photometric fit's labels
+
+# The photometric fit (spec amendment A) samples the training prior at the spectroscopic redshift and nothing
+# else: its brightness offset is marginalised analytically, and the simulator has no error multiplier
+PHOTOMETRIC_DIMS = []
+for dimension in DIMS:
+    if dimension != "z":
+        PHOTOMETRIC_DIMS.append(dimension)
 
 
 def multinest_iteration_bounds(output_basename):
@@ -1061,11 +1079,6 @@ def fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_poi
              (dimensionless ln Z), n_iterations (count, from multinest_iterations), converged (bool: the
              run certainly stopped before max_iterations, judged by the upper bound of the count) and run_time [s].
     """
-    # pymultinest loads the MultiNest C library on import, so it needs LD_LIBRARY_PATH (set by the kernel)
-    import pymultinest
-
-    os.makedirs(output_basename, exist_ok=True)
-
     # 1. Bagpipes model built once; each likelihood call updates it in place, which is much faster
     midpoint_cube = np.full(len(SPECTRAL_DIMS), MIDPOINT_DRAW)
     starting_components, _, _ = spectral_components(midpoint_cube, redshift)
@@ -1083,6 +1096,27 @@ def fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_poi
         model_flux = model.spectrum[:, 1]
         return safe_spectral_log_likelihood(model_flux, spectrum["flux"], spectrum["ivar"], noise_scale)
 
+    # 3. MultiNest over the unit cube
+    return run_multinest(log_likelihood, len(SPECTRAL_DIMS), output_basename, max_iterations, n_live_points)
+
+
+def run_multinest(log_likelihood, n_dims, output_basename, max_iterations, n_live_points):
+    """One MultiNest run over the unit cube, with the settings shared by the spectral and photometric fits.
+
+    The prior is the identity map: each fit's components function turns a unit-cube point into physical
+    values, exactly as the training set does.
+    Inputs: log_likelihood: function of one unit-cube point (dimensionless) giving a log-likelihood
+            (dimensionless); it must never raise; n_dims: number of unit-cube dimensions (count);
+            output_basename: directory prefix for the MultiNest files (str, under 100 characters);
+            max_iterations: MultiNest iteration limit (count); n_live_points: live points (count).
+    Returns: dict as fit_spectrum returns: samples (n_samples, n_dims), log_evidence, n_iterations, converged
+             and run_time [s].
+    """
+    # pymultinest loads the MultiNest C library on import, so it needs LD_LIBRARY_PATH (set by the kernel)
+    import pymultinest
+
+    os.makedirs(output_basename, exist_ok=True)
+
     def unit_cube_prior(cube):
         """Identity map: the training prior is already uniform on the unit cube.
 
@@ -1090,10 +1124,10 @@ def fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_poi
         """
         return cube
 
-    # 3. Run MultiNest, timing only the sampling itself
+    # 1. Run MultiNest, timing only the sampling itself
     start = time.time()
     result = pymultinest.solve(
-        LogLikelihood=log_likelihood, Prior=unit_cube_prior, n_dims=len(SPECTRAL_DIMS),
+        LogLikelihood=log_likelihood, Prior=unit_cube_prior, n_dims=n_dims,
         outputfiles_basename=output_basename, n_live_points=n_live_points,
         sampling_efficiency=SAMPLING_EFFICIENCY, multimodal=True, max_iter=max_iterations,
         # Standard nested-sampling evidence: the importance-sampled one underflows in short runs and
@@ -1103,7 +1137,7 @@ def fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_poi
     )
     run_time = time.time() - start
 
-    # 4. Hitting the iteration limit means the run stopped before it converged; the upper bound of the
+    # 2. Hitting the iteration limit means the run stopped before it converged; the upper bound of the
     #    count is used so that a capped run is never reported as converged
     n_iterations, max_possible_iterations = multinest_iteration_bounds(output_basename)
     return {
@@ -1127,28 +1161,194 @@ def posterior_labels(unit_cube_samples, redshift):
              and model_r [mag].
     """
     # 1. Thin the samples evenly: neighbouring MultiNest samples are nearly identical
-    step = max(1, int(np.ceil(len(unit_cube_samples) / MAX_POSTERIOR_SAMPLES)))
-    kept_samples = unit_cube_samples[::step]
+    kept_samples = thinned_samples(unit_cube_samples)
 
     # 2. Labels per kept sample, with one photometry model updated in place
     model = None
     rows = []
     for cube in kept_samples:
         bagpipes_components, drawn, noise_scale = spectral_components(cube, redshift)
-        if model is None:
-            model = pipes.model_galaxy(bagpipes_components, filt_list=FILTER_FILES)
-        else:
-            model.update(bagpipes_components)
-        fractions, metallicities, edges = bins_from_components(bagpipes_components)
-
-        row = dict(drawn)
-        row["noise_scale"] = noise_scale
-        row.update(summary_labels(model.sfh))
-        row.update(bin_labels(fractions, metallicities, edges))
-        row["mw_metallicity"] = mass_weighted_metallicity(fractions, metallicities)
-        row["model_r"] = ab_magnitudes(model.photometry)[BANDS.index("r")]
-        rows.append(row)
+        model = updated_photometry_model(model, bagpipes_components)
+        drawn_with_noise = dict(drawn)
+        drawn_with_noise["noise_scale"] = noise_scale
+        rows.append(sample_label_row(model, bagpipes_components, drawn_with_noise))
     return pd.DataFrame(rows)
+
+
+def thinned_samples(unit_cube_samples):
+    """At most MAX_POSTERIOR_SAMPLES evenly spaced posterior samples, because building labels is the slow part.
+
+    Inputs: unit_cube_samples: unit-cube points (dimensionless), shape (n_samples, n_dims).
+    Returns: every step-th row (dimensionless), step chosen so that no more than MAX_POSTERIOR_SAMPLES remain.
+    """
+    step = max(1, int(np.ceil(len(unit_cube_samples) / MAX_POSTERIOR_SAMPLES)))
+    return unit_cube_samples[::step]
+
+
+def updated_photometry_model(model, bagpipes_components):
+    """A Bagpipes model with the S-PLUS filters at new components: built the first time, then updated in place.
+
+    Inputs: model: an earlier photometry model_galaxy, or None; bagpipes_components: dict as from components().
+    Returns: the model_galaxy (filt_list=FILTER_FILES), now at bagpipes_components.
+    """
+    if model is None:
+        return pipes.model_galaxy(bagpipes_components, filt_list=FILTER_FILES)
+    model.update(bagpipes_components)
+    return model
+
+
+def sample_label_row(model, bagpipes_components, drawn):
+    """Labels of one posterior sample, read from its photometry model.
+
+    Inputs: model: photometry model_galaxy already at bagpipes_components; bagpipes_components: dict as from
+            components(); drawn: the drawn parameters to put first in the row (dict).
+    Returns: dict: drawn, SUMMARY_LABEL_COLUMNS, BIN_LABEL_COLUMNS, mw_metallicity (Z/Z_sun) and model_r
+             [mag], the model r magnitude for 10^10 M_sun formed. Mass-like labels are for that mass.
+    """
+    fractions, metallicities, edges = bins_from_components(bagpipes_components)
+    row = dict(drawn)
+    row.update(summary_labels(model.sfh))
+    row.update(bin_labels(fractions, metallicities, edges))
+    row["mw_metallicity"] = mass_weighted_metallicity(fractions, metallicities)
+    row["model_r"] = ab_magnitudes(model.photometry)[BANDS.index("r")]
+    return row
+
+
+# -----------------------------------------------------------------------------
+# Photometric fit (spec amendment A): the ML's own input, fitted by Bagpipes with the simulator's likelihood
+# -----------------------------------------------------------------------------
+def photometric_components(cube, redshift):
+    """Bagpipes components and drawn parameters for one photometric-fit unit-cube point.
+
+    Inputs: cube: unit-cube values (dimensionless, in [0, 1)) ordered as PHOTOMETRIC_DIMS;
+            redshift: spectroscopic redshift (dimensionless).
+    Returns: (bagpipes_components, drawn), exactly as components(..., fixed_redshift=redshift) gives them.
+    """
+    cube_by_name = dict(zip(PHOTOMETRIC_DIMS, cube))
+    unit_vector = training_unit_vector(cube_by_name)
+    return components(unit_vector, fixed_redshift=redshift)
+
+
+def offset_marginal_log_likelihood(model_magnitudes, observed_magnitudes, errors, detected):
+    """Gaussian log-likelihood of the photometry in magnitudes, integrated over a flat-prior magnitude offset.
+
+    The offset (observed minus model, the same in every band) is the galaxy's brightness against a model of
+    10^10 M_sun formed. With weights w = 1 / error^2 and d = m_obs - m_model over the detected bands, the
+    likelihood is Gaussian in the offset, so the integral is exact:
+        ln L = -chi2_min / 2 + ln(2 pi / sum w) / 2,   chi2_min = sum w d^2 - (sum w d)^2 / sum w.
+    No ERROR_FLOOR is added, because add_splus_noise, which made the training data, adds none. The Gaussian
+    normalisation of each band does not depend on the model, so it is dropped.
+    Inputs: model_magnitudes, observed_magnitudes, errors: [mag], 1-D over the bands; detected: bool array of
+            the same length with at least one True (detected_bands); undetected entries may hold anything, NaN too.
+    Returns: (log_likelihood (dimensionless), best_offset [mag], offset_sigma [mag]); given the model, the
+             offset is Gaussian with mean best_offset and standard deviation offset_sigma.
+    """
+    model_magnitudes = np.asarray(model_magnitudes, dtype=float)
+    observed_magnitudes = np.asarray(observed_magnitudes, dtype=float)
+    errors = np.asarray(errors, dtype=float)
+
+    differences = observed_magnitudes[detected] - model_magnitudes[detected]
+    weights = 1 / errors[detected] ** 2
+    weight_sum = np.sum(weights)
+    weighted_difference_sum = np.sum(weights * differences)
+
+    best_offset = weighted_difference_sum / weight_sum
+    chi2_min = np.sum(weights * differences**2) - weighted_difference_sum * best_offset
+    log_likelihood = -0.5 * chi2_min + 0.5 * np.log(2 * np.pi / weight_sum)
+    offset_sigma = 1 / np.sqrt(weight_sum)
+    return log_likelihood, best_offset, offset_sigma
+
+
+def safe_photometric_log_likelihood(model_magnitudes, observed_magnitudes, errors, detected):
+    """offset_marginal_log_likelihood that returns LOG_ZERO for a model with no magnitude in a detected band.
+
+    ab_magnitudes gives NaN when a model flux is not positive; such a model cannot have made the data.
+    Inputs: as in offset_marginal_log_likelihood.
+    Returns: log-likelihood (dimensionless), or LOG_ZERO for an impossible model.
+    """
+    model_magnitudes = np.asarray(model_magnitudes, dtype=float)
+    if not np.all(np.isfinite(model_magnitudes[detected])):
+        return LOG_ZERO
+    return offset_marginal_log_likelihood(model_magnitudes, observed_magnitudes, errors, detected)[0]
+
+
+def fit_photometry(magnitudes, errors, redshift, output_basename, max_iterations, n_live_points=N_LIVE_POINTS):
+    """MultiNest fit of one galaxy's 12-band photometry under the training prior at a fixed redshift.
+
+    It fits the ML's own target: the training prior (PHOTOMETRIC_DIMS) and the likelihood of the simulator
+    that made the training data (offset_marginal_log_likelihood), over the detected bands only.
+    Inputs: magnitudes, errors: [mag], 12 values in BANDS order; a band is left out when detected_bands says
+            it is not detected (99 or NaN magnitude, or error >= MAX_DETECTED_ERROR);
+            redshift: spectroscopic redshift (dimensionless); output_basename, max_iterations and n_live_points:
+            as in fit_spectrum.
+    Returns: dict as fit_spectrum returns, with samples of shape (n_samples, len(PHOTOMETRIC_DIMS)).
+    Raises: ValueError when fewer than MIN_DETECTED_BANDS bands are detected.
+    """
+    # 1. Bands that enter the likelihood
+    magnitudes = np.asarray(magnitudes, dtype=float)
+    errors = np.asarray(errors, dtype=float)
+    detected = detected_bands(magnitudes, errors)
+    if detected.sum() < MIN_DETECTED_BANDS:
+        raise ValueError(f"{detected.sum()} detected bands, fewer than MIN_DETECTED_BANDS = {MIN_DETECTED_BANDS}")
+
+    # 2. Bagpipes model built once with the S-PLUS filters; the redshift, so the number of bins, never changes
+    midpoint_cube = np.full(len(PHOTOMETRIC_DIMS), MIDPOINT_DRAW)
+    starting_components, _ = photometric_components(midpoint_cube, redshift)
+    model = updated_photometry_model(None, starting_components)
+
+    # 3. Likelihood of one unit-cube point
+    def log_likelihood(cube):
+        """Log-likelihood of the photometry for one unit-cube point.
+
+        Inputs: cube: unit-cube point (dimensionless, PHOTOMETRIC_DIMS order).
+        Returns: log-likelihood (dimensionless), LOG_ZERO for an impossible model.
+        """
+        bagpipes_components, _ = photometric_components(cube, redshift)
+        # PyMultiNest calls sys.exit if the likelihood raises: a model Bagpipes cannot compute is impossible
+        try:
+            model.update(bagpipes_components)
+            model_magnitudes = ab_magnitudes(model.photometry)
+        except Exception:
+            return LOG_ZERO
+        return safe_photometric_log_likelihood(model_magnitudes, magnitudes, errors, detected)
+
+    # 4. MultiNest over the unit cube
+    return run_multinest(log_likelihood, len(PHOTOMETRIC_DIMS), output_basename, max_iterations, n_live_points)
+
+
+def photometric_posterior_labels(unit_cube_samples, redshift, magnitudes, errors, rng):
+    """Labels of each photometric-fit posterior sample, at the brightness of the observed galaxy.
+
+    Each kept sample gets its own magnitude offset, drawn from the offset's Gaussian given that sample's
+    model (offset_marginal_log_likelihood), and its mass-like labels move by it (rescale_mass_labels), as the
+    training labels move with the brightness offset of each model.
+    Inputs: unit_cube_samples: unit-cube points (dimensionless), shape (n_samples, len(PHOTOMETRIC_DIMS));
+            redshift: spectroscopic redshift (dimensionless); magnitudes, errors: [mag] the fitted photometry,
+            as given to fit_photometry; rng: numpy Generator.
+    Returns: DataFrame with one row per kept sample (at most MAX_POSTERIOR_SAMPLES): the drawn parameters,
+             SUMMARY_LABEL_COLUMNS and BIN_LABEL_COLUMNS (mass-like ones already rescaled), mw_metallicity
+             (Z/Z_sun), model_r [mag, for 10^10 M_sun formed] and magnitude_offset [mag, observed minus model].
+    """
+    magnitudes = np.asarray(magnitudes, dtype=float)
+    errors = np.asarray(errors, dtype=float)
+    detected = detected_bands(magnitudes, errors)
+
+    # 1. Labels per kept sample, each with an offset drawn given its own model
+    kept_samples = thinned_samples(unit_cube_samples)
+    model = None
+    rows = []
+    for cube in kept_samples:
+        bagpipes_components, drawn = photometric_components(cube, redshift)
+        model = updated_photometry_model(model, bagpipes_components)
+        row = sample_label_row(model, bagpipes_components, drawn)
+        model_magnitudes = ab_magnitudes(model.photometry)
+        _, best_offset, offset_sigma = offset_marginal_log_likelihood(model_magnitudes, magnitudes, errors, detected)
+        row["magnitude_offset"] = rng.normal(best_offset, offset_sigma)
+        rows.append(row)
+
+    # 2. Mass-like labels at the observed brightness
+    labels = pd.DataFrame(rows)
+    return rescale_mass_labels(labels, labels["magnitude_offset"].to_numpy())
 
 
 def make_mock_spectrum(cube, redshift, template_spectrum, rng):

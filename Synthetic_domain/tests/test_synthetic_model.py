@@ -583,6 +583,158 @@ def test_summarise_posterior_percentiles():
 
 
 # =============================================================================
+# Photometric fit (spec amendment A; run with LD_LIBRARY_PATH=../.venv/lib)
+# =============================================================================
+TOY_MODEL_MAGNITUDES = np.array([20.0, 19.5, 19.2])     # [mag]
+TOY_OBSERVED_MAGNITUDES = np.array([21.1, 20.4, 20.35])  # [mag] about 1 mag fainter, with colour noise
+TOY_ERRORS = np.array([0.05, 0.08, 0.1])                 # [mag]
+OFFSET_INTEGRAL_HALF_WIDTH = 20                          # [offset sigmas] the integrand is ~exp(-200) beyond
+
+
+def multinest_available():
+    """Whether pymultinest imports (it needs libmultinest on LD_LIBRARY_PATH). Returns: bool."""
+    try:
+        import pymultinest    # noqa: F401
+    except (ImportError, OSError):
+        return False
+    return True
+
+
+def noiseless_photometry(cube, redshift):
+    """Model AB magnitudes [mag] of one PHOTOMETRIC_DIMS point, and the unscaled stellar mass [log M_sun]."""
+    import bagpipes as pipes
+
+    bagpipes_components, _ = sm.photometric_components(cube, redshift)
+    model = pipes.model_galaxy(bagpipes_components, filt_list=sm.FILTER_FILES)
+    return sm.ab_magnitudes(model.photometry), model.sfh.stellar_mass
+
+
+def test_offset_marginal_equals_a_numerical_integral_over_the_offset():
+    """The analytic marginal over a flat-prior offset equals a brute-force integral (3-band toy)."""
+    from scipy.integrate import quad
+
+    detected = np.ones(3, dtype=bool)
+    log_likelihood, best_offset, offset_sigma = sm.offset_marginal_log_likelihood(
+        TOY_MODEL_MAGNITUDES, TOY_OBSERVED_MAGNITUDES, TOY_ERRORS, detected)
+
+    weights = 1 / TOY_ERRORS**2
+
+    def likelihood_at_offset(offset):
+        residuals = TOY_OBSERVED_MAGNITUDES - TOY_MODEL_MAGNITUDES - offset
+        return np.exp(-0.5 * np.sum(weights * residuals**2))
+
+    half_width = OFFSET_INTEGRAL_HALF_WIDTH * offset_sigma
+    integral, _ = quad(likelihood_at_offset, best_offset - half_width, best_offset + half_width,
+                       points=[best_offset], epsabs=0, epsrel=1e-12)
+    assert np.isclose(log_likelihood, np.log(integral), rtol=0, atol=1e-6)
+    differences = TOY_OBSERVED_MAGNITUDES - TOY_MODEL_MAGNITUDES
+    assert np.isclose(best_offset, np.sum(weights * differences) / np.sum(weights))
+    assert np.isclose(offset_sigma, 1 / np.sqrt(np.sum(weights)))
+
+
+def test_offset_marginal_ignores_undetected_bands():
+    """A fourth, undetected band (99 mag, NaN model, zero error) leaves the marginal unchanged."""
+    three_bands = sm.offset_marginal_log_likelihood(TOY_MODEL_MAGNITUDES, TOY_OBSERVED_MAGNITUDES, TOY_ERRORS,
+                                                    np.ones(3, dtype=bool))
+    model_magnitudes = np.append(TOY_MODEL_MAGNITUDES, np.nan)
+    observed_magnitudes = np.append(TOY_OBSERVED_MAGNITUDES, 99.0)
+    errors = np.append(TOY_ERRORS, 0.0)
+    detected = np.array([True, True, True, False])
+    four_bands = sm.offset_marginal_log_likelihood(model_magnitudes, observed_magnitudes, errors, detected)
+    assert np.allclose(four_bands, three_bands)
+
+
+def test_photometric_log_likelihood_guard_returns_log_zero():
+    """A model with a NaN magnitude in a detected band is an impossible point; one in an undetected band is not."""
+    detected = np.ones(3, dtype=bool)
+    nan_model = TOY_MODEL_MAGNITUDES.copy()
+    nan_model[1] = np.nan
+    assert sm.safe_photometric_log_likelihood(nan_model, TOY_OBSERVED_MAGNITUDES, TOY_ERRORS, detected) == sm.LOG_ZERO
+
+    expected = sm.offset_marginal_log_likelihood(TOY_MODEL_MAGNITUDES, TOY_OBSERVED_MAGNITUDES, TOY_ERRORS,
+                                                 detected)[0]
+    safe = sm.safe_photometric_log_likelihood(TOY_MODEL_MAGNITUDES, TOY_OBSERVED_MAGNITUDES, TOY_ERRORS, detected)
+    assert safe == expected
+    two_detected = np.array([True, False, True])
+    undetected_nan = sm.safe_photometric_log_likelihood(nan_model, TOY_OBSERVED_MAGNITUDES, TOY_ERRORS, two_detected)
+    assert undetected_nan > sm.LOG_ZERO
+
+
+def test_photometric_components_are_the_training_prior_without_the_redshift():
+    rng = np.random.default_rng(20)
+    cube = rng.random(len(sm.PHOTOMETRIC_DIMS))
+    full_unit_vector = np.insert(cube, sm.DIMS.index("z"), 0.9)   # any redshift draw: fixed_redshift replaces it
+    expected_components, expected_drawn = sm.components(full_unit_vector, fixed_redshift=0.12)
+
+    bagpipes_components, drawn = sm.photometric_components(cube, 0.12)
+
+    expected_dims = list(sm.DIMS)
+    expected_dims.remove("z")
+    assert sm.PHOTOMETRIC_DIMS == expected_dims
+    assert bagpipes_components == expected_components
+    assert drawn == expected_drawn
+    assert "veldisp" not in bagpipes_components
+
+
+def test_photometric_posterior_labels_shift_the_masses_by_the_offset():
+    """A galaxy 1.5 mag fainter than its model (tiny errors) gets log_mstar lower by 0.4 x 1.5 = 0.6 dex."""
+    cube = np.full(len(sm.PHOTOMETRIC_DIMS), 0.5)
+    model_magnitudes, unscaled_log_mass = noiseless_photometry(cube, 0.1)
+    offset = 1.5
+    errors = np.full(len(sm.BANDS), 1e-4)
+
+    posterior = sm.photometric_posterior_labels(cube[np.newaxis, :], 0.1, model_magnitudes + offset, errors,
+                                                np.random.default_rng(21))
+
+    assert np.isclose(posterior["magnitude_offset"].iloc[0], offset, atol=1e-3)
+    assert np.isclose(posterior["log_mstar"].iloc[0], unscaled_log_mass - 0.4 * offset, atol=1e-3)
+    for column in ("mw_age", "Z_fin", "f_old", "log_sfr", "frac_bin_00", "model_r"):
+        assert column in posterior.columns, column
+
+
+def test_photometric_posterior_labels_draw_the_offset_from_its_conditional():
+    """Repeated copies of one point get offsets with the analytic mean and width (errors 0.1 mag, 12 bands)."""
+    n_copies = 200
+    cube = np.full(len(sm.PHOTOMETRIC_DIMS), 0.5)
+    model_magnitudes, _ = noiseless_photometry(cube, 0.1)
+    errors = np.full(len(sm.BANDS), 0.1)
+    samples = np.tile(cube, (n_copies, 1))
+
+    posterior = sm.photometric_posterior_labels(samples, 0.1, model_magnitudes + 1.0, errors,
+                                                np.random.default_rng(22))
+
+    offset_sigma = 0.1 / np.sqrt(len(sm.BANDS))
+    assert len(posterior) == n_copies
+    assert np.isclose(posterior["magnitude_offset"].mean(), 1.0, atol=3 * offset_sigma / np.sqrt(n_copies))
+    assert np.isclose(posterior["magnitude_offset"].std(), offset_sigma, rtol=0.2)
+
+
+def test_fit_photometry_needs_enough_detected_bands():
+    magnitudes = np.full(len(sm.BANDS), 99.0)
+    magnitudes[:sm.MIN_DETECTED_BANDS - 1] = 20.0
+    errors = np.full(len(sm.BANDS), 0.05)
+    with pytest.raises(ValueError, match="detected bands"):
+        sm.fit_photometry(magnitudes, errors, 0.1, "unused/", max_iterations=10, n_live_points=25)
+
+
+@pytest.mark.skipif(not multinest_available(), reason="pymultinest cannot import (LD_LIBRARY_PATH?)")
+def test_fit_photometry_smoke_run_on_a_noiseless_mock(tmp_path):
+    """A short MultiNest run on noiseless model photometry returns unit-cube samples and run details."""
+    cube = np.random.default_rng(23).random(len(sm.PHOTOMETRIC_DIMS))
+    magnitudes, _ = noiseless_photometry(cube, 0.1)
+    errors = np.full(len(sm.BANDS), 0.05)
+    magnitudes[0] = 99.0                     # one undetected band: the fit runs on the other eleven
+
+    fit = sm.fit_photometry(magnitudes, errors, 0.1, str(tmp_path) + "/", max_iterations=200, n_live_points=25)
+
+    assert set(fit) == {"samples", "log_evidence", "n_iterations", "converged", "run_time"}
+    assert fit["samples"].shape[1] == len(sm.PHOTOMETRIC_DIMS)
+    assert np.all((fit["samples"] >= 0) & (fit["samples"] <= 1))
+    assert np.isfinite(fit["log_evidence"])
+    assert fit["n_iterations"] <= 200
+
+
+# =============================================================================
 # Job files and the calibration test
 # =============================================================================
 def test_export_and_load_job_round_trip(tmp_path):
