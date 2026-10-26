@@ -133,6 +133,15 @@ The job server buffers the whole upload in a small memory limit, so keep the bun
   cut down, so if the upload fails, try `HLJOB_OPTIONS=--pause-llm` first.
 - **Training set:** only `redshift` and the bands are read, so send it as float32 (`FLOAT32_FILES`).
 
+**Before every notebook-2 job, supersede locally** (file moves only, seconds). Cell 10 moves outdated fits,
+mock files, calibration jobs and run logs to `superseded/`, but in the job it moves only the job's copies: a move
+keeps the old mtime, and `notebook_job.sh` brings back only files newer than its start. Without the local step, the
+old `.h5` files would be bundled by `submit_fits.sh` as finished fits (and reported failed), and the fetched
+`calibration_mocks.joblib` would overwrite the old one, its only copy:
+
+    cd Synthetic_domain && LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python -c "import synthetic_model as sm; \
+        [print(d, len(sm.supersede_outdated_fits(d))) for d in ('spectral_fits', 'photometric_fits')]"
+
 First run (exports `photometric_fits/jobs/` and `photometric_fits/calibration_mocks.joblib`):
 
     cd Synthetic_domain

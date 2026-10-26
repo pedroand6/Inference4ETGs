@@ -143,7 +143,7 @@ The laptop only runs code changes, unit tests and quick checks. Everything else 
 
 Order (one job at a time, so the jobs queue):
 1. Training and synthetic sets: CPU notebook job.
-2. Notebook 2: exports the fit jobs and moves the old fits to `superseded/`.
+2. Notebook 2: exports the fit jobs and moves the old fits to `superseded/`. The move is also run locally (`sm.supersede_outdated_fits`, seconds) before every notebook-2 job, because a notebook job brings back only files it wrote, not its moves.
 3. Spectral fits and mocks: CPU, 14 workers.
 4. Literature refetch: a light job, or local if it is only network queries without credentials.
 5. MLP training: GPU.

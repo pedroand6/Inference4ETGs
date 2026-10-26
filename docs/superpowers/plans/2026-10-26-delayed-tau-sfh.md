@@ -311,7 +311,14 @@ def delayed_mass_weighted_age(age, tau):
 
 1. Move the old ML runs (`ml_runs/mlp`, `ml_runs/cnn`) to `ml_runs/superseded/`.
 2. **PC, CPU:** run `training_set.ipynb` as a notebook job (inputs: `dr3_corrected.csv`, `splus_noise_model.csv`, `splus-filters`). Fetch its outputs. They are large; the notebook job brings back what it writes, `training_set.parquet` included, so check the download size or split the job.
-3. **PC, CPU:** run notebook 2, which supersedes the old fits and exports the new spectral and photometric jobs. Then submit the spectral fits with `remote/submit_fits.sh` (14 workers).
-4. **PC, GPU:** train the MLP with `remote/submit_training.sh` (`EMBEDDINGS=mlp`).
-5. **PC, CPU:** run the photometric fits with `FITS_SUBDIR=photometric_fits remote/submit_fits.sh`.
-6. **PC:** run notebook 2 to read every fit, then `ml_model.ipynb` on the GPU. Report.
+3. **Laptop, before every notebook-2 job (required; file moves only, seconds):** supersede the old fits locally.
+   ```bash
+   cd Synthetic_domain && LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python -c "import synthetic_model as sm; [print(d, len(sm.supersede_outdated_fits(d))) for d in ('spectral_fits', 'photometric_fits')]"
+   ```
+   - Why: cell 10 also supersedes, but in the job it moves the job's own copies. `notebook_job.sh` returns only files newer than its start marker, and a move keeps the old mtime, so the moves never reach the laptop.
+   - Without this step, the local 16-bin `.h5` files stay at the top level. `submit_fits.sh` would bundle them as `finished_fits/`, and `fit_and_save` would report every such id as failed. Also, the fetched new `calibration_mocks.joblib` would overwrite the local 16-bin one, which is the only copy (`spectral_fits/` is git-ignored).
+   - Check: the first call moves about 233 items in `spectral_fits` and 155 in `photometric_fits` (dry run of Task 5); a repeat moves 0. Afterwards no top-level `.h5` (except an unreadable one, which `fit_and_save` refits) and no `calibration_mocks.joblib` remain in either folder.
+4. **PC, CPU:** run notebook 2, which exports the new spectral and photometric jobs (its own superseding then finds nothing to move). Then submit the spectral fits with `remote/submit_fits.sh` (14 workers).
+5. **PC, GPU:** train the MLP with `remote/submit_training.sh` (`EMBEDDINGS=mlp`).
+6. **PC, CPU:** run the photometric fits with `FITS_SUBDIR=photometric_fits remote/submit_fits.sh`.
+7. **PC:** run notebook 2 to read every fit, then `ml_model.ipynb` on the GPU. Report.
