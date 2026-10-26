@@ -148,3 +148,71 @@ All in `Synthetic_domain/`:
 ## Amendment (2026-10-24): the redshift is a 19th target
 
 Decoding a posterior sample into per-bin labels needs the galaxy's redshift. The bin edges, the existence of bin 14 (z < 0.48) and the SFR per bin all depend on it. For photometric-redshift galaxies the true redshift is uncertain, so it becomes a learned target: θ gains `redshift` (19 numbers). Each posterior sample is decoded at its own sampled redshift, clipped to the prior range. For spectroscopic redshifts the posterior on z is simply narrow. Everything else in this spec is unchanged.
+
+## Amendment (2026-10-26): diagnosing the gap between the ML and the spectral reference (A → B → C)
+
+**Finding (validation run, 32 reference galaxies):**
+- On synthetic data the MLP is calibrated: the 68% and 95% coverage of mw_age, Z_fin, log_mstar and log_sfr is within 0.02 of nominal.
+- On real galaxies it disagrees with the Bagpipes spectral posteriors. ML minus spectral medians are:
+  - mw_age +2.8 Gyr (9.2 against 6.3);
+  - Z_fin 0.30 against 1.63 Z_sun;
+  - log_sfr −1.1 dex;
+  - log_mstar +0.24 dex.
+- The inputs are not the cause:
+  - the units agree;
+  - DR3 total colours give the same result;
+  - the galaxies lie inside the training colour domain (nearest-model χ²/dof ≈ 0.8);
+  - the 30 training models nearest in colour are 9.2 Gyr old, as the ML says.
+- The spectral fits use a calibration polynomial, so they read the absorption features, not the continuum shape.
+
+**Decision (user, 2026-10-26):** try A. If A does not work, try B. If B does not work, try C.
+
+**What "works" means.** It is the same test at each step: the ML posterior against a reference label set, on the `validation` half only. The `test` half stays locked.
+- The labels are mw_age, Z_fin, f_old and log_mstar.
+- A label agrees when both hold:
+  - at least 80% of the reference medians lie inside the ML 95% interval;
+  - the median of (ML median − reference median) / combined 1σ width is at most 1.0 in absolute value.
+- The step works when all four labels agree.
+- Every step also reports the spectral comparison, which stays the headline physical check.
+
+### A. Bagpipes fits of the photometry alone (the ML's exact target)
+
+- **What is fitted:** each reference galaxy's 12-band 3″ aperture photometry, the ML's own input.
+  - The redshift is fixed at the spectroscopic z.
+  - The prior is the training prior (`components(cube, fixed_redshift=z)`): DIMS without z, and no veldisp or noise_scale.
+  - The sampler is MultiNest, with the same settings as the spectral fits.
+- **Likelihood:** it must match the simulator that made the training data (`add_splus_noise`). It is Gaussian in magnitudes with the catalogue errors. No ERROR_FLOOR is added, because the simulator adds none.
+  - Only detected bands are used (`detected_bands`).
+  - The overall brightness is a free magnitude offset with a flat prior. It is marginalised analytically: χ²_min of the offset plus ½ ln(2π / Σw).
+  - The mass labels of each posterior sample are rescaled by an offset drawn from its Gaussian conditional, through `rescale_mass_labels`, as in training.
+- **Which galaxies and where it runs:**
+  - Every fitted galaxy of the `validation` half, plus a calibration check: the 33 calibration mocks' noiseless photometry, noised with `add_splus_noise`. The check passes when 95% coverage is at least 0.85.
+  - The fits are jobs on the PC, written to `photometric_fits/` (separate from `spectral_fits/`, because job ids are specobjids).
+- **Reading the result:**
+  - **A works**, i.e. the ML agrees with photometric Bagpipes: the ML is a faithful emulator of Bagpipes on these colours. The spectral gap is then about how much information 12 bands carry, a scientific result, and the ML evaluation reports both comparisons.
+  - **A does not work:** go to B.
+
+### B. Reference labels from joint spectrum + photometry fits
+
+- **What is fitted:** spectrum and aperture photometry together, with the same prior.
+  - The spectrum keeps its calibration polynomial.
+  - The photometry fixes the continuum shape.
+  - The likelihood is the sum of the spectral likelihood and the A photometric likelihood.
+- **Galaxies:** the `validation` half, as jobs on the PC.
+- **Reading the result:**
+  - **B works**, i.e. the ML agrees with the joint labels: the joint fits become the ML reference labels.
+  - **B does not work:** go to C.
+
+### C. A training prior weighted towards young, star-forming, metal-rich galaxies
+
+The aim is better coverage of S-PLUS galaxies:
+- Raise the weight of the star-forming and young SFH branches.
+- Raise the share of models with high Z_fin (super-solar).
+- Choose the weights by comparing training-set colours with DR3 colour distributions, using the coverage test and colour histograms.
+
+This lifts the "changing the prior" out-of-scope item for this step only.
+- The training set is regenerated on the PC, and the MLP is retrained on the GPU.
+- The agreement test is repeated against the B labels, or the spectral labels if B was not built.
+- The synthetic validation and test sets are regenerated from the new prior too, so that synthetic calibration is still measured on the training distribution.
+
+**Compute rule (user, 2026-10-25):** every fit, notebook execution, training run and posterior sampling runs as an `hljob` job on the PC, never on the laptop.
