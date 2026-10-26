@@ -317,8 +317,9 @@ def delayed_mass_weighted_age(age, tau):
    ```
    - Why: cell 10 also supersedes, but in the job it moves the job's own copies. `notebook_job.sh` returns only files newer than its start marker, and a move keeps the old mtime, so the moves never reach the laptop.
    - Without this step, the local 16-bin `.h5` files stay at the top level. `submit_fits.sh` would bundle them as `finished_fits/`, and `fit_and_save` would report every such id as failed. Also, the fetched new `calibration_mocks.joblib` would overwrite the local 16-bin one, which is the only copy (`spectral_fits/` is git-ignored).
-   - Check: the first call moves about 233 items in `spectral_fits` and 155 in `photometric_fits` (dry run of Task 5); a repeat moves 0. Afterwards no top-level `.h5` (except an unreadable one, which `fit_and_save` refits) and no `calibration_mocks.joblib` remain in either folder.
+   - Check: the first call moves about 233 items in `spectral_fits` and 155 in `photometric_fits` (dry run of Task 5); a repeat moves 0. Afterwards no 16-bin `.h5` (except an unreadable one, which `fit_and_save` refits) and no 16-bin `calibration_mocks.joblib` remain at the top level of either folder; the current delayed-tau fits and mocks stay there on later calls.
+   - Bundle: `submit_notebook.sh` leaves out every `superseded/` and `pilot/` folder (`EXCLUDE_NAMES`), which no notebook reads; check the size with `BUNDLE_ONLY=<folder>` before submitting.
 4. **PC, CPU:** run notebook 2, which exports the new spectral and photometric jobs (its own superseding then finds nothing to move). Then submit the spectral fits with `remote/submit_fits.sh` (14 workers).
 5. **PC, GPU:** train the MLP with `remote/submit_training.sh` (`EMBEDDINGS=mlp`).
-6. **PC, CPU:** run the photometric fits with `FITS_SUBDIR=photometric_fits remote/submit_fits.sh`.
-7. **PC:** run notebook 2 to read every fit, then `ml_model.ipynb` on the GPU. Report.
+6. **PC, CPU:** first run notebook 2 again (after step 3) to read the spectral fits and export the photometric jobs; `photometric_fits/jobs/` must be empty before it, so it then holds only this export (the 87 jobs of the 16-bin split were moved to `photometric_fits/superseded/jobs/`). Then run the photometric fits with `FITS_SUBDIR=photometric_fits remote/submit_fits.sh`.
+7. **PC:** run notebook 2 to read every fit (after step 3 again, with `photometric_fits` added to its inputs), then `ml_model.ipynb` on the GPU. Report.

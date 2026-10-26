@@ -24,6 +24,9 @@
 #                    server buffers the whole upload in a small memory limit)                       [default none]
 #   HLJOB_OPTIONS    extra `hljob run` options, e.g. "--pause-llm" to free the memory the LLM holds   [default none]
 #   BUNDLE_ONLY      set to a folder path to only write bundle.tar.gz there and NOT submit           [default: submit]
+#   EXCLUDE_NAMES    files or folders never packed from the Synthetic_domain inputs, matched by name at any
+#                    depth: results of an earlier model (superseded/) and the pilot fits (pilot/), which no
+#                    notebook reads and which swell the upload; empty packs everything [default "superseded pilot"]
 set -euo pipefail
 
 # 1. Arguments, settings and paths
@@ -42,6 +45,7 @@ JOB_NAME="${JOB_NAME:-$(basename "$notebook" .ipynb)}"
 MULTINEST_SOURCE="${MULTINEST_SOURCE:-$HOME/Programs/MultiNest}"
 read -r -a float32_files <<< "${FLOAT32_FILES:-}"
 read -r -a hljob_options <<< "${HLJOB_OPTIONS:-}"
+read -r -a exclude_names <<< "${EXCLUDE_NAMES-superseded pilot}"
 
 BUNDLE_ONLY="${BUNDLE_ONLY:-}"
 
@@ -67,14 +71,20 @@ for input in "$@"; do
 done
 
 # 2a. Bundle contents with their repository paths: the notebook, its inputs and the modules in Synthetic_domain/,
-# the repository-level inputs at their own paths, and the job helpers at the top. Credentials (.env) are never packed.
+# the repository-level inputs at their own paths, and the job helpers at the top. Credentials (.env) are never
+# packed, nor the EXCLUDE_NAMES (spectral_fits/ alone carries ~330 MB of superseded 16-bin fits)
+exclude_options=()
+for exclude_name in "${exclude_names[@]}"; do
+    exclude_options+=(--exclude="$exclude_name")
+done
 scratch_dir="$(mktemp -d)"
 trap 'rm -rf "$scratch_dir"' EXIT
 bundle_dir="$scratch_dir/bundle_contents"
 mkdir -p "$bundle_dir/Synthetic_domain"
 (
     cd "$SYNTHETIC_DIR"
-    tar --exclude="__pycache__" --exclude=".env" -cf - "$notebook" ./*.py splus-filters "${synthetic_inputs[@]}"
+    tar --exclude="__pycache__" --exclude=".env" "${exclude_options[@]}" \
+        -cf - "$notebook" ./*.py splus-filters "${synthetic_inputs[@]}"
 ) | tar -C "$bundle_dir/Synthetic_domain" -xf -
 if [[ ${#repository_inputs[@]} -gt 0 ]]; then
     (

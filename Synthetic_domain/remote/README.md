@@ -130,27 +130,31 @@ is already in `out/ml_runs/`, so it can be fetched after a timeout too.
 `submit_notebook.sh <notebook> <input> ...` packs the notebook, every module, `splus-filters/` and the
 listed inputs (paths relative to `Synthetic_domain/`; a path starting with `../` is elsewhere in the
 repository, e.g. `../dustMaps/csfd`) into a bundle with the repository layout, and the job executes the
-notebook from `Synthetic_domain/`. `.env` is never packed. `fetch_notebook.sh ID` puts every file the notebook
-wrote back at its repository path. `BUNDLE_ONLY=<folder>` writes the bundle and submits nothing. The job
+notebook from `Synthetic_domain/`. `.env` is never packed, nor any file or folder named in `EXCLUDE_NAMES`
+(default `superseded pilot`: results of an earlier model and the pilot fits, which no notebook reads).
+`fetch_notebook.sh ID` puts every file the notebook wrote back at its repository path. `BUNDLE_ONLY=<folder>`
+writes the bundle and submits nothing. The job
 installs Jupyter and the packages only `spectroscopic_reference.ipynb` needs (astroquery, dustmaps). That
 notebook logs in to the S-PLUS Cloud only for galaxies missing from `splus_aperture_photometry.csv`, so with a
 complete cache it needs no `.env`.
 
 ## Notebook 1 (`training_set.ipynb`): the delayed-tau training and synthetic sets
 
-CPU job; it needs only the DR3 catalogue (the filter curves always travel, the noise model is refitted from the
-catalogue and rewritten):
+CPU job. It reads only the DR3 catalogue (the filter curves always travel); the noise model is refitted from the
+catalogue and rewritten, so the `splus_noise_model.csv` sent below is only overwritten. The delayed-tau run
+(commit 0d6316d) used all 16 cores with 15 workers:
 
     cd Synthetic_domain
-    remote/submit_notebook.sh training_set.ipynb dr3_corrected.csv splus_noise_model.csv
+    CORES=16 MEMORY_MB=7100 TIME_LIMIT=06:00:00 HLJOB_OPTIONS="--pause-llm -e N_JOBS=15" \
+        remote/submit_notebook.sh training_set.ipynb dr3_corrected.csv splus_noise_model.csv
     remote/fetch_notebook.sh ID
 
-Defaults are 8 cores, 16000 MB and 4 h; the notebook uses `N_JOBS=7` workers (one core is left for the main
-process). The notebook is slow (about 2^19 + 2 x 2^14 Bagpipes models and a coverage test), so raise `TIME_LIMIT`,
-for example `TIME_LIMIT=06:00:00`. It writes `training_set.parquet` (about 275 MB for the 16-bin set), `synthetic_validation.parquet`,
-`synthetic_test.parquet`, `splus_noise_model.csv` and the two figures, and `fetch_notebook.sh` brings back every
-file it wrote, so the download is large: check its size first, or split the job if it is too big. The parquet files
-are git-ignored and reproducible from the seeds; the CSV and the figures are committed.
+It took 12 min (2^19 + 2 x 2^14 Bagpipes models and the coverage test) with a 6.2 GB memory peak. With the script
+defaults (8 cores, 16000 MB, 4 h) the notebook uses `N_JOBS=7` workers (one core is left for the main process).
+It writes `training_set.parquet` (125 MB), `synthetic_validation.parquet` and
+`synthetic_test.parquet` (6 MB each), `splus_noise_model.csv` and the two figures, and `fetch_notebook.sh` brings
+back every file it wrote. The parquet files are git-ignored and reproducible from the seeds; the CSV and the
+figures are committed.
 
 ## Notebook 2 (`spectroscopic_reference.ipynb`)
 
@@ -186,10 +190,16 @@ spectral fits, MLP training, notebook 2, photometric fits, notebook 2, then `ml_
    Section 6b draws no photometric mocks and exports no photometric job, because it needs the validation half,
    and that comes from the spectral fits.
 2. **After the spectral fits** are fetched: it reads them, makes the split and exports `photometric_fits/jobs/`
-   (the validation galaxies and 33 mocks) with `photometric_fits/calibration_mocks.joblib`.
+   (the validation galaxies and 33 mocks) with `photometric_fits/calibration_mocks.joblib`. Before it,
+   `photometric_fits/jobs/` must be empty: `submit_fits.sh` fits every job file there, and a galaxy job left from
+   an earlier split (the 87 of the 16-bin model were moved to `photometric_fits/superseded/jobs/` on 2026-10-26)
+   would be fitted but never read. After the fetch, it holds exactly this run's export.
 3. **After the photometric fits** are fetched: it reads them and writes the `phot_*` columns.
 
-The command is the same each time:
+The command is the same each time. It lists whole folders, so `submit_notebook.sh` leaves out their
+`superseded/` and `pilot/` subfolders (`EXCLUDE_NAMES`): the notebook reads only the top-level fits, and these
+hold about 410 MB on disk (the export bundle that still carried them was 619 MB). Without them the run-3 bundle
+is 390 MB, mostly the CSFD map and the float32 training set. Check the size with `BUNDLE_ONLY=<folder>` first:
 
     cd Synthetic_domain
     FLOAT32_FILES=training_set.parquet remote/submit_notebook.sh spectroscopic_reference.ipynb \
