@@ -94,7 +94,7 @@ Inference4ETGs/
     │                                 the `agreement_verdict` of the "works" test
     ├── train_ml_model.py             training CLI (--embedding mlp, the default; cnn is kept but not trained),
     │                                 run on the PC GPU
-    ├── tests/                        pytest suite (157 tests) for every module above
+    ├── tests/                        pytest suite (159 tests) for every module above
     ├── pytest.ini                    test paths and warning filters
     ├── remote/                       scripts that run heavy work as hljob jobs on the PC (see §7)
     ├── splus-filters/                the 12 S-PLUS filter curves
@@ -188,7 +188,7 @@ To understand the project in about an hour:
   - the drawn parameters `redshift, age, tau, metallicity, av_ism, tau_bc, logU, log_mass_formed` (the redshift is never called `"z"`, which is the z-band column);
   - `log_age, log_tau, log_metallicity`;
   - `log_mstar`, the surviving stellar mass, from Bagpipes;
-  - analytic from the delayed-τ form: `mw_age` (mass-weighted age, Gyr ago), `f_young`, `f_mid`, `f_old` (formed-mass fractions younger than 0.1 Gyr, between 0.1 and 1 Gyr, older than 1 Gyr) and `log_sfr` (mean SFR over the last 100 Myr) with `log_ssfr = log_sfr − log_mstar`.
+  - analytic from the delayed-τ form: `log_sfr` (mean SFR over the last 100 Myr) and `log_ssfr = log_sfr − log_mstar`, then `mw_age` (mass-weighted age, Gyr ago) and `f_young`, `f_mid`, `f_old` (formed-mass fractions younger than 0.1 Gyr, between 0.1 and 1 Gyr, older than 1 Gyr).
   - About 20% of the prior has no star formation in the last 100 Myr. For those, `log_sfr` sits exactly on a floor (10⁻¹⁴ yr⁻¹ × M*), so it stays finite. Bagpipes' own `ssfr` is never used (it is NaN there).
   - A unit test checks the analytic labels against Bagpipes' own `sfh` arrays to 1%.
 - **S-PLUS noise model** (`splus_noise_model.csv`), fitted to `dr3_corrected.csv` (PROB_GAL > 0.8). For each band and each 0.25 mag bin, it stores 21 quantiles of log error. A band is detected when its error is below 1 mag.
@@ -248,7 +248,7 @@ To understand the project in about an hour:
 | **Spectral fits under exactly the training prior** | They answer "does the ML reproduce Bagpipes on real galaxies?" with labels the ML can in principle match. No catalogue from another code (Firefly, Starlight, pPXF) can be the label, because none reproduces the Bagpipes delayed-τ model. Priors are never tuned per galaxy. |
 | **Spectrum-only likelihood with a calibration polynomial** | It keeps the labels independent of the S-PLUS inputs, and it absorbs flux-calibration and aperture errors. The consequence (seen in the 16-bin run, §8) is that the fit reads the absorption features, not the continuum shape. |
 | **Photometric Bagpipes fits as a second reference** | They fit the 3″ photometry the ML sees, under the simulator's likelihood. Agreement with them says whether the ML reproduces Bagpipes on colours; agreement with the spectral fits says whether colours recover what the spectra say. The two answers are different and are printed side by side. |
-| **Old results are superseded by file, not read** | Every new fit records `sfh_model = "delayed"`. A fit without it is moved to `superseded/` and never read. A checkpoint without matching `target_names` raises. Tests that need regenerated parquet sets skip with a reason until the PC makes them. |
+| **Old results are superseded by file, not read** | Every new fit records `sfh_model = "delayed"`. A fit without it is moved to `superseded/` and never read. A checkpoint without matching `target_names` raises. Tests that read the parquet sets skip with a reason while those are 16-bin sets; the PC regenerated them (commit 0d6316d), so they now run. |
 | **Calibration mocks (33, from the full prior) instead of 6 fixed mocks** | The first gate (≥ 5 of 6 mocks) failed about 15% of the time even for a calibrated fitter. Debugging found no bug: the misses were prior-volume effects of draws from the prior tails. A coverage test on 33 prior draws measures calibration directly. |
 | **Hash-based validation/test split** (md5 of `specobjid`) | Adding galaxies later never moves an existing one, so the test half stays untouched across passes. |
 | **Locked test sets** (`synthetic_test.parquet`, the reference `test` half) | They are used once, for the final evaluation. No architecture, epoch or threshold choice may look at them. **Not yet used.** |
@@ -295,7 +295,7 @@ Note that `spectroscopic_reference.csv` stores `specobjid` as text. Read it with
 
 - `.venv/` holds Python 3.10 with [`requirements.txt`](requirements.txt) (Bagpipes 1.3.5, PyMultiNest, torch 2.5.1, zuko 1.2.0, …). The MultiNest shared library is built into `.venv/lib`.
 - The Jupyter kernel **"Inference4ETGs (MultiNest)"** (`inference4etgs`) runs `.venv/bin/python` with `LD_LIBRARY_PATH=.../.venv/lib`, so PyMultiNest loads. Select it when you open a notebook.
-- Run the tests (157 tests, CPU, about 5 minutes; without `LD_LIBRARY_PATH` the MultiNest tests are skipped; two tests that read the generated parquet sets skip while those sets are still the 16-bin ones):
+- Run the tests (159 tests, CPU, about 3 to 5 minutes; without `LD_LIBRARY_PATH` the MultiNest tests are skipped; the two tests that read the generated parquet sets run now that the delayed-tau sets exist, and skip with a reason if 16-bin sets are put back):
 
   ```bash
   cd Synthetic_domain && LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python -m pytest tests -q
@@ -338,7 +338,7 @@ One job at a time, all on the PC except step 2:
 
 ## 8. Current status and results
 
-As of 2026-10-26. The code is rebuilt and unit-tested (157 tests), and **Part 1 has been run on the PC** (commit `0d6316d`: the executed `training_set.ipynb` and the regenerated `color_color.png` and `coverage_criterion.png`). **There are no results yet for Parts 2 and 3**: the fits, the training and the evaluation are pending the PC runs listed in §7. The committed outputs of notebooks 2 and 3, their CSVs, the part-2 figures and `ml_runs/` still describe the 16-bin model and are replaced as those runs finish.
+As of 2026-10-26. The code is rebuilt and unit-tested (159 tests), and **Part 1 has been run on the PC** (commit `0d6316d`: the executed `training_set.ipynb` and the regenerated `color_color.png` and `coverage_criterion.png`). **There are no results yet for Parts 2 and 3**: the fits, the training and the evaluation are pending the PC runs listed in §7. The committed outputs of notebooks 2 and 3, their CSVs and the part-2 figures still describe the 16-bin model and are replaced as those runs finish; the 16-bin ML runs are kept in `ml_runs/superseded/` (`mlp_16bin`, `cnn_16bin`).
 
 ### Part 1 results (delayed-τ, from the committed outputs of `training_set.ipynb`)
 
