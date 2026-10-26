@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Runs the spectral fits, INSIDE an hljob job (started by submit_fits.sh as `bash inputs/fit_job.sh`).
+# Runs the spectral or photometric fits (FITS_SUBDIR), INSIDE an hljob job (started by submit_fits.sh as
+# `bash inputs/fit_job.sh`).
 #
 # The job's working folder is /work. inputs/ holds this file and bundle.tar.gz; whatever is written to out/
 # comes back to the laptop, also when the job is killed by its time limit (so results are copied to out/

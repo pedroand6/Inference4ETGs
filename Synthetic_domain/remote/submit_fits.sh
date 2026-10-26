@@ -86,7 +86,9 @@ done
 
 # 5. The tarball
 tar -C "$bundle_dir" -czf "$scratch_dir/bundle.tar.gz" .
-echo "Bundle ($FITS_SUBDIR): $(du -h "$scratch_dir/bundle.tar.gz" | cut -f1), with $finished_count finished fit(s), $skipped_count skipped job(s) left out"
+bundle_size="$(du -h "$scratch_dir/bundle.tar.gz" | cut -f1)"
+echo "Bundle ($FITS_SUBDIR): $bundle_size, with $finished_count finished fit(s)," \
+    "$skipped_count skipped job(s) left out"
 if [[ -n "${BUNDLE_ONLY:-}" ]]; then
     mkdir -p "$BUNDLE_ONLY"
     cp "$scratch_dir/bundle.tar.gz" "$BUNDLE_ONLY/"

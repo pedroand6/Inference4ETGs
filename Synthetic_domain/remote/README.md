@@ -30,10 +30,11 @@ environment variables, for example `WORKERS=12 TIME_LIMIT=12:00:00 submit_fits.s
 
     FITS_SUBDIR=photometric_fits Synthetic_domain/remote/submit_fits.sh
 
-They share job ids (specobjids, `calib_<k>`) with the spectral fits, so they never share a folder: the job records
-its folder in `out/fits_subdir.txt`, `fetch_fits.sh` copies into that folder (and stops if a `FITS_SUBDIR` you set
-differs from it), and `sm.fit_and_save` never replaces a fit of the other kind. `skipped_fit_jobs.txt` applies to
-the spectral fits only (`SKIP_LIST` overrides it). `BUNDLE_ONLY=<folder>` writes the bundle and submits nothing.
+They share job ids (specobjids, `calib_<k>`) with the spectral fits, so they never share a folder: the
+job records its folder in `out/fits_subdir.txt`, `fetch_fits.sh` copies into that folder (and stops if a
+`FITS_SUBDIR` you set differs from it), and `sm.fit_and_save` never replaces a fit of the other kind.
+`skipped_fit_jobs.txt` applies to the spectral fits only (`SKIP_LIST` overrides it). `BUNDLE_ONLY=<folder>`
+writes the bundle and submits nothing. `JOB_SCRIPT=benchmark_job.sh` benchmarks the jobs of `FITS_SUBDIR` too.
 
 ## Follow
 
@@ -108,10 +109,41 @@ is already in `out/ml_runs/`, so it can be fetched after a timeout too.
 
 # Running a notebook on the job server
 
-`submit_notebook.sh <notebook> <input> ...` packs the notebook, every module, `splus-filters/` and the listed inputs
-(paths relative to `Synthetic_domain/`; a path starting with `../` is elsewhere in the repository, e.g.
-`../dustMaps/csfd`) into a bundle with the repository layout, and the job executes the notebook from
-`Synthetic_domain/`. `.env` is never packed. `fetch_notebook.sh ID` puts every file the notebook wrote back at its
-repository path. `BUNDLE_ONLY=<folder>` writes the bundle and submits nothing. The job installs Jupyter and the
-packages only `spectroscopic_reference.ipynb` needs (astroquery, dustmaps). That notebook logs in to the S-PLUS
-Cloud only for galaxies missing from `splus_aperture_photometry.csv`, so with a complete cache it needs no `.env`.
+`submit_notebook.sh <notebook> <input> ...` packs the notebook, every module, `splus-filters/` and the
+listed inputs (paths relative to `Synthetic_domain/`; a path starting with `../` is elsewhere in the
+repository, e.g. `../dustMaps/csfd`) into a bundle with the repository layout, and the job executes the
+notebook from `Synthetic_domain/`. `.env` is never packed. `fetch_notebook.sh ID` puts every file the notebook
+wrote back at its repository path. `BUNDLE_ONLY=<folder>` writes the bundle and submits nothing. The job
+installs Jupyter and the packages only `spectroscopic_reference.ipynb` needs (astroquery, dustmaps). That
+notebook logs in to the S-PLUS Cloud only for galaxies missing from `splus_aperture_photometry.csv`, so with a
+complete cache it needs no `.env`.
+
+## Notebook 2 (`spectroscopic_reference.ipynb`)
+
+The job server buffers the whole upload in a small memory limit, so keep the bundle small:
+
+- **Firefly:** the full `../Data/sdss_eboss_firefly-dr16.fits` is 2.4 GB. Make the slim copy first (only the
+  columns cell 3 reads and the spectra that can match an S-PLUS galaxy; the notebook gives the same result):
+
+      cd Synthetic_domain && python make_slim_firefly.py
+
+  Cell 1 reads `../Data/sdss_eboss_firefly-dr16_slim.fits` whenever it exists. Remake it when
+  `dr3_corrected.csv` changes.
+- **CSFD dust map:** `../dustMaps/csfd` is 289 MB (`csfd_ebv.fits` 201 MB, `mask.fits` 101 MB). It cannot be
+  cut down, so if the upload fails, try `HLJOB_OPTIONS=--pause-llm` first.
+- **Training set:** only `redshift` and the bands are read, so send it as float32 (`FLOAT32_FILES`).
+
+First run (exports `photometric_fits/jobs/` and `photometric_fits/calibration_mocks.joblib`):
+
+    cd Synthetic_domain
+    FLOAT32_FILES=training_set.parquet remote/submit_notebook.sh spectroscopic_reference.ipynb \
+        dr3_corrected.csv ../Data/sdss_eboss_firefly-dr16_slim.fits ../dustMaps/csfd training_set.parquet \
+        spectra spectral_fits skipped_fit_jobs.txt splus_aperture_photometry.csv splus_noise_model.csv \
+        spectroscopic_reference.csv literature
+    remote/fetch_notebook.sh ID
+
+Then run and fetch the photometric fits (`FITS_SUBDIR=photometric_fits remote/submit_fits.sh`,
+`remote/fetch_fits.sh ID`). **The second run, which reads the fits, must also bundle `photometric_fits`** (the
+`.h5` files and `calibration_mocks.joblib`): add `photometric_fits` to the inputs above. Without the mock file,
+cell 18 would draw new mocks whose truths differ from the fitted ones, so it stops when `calib_*.h5` fits exist
+but the mock file is missing.

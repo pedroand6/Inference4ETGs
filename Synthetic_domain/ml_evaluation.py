@@ -139,6 +139,30 @@ def compare_with_spectral(ml_samples, spectral_p16, spectral_median, spectral_p8
     return {"offset_in_widths": offset, "inside_68": inside_68, "inside_95": inside_95}
 
 
+def reference_comparison_rows(ml_posteriors, galaxies, labels, prefix=""):
+    """ML posterior against a Bagpipes reference posterior of each galaxy, one row per (galaxy, label).
+
+    One helper for both reference sets, so the spectral and photometric verdicts use the same ML draws.
+    Inputs: ml_posteriors: dict label -> ML samples (n, m), rows in the order of galaxies;
+            galaxies: DataFrame (n rows) with specobjid and {prefix}<label>_p16/_median/_p84;
+            labels: the labels to compare; prefix: "" (spectral fits) or "phot_" (photometric fits).
+    Returns: list of dicts with label, specobjid, offset_in_widths, inside_68 and inside_95
+             (as compare_with_spectral), labels outer and galaxies inner.
+    """
+    galaxies = galaxies.reset_index(drop=True)
+    rows = []
+    for label in labels:
+        comparison = compare_with_spectral(ml_posteriors[label], galaxies[f"{prefix}{label}_p16"].to_numpy(),
+                                           galaxies[f"{prefix}{label}_median"].to_numpy(),
+                                           galaxies[f"{prefix}{label}_p84"].to_numpy())
+        for galaxy_index in range(len(galaxies)):
+            rows.append({"label": label, "specobjid": galaxies.loc[galaxy_index, "specobjid"],
+                         "offset_in_widths": comparison["offset_in_widths"][galaxy_index],
+                         "inside_68": comparison["inside_68"][galaxy_index],
+                         "inside_95": comparison["inside_95"][galaxy_index]})
+    return rows
+
+
 def agreement_verdict(comparison_rows, labels, min_inside_95=MIN_INSIDE_95,
                       max_abs_median_offset=MAX_ABS_MEDIAN_OFFSET):
     """Whether the ML agrees with a reference label set, per label and for all labels at once.
@@ -154,13 +178,15 @@ def agreement_verdict(comparison_rows, labels, min_inside_95=MIN_INSIDE_95,
              galaxies has NaN fractions and does not agree; the last row agrees only if every label does.
     """
     rows = pd.DataFrame(comparison_rows)
+    if not rows.empty and "label" not in rows.columns:
+        raise KeyError("comparison_rows have no 'label' column")
     verdict_rows = []
     for label in labels:
-        # Why the column check: an empty comparison has no columns at all
-        if "label" in rows.columns:
-            label_rows = rows[rows["label"] == label]
-        else:
+        # Why the empty check: an empty comparison has no columns at all
+        if rows.empty:
             label_rows = rows
+        else:
+            label_rows = rows[rows["label"] == label]
         n_galaxies = len(label_rows)
         if n_galaxies == 0:
             verdict_rows.append({"label": label, "n_galaxies": 0, "inside_95": np.nan,

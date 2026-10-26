@@ -595,7 +595,7 @@ def multinest_available():
     """Whether pymultinest imports (it needs libmultinest on LD_LIBRARY_PATH). Returns: bool."""
     try:
         import pymultinest    # noqa: F401
-    except (ImportError, OSError):
+    except (ImportError, OSError, SystemExit):    # pymultinest calls sys.exit without the library
         return False
     return True
 
@@ -855,6 +855,7 @@ def test_fit_and_save_never_replaces_a_fit_of_the_other_kind(tmp_path, fake_fitt
     assert "kind" not in stored_metadata    # the spectral file is untouched
 
 
+@pytest.mark.skipif(not multinest_available(), reason="pymultinest cannot import (LD_LIBRARY_PATH?)")
 def test_fit_and_save_photometry_smoke_run(tmp_path):
     """A short MultiNest run on a photometry job is saved with rescaled labels, the offsets and the kind."""
     job = photometry_job("phot_smoke", np.random.default_rng(33))
@@ -963,6 +964,7 @@ def test_run_script_fits_an_exported_job_and_logs_it(tmp_path):
     assert log["n_iterations"].iloc[0] <= 100
 
 
+@pytest.mark.skipif(not multinest_available(), reason="pymultinest cannot import (LD_LIBRARY_PATH?)")
 def test_run_script_fits_an_exported_photometry_job(tmp_path):
     sm.export_job(photometry_job("calib_000", np.random.default_rng(34)), str(tmp_path / "jobs"))
 

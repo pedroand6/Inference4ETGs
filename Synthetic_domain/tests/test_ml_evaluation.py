@@ -1,6 +1,8 @@
 """Tests for ml_evaluation.py. Run from Synthetic_domain/."""
 
 import numpy as np
+import pandas as pd
+import pytest
 
 import ml_evaluation as ev
 
@@ -138,3 +140,40 @@ def test_agreement_verdict_of_a_label_without_galaxies_is_nan_and_false():
     assert not bool(by_label.loc[ev.ALL_LABELS_ROW, "agrees"])
     empty = ev.agreement_verdict([], ["mw_age"]).set_index("label")    # no comparison at all
     assert not bool(empty.loc[ev.ALL_LABELS_ROW, "agrees"])
+
+
+def test_agreement_verdict_refuses_rows_without_a_label_column():
+    rows = [{"offset_in_widths": 0.0, "inside_95": True}]
+    with pytest.raises(KeyError, match="label"):
+        ev.agreement_verdict(rows, ["mw_age"])
+
+
+def reference_galaxies(prefix, medians):
+    """Reference rows with {prefix}mw_age_p16/_median/_p84 (sigma 1) for the given medians."""
+    medians = np.asarray(medians, dtype=float)
+    return pd.DataFrame({"specobjid": [f"id{index}" for index in range(len(medians))],
+                         f"{prefix}mw_age_p16": medians - 1, f"{prefix}mw_age_median": medians,
+                         f"{prefix}mw_age_p84": medians + 1})
+
+
+def test_reference_comparison_rows_reads_the_prefixed_columns():
+    rng = np.random.default_rng(48)
+    posteriors = {"mw_age": rng.normal(0, 1, (2, 4000))}
+    galaxies = reference_galaxies("phot_", [0.0, 5.0])
+    rows = ev.reference_comparison_rows(posteriors, galaxies, ["mw_age"], prefix="phot_")
+
+    assert [row["specobjid"] for row in rows] == ["id0", "id1"]
+    assert all(row["label"] == "mw_age" for row in rows)
+    assert bool(rows[0]["inside_95"]) and not bool(rows[1]["inside_95"])
+    assert abs(rows[0]["offset_in_widths"]) < 0.1
+    assert set(rows[0]) == {"label", "specobjid", "offset_in_widths", "inside_68", "inside_95"}
+
+
+def test_reference_comparison_rows_with_the_default_prefix_matches_compare_with_spectral():
+    rng = np.random.default_rng(49)
+    posteriors = {"mw_age": rng.normal(0, 1, (3, 1000))}
+    galaxies = reference_galaxies("", [0.0, 1.0, -2.0])
+    rows = ev.reference_comparison_rows(posteriors, galaxies, ["mw_age"])
+    direct = ev.compare_with_spectral(posteriors["mw_age"], galaxies["mw_age_p16"], galaxies["mw_age_median"],
+                                      galaxies["mw_age_p84"])
+    assert np.allclose([row["offset_in_widths"] for row in rows], direct["offset_in_widths"])

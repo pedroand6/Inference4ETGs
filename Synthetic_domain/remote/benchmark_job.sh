@@ -7,7 +7,7 @@
 #
 # Environment variables: BENCHMARK_ITERATIONS [default 400]; WORKER_TRIALS [default "10 14"];
 #   MEMORY_LIMIT_FOR_NEXT_TRIAL_BYTES [default 6000000000]: a larger trial runs only if the previous one
-#   stayed below this memory peak.
+#   stayed below this memory peak. FITS_SUBDIR [default spectral_fits]: the folder whose jobs/ are sampled.
 set -euo pipefail
 
 # 1. Settings
@@ -47,7 +47,7 @@ for workers in $WORKER_TRIALS; do
     mkdir -p "$trial_jobs" "$trial_fits"
 
     # 3a. One real job per worker, taken at even spacing so mocks and galaxies are both in. Copies, not links.
-    all_jobs=(spectral_fits/jobs/*.npz)
+    all_jobs=("${FITS_SUBDIR:-spectral_fits}"/jobs/*.npz)
     spacing=$(( ${#all_jobs[@]} / workers ))
     for (( index = 0; index < workers; index++ )); do
         cp "${all_jobs[$(( index * spacing ))]}" "$trial_jobs/"

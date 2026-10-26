@@ -218,7 +218,8 @@ def parse_arguments():
 
     Returns: argparse.Namespace.
     """
-    parser = argparse.ArgumentParser(description="Run the MultiNest fits (spectral or photometric) of the exported jobs.")
+    parser = argparse.ArgumentParser(
+        description="Run the MultiNest fits (spectral or photometric) of the exported jobs.")
     parser.add_argument("--jobs-dir", default=DEFAULT_JOBS_DIRECTORY, help="folder with the job .npz files")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIRECTORY,
                         help="folder for the .h5 results and fit_log.csv (keep the path short: MultiNest limit)")
