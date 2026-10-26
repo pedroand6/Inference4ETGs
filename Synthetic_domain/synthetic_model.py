@@ -16,8 +16,8 @@ import numpy as np
 import pandas as pd
 from astropy.cosmology import FlatLambdaCDM
 from scipy.integrate import simpson
+from scipy.special import gammainc, gammaincc
 from scipy.stats import chi2 as chi_squared
-from scipy.stats import norm, skewnorm
 
 import bagpipes as pipes
 
@@ -28,19 +28,16 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # 1. Prior (fixed before looking at the data)
 # =============================================================================
 COSMOLOGY = FlatLambdaCDM(H0=70.0, Om0=0.3)
-UNIVERSE_AGE_MARGIN = 0.1        # [Gyr] oldest bin ends this long after the Big Bang
-
-AGE_BIN_CENTRES = np.array([0.007, 0.021, 0.0425, 0.076, 0.1145, 0.1615, 0.23, 0.345,
-                            0.545, 0.865, 1.37, 2.17, 3.44, 5.455, 8.645, 14.2])   # [Gyr ago]
-N_BINS = len(AGE_BIN_CENTRES)    # 16 labelled bins, but only 15 are ever populated (see below)
-# The last centre (14.2 Gyr) is older than the Universe for every z >= 0.002 (13.34 Gyr minus the margin), so
-# *_bin_15 is always padding. The oldest populated bin runs from 7.05 Gyr to the age of the Universe, which
-# caps the mass-weighted age (mw_age) at about 10.2 Gyr at z = 0.002. Kept as in the legacy notebook.
+UNIVERSE_AGE_MARGIN = 0.1        # [Gyr] age upper bound = Universe age at z minus this
 LABEL_EDGES = [0.1, 1.0]         # [Gyr] f_young < 0.1 < f_mid < 1.0 < f_old
+SFR_TIMESCALE = 0.1              # [Gyr] log_sfr is the mean SFR over this lookback time, as Bagpipes' sfr
 
+# SFH: one Bagpipes "delayed" component, SFR(t) ~ t exp(-t / tau) since star formation began,
+# with a single metallicity. Ages and tau are drawn log-uniform, because they span several decades.
 Z_RANGE = (0.002, 0.7)                               # redshift
-LOG_ZFIN_RANGE = (-1.0, 0.4)                         # log(Z_fin / Z_sun): 0.1 to 2.5
-ZINI_FRACTION = 0.4                                  # Z_ini = ZINI_FRACTION * Z_fin
+AGE_MIN = 0.05                                       # [Gyr] youngest age (time since star formation began)
+TAU_RANGE = (0.01, 20.0)                             # [Gyr] e-folding time
+METALLICITY_RANGE = (0.005, 2.5)                     # [Z/Z_sun] the bc03_miles grid range
 AV_ISM_RANGE = (0.01, 2.0)                           # [mag]
 LOG_TAU_BC_RANGE = (np.log10(0.5), np.log10(4.0))    # birth-cloud optical depth
 LOGU_RANGE = (-4.0, -1.0)                            # nebular ionisation parameter
@@ -48,24 +45,10 @@ DUST_SLOPE = 0.7                                     # CF00 attenuation-law expo
 BIRTH_CLOUD_AGE = 0.01                               # [Gyr]
 LOG_MASS_FORMED = 10.0                               # [log M_sun]
 TAU_TO_AV = 1.086                                    # A_V = 1.086 * tau_V
-
-P_SKEW = 0.5                     # share of skew-normal SFHs (with or without burst)
-P_BURST = 6 / 165                # share of skew-normal + burst SFHs
-MIN_FRACTION = 1e-6              # keeps every bin as a Bagpipes component
 SFR_FLOOR = 1e-14                # [yr^-1] sSFR floor for SFHs with no recent star formation
 
-SKEW_PEAK_MEAN, SKEW_PEAK_SIGMA = 12.0, 3.0          # [Gyr ago]
-SKEW_WIDTH_MEAN, SKEW_WIDTH_SIGMA = 1.0, 0.4         # [Gyr]
-SKEW_SHAPE_RANGE = (-0.25, 0.75)                     # skew-normal shape parameter
-LOG_BURST_AGE_RANGE = (np.log10(0.01), np.log10(0.5))   # [log Gyr ago]
-BURST_WIDTH_RANGE = (0.040, 0.050)                   # [Gyr] full width
-BURST_FRACTION_RANGE = (0.01, 0.10)                  # share of the mass in the burst
-
-DIRICHLET_DIMS = []
-for bin_index in range(N_BINS):
-    DIRICHLET_DIMS.append(f"dir{bin_index}")
-DIMS = ["z", "sfh_type", *DIRICHLET_DIMS, "peak", "width", "skew",
-        "burst_age", "burst_width", "burst_frac", "log_zfin", "av_ism", "log_tau_bc", "logU"]
+# "log_age_fraction" places the age inside [log AGE_MIN, log t_max(z)], so one cube works at every z
+DIMS = ["z", "log_age_fraction", "log_tau", "log_metallicity", "av_ism", "log_tau_bc", "logU"]
 
 
 def uniform(draw, low, high):
@@ -77,167 +60,14 @@ def uniform(draw, low, high):
     return low + (high - low) * draw
 
 
-def positive_normal(draw, mean, sigma):
-    """Map a unit-interval draw onto N(mean, sigma) truncated to positive values (inverse CDF).
+def maximum_age(redshift):
+    """Oldest allowed age [Gyr]: the age of the Universe at the redshift minus UNIVERSE_AGE_MARGIN.
 
-    Inputs: draw in [0, 1) (dimensionless); mean, sigma: of the untruncated normal, in the parameter's units.
-    Returns: positive value in the same units as mean and sigma.
+    Why the margin: Bagpipes flags a model that forms stars before the Big Bang as unphysical (NaN magnitudes).
+    Inputs: redshift: dimensionless z, scalar or array.
+    Returns: maximum age [Gyr], a float for a scalar redshift or an array of the same shape.
     """
-    probability_below_zero = norm.cdf(0, mean, sigma)
-    return norm.ppf(probability_below_zero + draw * (1 - probability_below_zero), mean, sigma)
-
-
-def bin_edges(redshift):
-    """Age-bin edges [Gyr ago], youngest first.
-
-    Bins centred beyond the age of the Universe (minus the margin) are dropped,
-    so high-redshift galaxies have fewer bins.
-
-    Inputs: redshift: dimensionless redshift z.
-    Returns: edges [Gyr ago], youngest first: 0.0 (today) up to the maximum age (Universe age minus margin).
-    """
-    maximum_age = COSMOLOGY.age(redshift).value - UNIVERSE_AGE_MARGIN
-    centres = AGE_BIN_CENTRES[AGE_BIN_CENTRES <= maximum_age]
-    midpoints = (centres[:-1] + centres[1:]) / 2
-    return np.concatenate([[0.0], midpoints, [maximum_age]])
-
-
-def bin_edges_array(redshifts):
-    """Vectorised bin_edges: one row of age-bin edges per redshift.
-
-    Inputs: redshifts: array of dimensionless redshifts (n,).
-    Returns: array (n, N_BINS + 1) of edges [Gyr ago], youngest first, as bin_edges gives them;
-             entries beyond a row's last edge (bins that do not exist at that redshift) are NaN.
-    """
-    redshifts = np.asarray(redshifts, dtype=float)
-    maximum_ages = COSMOLOGY.age(redshifts).value - UNIVERSE_AGE_MARGIN
-    all_midpoints = (AGE_BIN_CENTRES[:-1] + AGE_BIN_CENTRES[1:]) / 2
-
-    edges = np.full((len(redshifts), N_BINS + 1), np.nan)
-    for row_index, maximum_age in enumerate(maximum_ages):
-        n_existing = int(np.sum(AGE_BIN_CENTRES <= maximum_age))
-        edges[row_index, 0] = 0.0
-        edges[row_index, 1:n_existing] = all_midpoints[:n_existing - 1]
-        edges[row_index, n_existing] = maximum_age
-    return edges
-
-
-# -----------------------------------------------------------------------------
-# SFH branches: same signature, each returns mass fractions per bin (sum 1)
-# -----------------------------------------------------------------------------
-def dirichlet_fractions(params, edges):
-    """Dirichlet(1) fractions: normalised exponential draws, one per bin.
-
-    Inputs: params: dict of unit-cube draws keyed by DIMS names (dimensionless);
-            edges: bin edges [Gyr ago] from bin_edges.
-    Returns: mass fraction per bin (dimensionless, sums to 1), youngest bin first.
-    """
-    n_bins = len(edges) - 1
-    exponential_draws = np.zeros(n_bins)
-    for bin_index in range(n_bins):
-        exponential_draws[bin_index] = -np.log1p(-params[f"dir{bin_index}"])
-    return exponential_draws / exponential_draws.sum()
-
-
-def skew_normal_fractions(params, edges):
-    """Fractions from one skew-normal episode in lookback time (typically old).
-
-    Inputs: params: dict of unit-cube draws (uses peak, width, skew; dimensionless);
-            edges: bin edges [Gyr ago] from bin_edges.
-    Returns: mass fraction per bin (dimensionless, sums to 1); flat if the episode lies outside all bins.
-    """
-    peak = norm.ppf(params["peak"], SKEW_PEAK_MEAN, SKEW_PEAK_SIGMA)
-    width = positive_normal(params["width"], SKEW_WIDTH_MEAN, SKEW_WIDTH_SIGMA)
-    shape = uniform(params["skew"], *SKEW_SHAPE_RANGE)
-
-    cumulative_mass = skewnorm.cdf(edges, shape, peak, width)
-    fractions = np.diff(cumulative_mass)
-    if fractions.sum() > 0:
-        return fractions / fractions.sum()
-
-    # The whole episode falls outside the bins: fall back to a flat SFH
-    n_bins = len(edges) - 1
-    return np.full(n_bins, 1 / n_bins)
-
-
-def skew_normal_burst_fractions(params, edges):
-    """Skew-normal fractions plus a short recent burst holding 1-10% of the mass.
-
-    Inputs: params: dict of unit-cube draws (the skew-normal keys plus burst_age, burst_width,
-            burst_frac; dimensionless); edges: bin edges [Gyr ago] from bin_edges.
-    Returns: mass fraction per bin (dimensionless, sums to 1), youngest bin first.
-    """
-    base_fractions = skew_normal_fractions(params, edges)
-    burst_age = 10 ** uniform(params["burst_age"], *LOG_BURST_AGE_RANGE)
-    burst_half_width = uniform(params["burst_width"], *BURST_WIDTH_RANGE) / 2
-    burst_fraction = uniform(params["burst_frac"], *BURST_FRACTION_RANGE)
-
-    # Time the burst overlaps each bin, so its mass is shared in proportion
-    bin_starts = edges[:-1]
-    bin_ends = edges[1:]
-    overlap_start = np.maximum(bin_starts, burst_age - burst_half_width)
-    overlap_end = np.minimum(bin_ends, burst_age + burst_half_width)
-    overlap = np.clip(overlap_end - overlap_start, 0, None)
-
-    fractions = (1 - burst_fraction) * base_fractions + burst_fraction * overlap / overlap.sum()
-    return fractions / fractions.sum()
-
-
-SFH_BRANCHES = {
-    0: dirichlet_fractions,
-    1: skew_normal_fractions,
-    2: skew_normal_burst_fractions,
-}
-
-
-def choose_sfh_branch(sfh_type_draw):
-    """SFH branch for a unit draw: 0 Dirichlet, 1 skew-normal, 2 skew-normal + burst.
-
-    Inputs: sfh_type_draw: unit-cube draw in [0, 1) (dimensionless).
-    Returns: integer branch index 0, 1 or 2, a key of SFH_BRANCHES.
-    """
-    if sfh_type_draw < 1 - P_SKEW:
-        return 0
-    if sfh_type_draw < 1 - P_BURST:
-        return 1
-    return 2
-
-
-def bin_metallicities(fractions, z_final):
-    """Z/Z_sun of each bin: rises from Z_ini to Z_final with the mass already formed.
-
-    Inputs: fractions: mass fraction per bin, youngest first (any normalisation);
-            z_final: final metallicity Z_fin in Z/Z_sun.
-    Returns: Z/Z_sun per bin (same length as fractions), youngest first.
-    """
-    z_initial = ZINI_FRACTION * z_final
-    # Bins run youngest first, so the mass formed before a bin is the sum of the older ones
-    mass_before = np.cumsum(fractions[::-1])[::-1] - fractions
-    enrichment = (mass_before + fractions / 2) / fractions.sum()
-    return z_initial + (z_final - z_initial) * enrichment
-
-
-def bin_metallicities_array(fractions, n_existing, z_final):
-    """Vectorised bin_metallicities for many galaxies whose number of existing bins differs.
-
-    Inputs: fractions: mass fraction per bin (n, N_BINS), youngest first (entries beyond n_existing ignored);
-            n_existing: number of existing bins per row (n,); z_final: Z_fin per row in Z/Z_sun (n,).
-    Returns: Z/Z_sun per bin (n, N_BINS); NaN for bins that do not exist.
-    """
-    fractions = np.asarray(fractions, dtype=float)
-    bin_index = np.arange(fractions.shape[1])
-    exists = bin_index[np.newaxis, :] < np.asarray(n_existing)[:, np.newaxis]
-    existing_fractions = np.where(exists, fractions, 0.0)
-
-    # Mass formed before each bin = sum of the older existing bins (bins run youngest first)
-    older_mass = np.cumsum(existing_fractions[:, ::-1], axis=1)[:, ::-1] - existing_fractions
-    total = existing_fractions.sum(axis=1, keepdims=True)
-    enrichment = (older_mass + existing_fractions / 2) / total
-
-    z_final = np.asarray(z_final, dtype=float)[:, np.newaxis]
-    z_initial = ZINI_FRACTION * z_final
-    metallicities = z_initial + (z_final - z_initial) * enrichment
-    return np.where(exists, metallicities, np.nan)
+    return COSMOLOGY.age(redshift).value - UNIVERSE_AGE_MARGIN
 
 
 def components(u, fixed_redshift=None):
@@ -245,30 +75,30 @@ def components(u, fixed_redshift=None):
 
     Inputs: u: unit-cube vector (dimensionless, in [0, 1)) ordered as DIMS;
             fixed_redshift: if given, replaces the redshift drawn from u (spectral fits); dimensionless z.
-    Returns: (bagpipes_components, drawn). drawn holds redshift (dimensionless), sfh_type (0, 1 or 2),
-             Z_fin (Z/Z_sun), Av_ism and Av_bc (mag), logU (dimensionless).
+    Returns: (bagpipes_components, drawn). drawn holds the DRAWN_LABELS: redshift (dimensionless), age and
+             tau [Gyr], metallicity [Z/Z_sun], av_ism [mag], tau_bc and logU (dimensionless),
+             log_mass_formed [log M_sun].
     """
     params = dict(zip(DIMS, u))
 
-    # 1. Redshift and the age bins that exist at that redshift
+    # 1. Redshift, which sets the oldest allowed age
     if fixed_redshift is None:
         redshift = uniform(params["z"], *Z_RANGE)
     else:
         redshift = fixed_redshift
-    edges = bin_edges(redshift)
+    oldest_age = maximum_age(redshift)
 
-    # 2. Star formation history
-    sfh_type = choose_sfh_branch(params["sfh_type"])
-    fractions = SFH_BRANCHES[sfh_type](params, edges)
-    fractions = np.fmax(fractions, MIN_FRACTION)
+    # 2. Star formation history and metallicity
+    age = 10 ** uniform(params["log_age_fraction"], np.log10(AGE_MIN), np.log10(oldest_age))
+    # Rounding in 10**log10 can push the top draw a hair above the bound
+    age = min(age, oldest_age)
+    tau = 10 ** uniform(params["log_tau"], *np.log10(TAU_RANGE))
+    metallicity = 10 ** uniform(params["log_metallicity"], *np.log10(METALLICITY_RANGE))
 
-    # 3. Chemical enrichment
-    z_final = 10 ** uniform(params["log_zfin"], *LOG_ZFIN_RANGE)
-    metallicities = bin_metallicities(fractions, z_final)
-
-    # 4. Dust and nebular emission
+    # 3. Dust and nebular emission
     av_ism = uniform(params["av_ism"], *AV_ISM_RANGE)
-    av_birth_cloud = TAU_TO_AV * 10 ** uniform(params["log_tau_bc"], *LOG_TAU_BC_RANGE)
+    tau_birth_cloud = 10 ** uniform(params["log_tau_bc"], *LOG_TAU_BC_RANGE)
+    av_birth_cloud = TAU_TO_AV * tau_birth_cloud
     log_u = uniform(params["logU"], *LOGU_RANGE)
 
     bagpipes_components = {
@@ -276,46 +106,11 @@ def components(u, fixed_redshift=None):
         "t_bc": BIRTH_CLOUD_AGE,
         "dust": {"type": "CF00", "Av": av_ism, "eta": 1 + av_birth_cloud / av_ism, "n": DUST_SLOPE},
         "nebular": {"logU": log_u},
+        "delayed": {"age": age, "tau": tau, "massformed": LOG_MASS_FORMED, "metallicity": metallicity},
     }
-    # One "constant" component per bin; Bagpipes reads the type from the name minus its last letter
-    for bin_index in range(len(fractions)):
-        name = "constant" + chr(ord("A") + bin_index)
-        bagpipes_components[name] = {
-            "age_min": edges[bin_index],
-            "age_max": edges[bin_index + 1],
-            "massformed": LOG_MASS_FORMED + np.log10(fractions[bin_index]),
-            "metallicity": metallicities[bin_index],
-        }
-
-    drawn = {"redshift": redshift, "sfh_type": sfh_type, "Z_fin": z_final,
-             "Av_ism": av_ism, "Av_bc": av_birth_cloud, "logU": log_u}
+    drawn = {"redshift": redshift, "age": age, "tau": tau, "metallicity": metallicity, "av_ism": av_ism,
+             "tau_bc": tau_birth_cloud, "logU": log_u, "log_mass_formed": LOG_MASS_FORMED}
     return bagpipes_components, drawn
-
-
-def bins_from_components(bagpipes_components):
-    """Mass fractions, metallicities and edges [Gyr ago] read back from the constant components.
-
-    Inputs: bagpipes_components: dict from components() with constant* entries (massformed in log M_sun).
-    Returns: (fractions, metallicities, edges): mass fraction per bin (dimensionless), Z/Z_sun per bin,
-             and n_bins + 1 bin edges [Gyr ago], youngest first.
-    """
-    names = []
-    for name in bagpipes_components:
-        if name.startswith("constant"):
-            names.append(name)
-    names.sort()
-
-    n_bins = len(names)
-    fractions = np.zeros(n_bins)
-    metallicities = np.zeros(n_bins)
-    edges = np.zeros(n_bins + 1)
-    for bin_index, name in enumerate(names):
-        component = bagpipes_components[name]
-        fractions[bin_index] = 10 ** (component["massformed"] - LOG_MASS_FORMED)
-        metallicities[bin_index] = component["metallicity"]
-        edges[bin_index] = component["age_min"]
-        edges[bin_index + 1] = component["age_max"]
-    return fractions, metallicities, edges
 
 
 # =============================================================================
@@ -352,17 +147,14 @@ PIVOT_WAVELENGTHS = np.zeros(len(FILTER_FILES))
 for band_index, filter_file in enumerate(FILTER_FILES):
     PIVOT_WAVELENGTHS[band_index] = pivot_wavelength(filter_file)
 
-SUMMARY_LABEL_COLUMNS = ["log_mstar", "log_sfr", "mw_age", "f_young", "f_mid", "f_old"]
-
-BIN_LABEL_COLUMNS = []
-for label_kind in ("frac_bin", "logsfr_bin", "zmet_bin"):
-    for bin_index in range(N_BINS):
-        BIN_LABEL_COLUMNS.append(f"{label_kind}_{bin_index:02d}")
+# Label columns of the parquet sets and the fits: the drawn parameters, then the derived labels
+DRAWN_LABELS = ["redshift", "age", "tau", "metallicity", "av_ism", "tau_bc", "logU", "log_mass_formed"]
+DERIVED_LABELS = ["log_age", "log_tau", "log_metallicity", "log_mstar", "log_sfr", "log_ssfr",
+                  "mw_age", "f_young", "f_mid", "f_old"]
+TRAINING_LABELS = DRAWN_LABELS + DERIVED_LABELS
 
 # Labels that scale with brightness: log value - 0.4 * (m_obs - m_model)
-MASS_DEPENDENT_LABELS = ["log_mstar", "log_sfr"]
-for bin_index in range(N_BINS):
-    MASS_DEPENDENT_LABELS.append(f"logsfr_bin_{bin_index:02d}")
+MASS_DEPENDENT_LABELS = ["log_mass_formed", "log_mstar", "log_sfr"]
 
 
 def rescale_mass_labels(table, magnitude_offset):
@@ -382,74 +174,84 @@ def rescale_mass_labels(table, magnitude_offset):
     return shifted
 
 
-def bin_labels(fractions, metallicities, edges, log_mass_formed=LOG_MASS_FORMED):
-    """Age-bin labels (N_BINS columns of each kind), youngest bin first.
+def delayed_mass_fraction_younger_than(age, tau, lookback):
+    """Share of the formed mass with lookback time below `lookback` for SFR(t) ~ t exp(-t / tau).
 
-    Inputs: fractions: mass formed per existing bin (any normalisation, dimensionless);
-            metallicities: Z/Z_sun per existing bin; edges: bin edges [Gyr ago];
-            log_mass_formed: total mass formed [log M_sun].
-    Returns: dict ordered as BIN_LABEL_COLUMNS: frac (dimensionless, sums to 1), logsfr [log M_sun/yr]
-             and zmet (Z/Z_sun). Bins that do not exist at this redshift get frac 0 and NaN for logsfr and zmet.
+    t runs from the start of star formation, `age` ago. With P and Q the regularised lower and upper
+    incomplete gamma functions, the mass formed up to t is proportional to P(2, t / tau).
+    Why the Q form: Q(2, (A - L) / tau) - Q(2, A / tau) avoids the cancellation of 1 - P / P when tau << A.
+    Inputs: age A, tau, lookback L [Gyr], scalars or arrays that broadcast together.
+    Returns: fraction in [0, 1] (dimensionless), an array of the broadcast shape; 1 where L >= A.
     """
-    n_existing = len(fractions)
-    normalised_fractions = fractions / fractions.sum()
-    widths_in_years = np.diff(edges) * 1e9
-
-    labels = {}
-    for bin_index in range(N_BINS):
-        if bin_index < n_existing:
-            labels[f"frac_bin_{bin_index:02d}"] = normalised_fractions[bin_index]
-        else:
-            labels[f"frac_bin_{bin_index:02d}"] = 0.0
-
-    for bin_index in range(N_BINS):
-        if bin_index < n_existing:
-            mass_in_bin = 10**log_mass_formed * normalised_fractions[bin_index]
-            labels[f"logsfr_bin_{bin_index:02d}"] = np.log10(mass_in_bin / widths_in_years[bin_index])
-        else:
-            labels[f"logsfr_bin_{bin_index:02d}"] = np.nan
-
-    for bin_index in range(N_BINS):
-        if bin_index < n_existing:
-            labels[f"zmet_bin_{bin_index:02d}"] = metallicities[bin_index]
-        else:
-            labels[f"zmet_bin_{bin_index:02d}"] = np.nan
-    return labels
+    age, tau, lookback = np.broadcast_arrays(np.asarray(age, dtype=float), np.asarray(tau, dtype=float),
+                                             np.asarray(lookback, dtype=float))
+    formed_before_now = gammainc(2, age / tau)
+    older_start = np.clip(age - lookback, 0, None) / tau
+    fraction = (gammaincc(2, older_start) - gammaincc(2, age / tau)) / formed_before_now
+    return np.where(lookback >= age, 1.0, np.clip(fraction, 0.0, 1.0))
 
 
-def summary_labels(bagpipes_sfh):
-    """Summary labels of a Bagpipes star formation history.
+def delayed_mass_weighted_age(age, tau):
+    """Formed-mass-weighted lookback age of SFR(t) ~ t exp(-t / tau): A - 2 tau P(3, A / tau) / P(2, A / tau).
 
-    Inputs: bagpipes_sfh: fitted model's sfh object (ages in yr, sfh in M_sun/yr, stellar_mass in log M_sun).
-    Returns: dict ordered as SUMMARY_LABEL_COLUMNS: log_mstar [log M_sun] (living stars), log_sfr [log M_sun/yr]
-             (last 100 Myr), mw_age [Gyr], and dimensionless f_young (< 0.1 Gyr), f_mid (0.1-1 Gyr), f_old (> 1 Gyr).
+    Limits: A - 2 tau when tau << A, and A / 3 when tau >> A.
+    Inputs: age A and tau [Gyr], scalars or arrays that broadcast together.
+    Returns: mass-weighted age [Gyr ago], an array of the broadcast shape.
     """
-    mass_per_age_step = bagpipes_sfh.sfh * bagpipes_sfh.age_widths
-    total_mass = mass_per_age_step.sum()
-    fraction_younger_than = []
-    for edge in LABEL_EDGES:
-        younger = bagpipes_sfh.ages < edge * 1e9
-        fraction_younger_than.append(mass_per_age_step[younger].sum() / total_mass)
+    age = np.asarray(age, dtype=float)
+    tau = np.asarray(tau, dtype=float)
+    return age - 2 * tau * gammainc(3, age / tau) / gammainc(2, age / tau)
 
-    sfr_floor = SFR_FLOOR * 10**bagpipes_sfh.stellar_mass
-    log_sfr = np.log10(max(bagpipes_sfh.sfr, sfr_floor))
+
+def delayed_tau_labels(age, tau, log_mass_formed, log_mstar):
+    """Analytic labels of a delayed-tau SFH, shared by the training sets and the ML decoding.
+
+    log_sfr is the mean SFR over the last SFR_TIMESCALE, floored at SFR_FLOOR * M_star: about a fifth
+    of the prior has no star formation that recent, and log(0) would be -inf.
+    Inputs: age, tau [Gyr]; log_mass_formed, log_mstar [log M_sun]; arrays of one shape (or scalars).
+    Returns: dict of arrays: mw_age [Gyr ago], f_young, f_mid, f_old (dimensionless, sum to 1; split at
+             LABEL_EDGES), log_sfr [log M_sun/yr] and log_ssfr [log yr^-1].
+    """
+    log_mass_formed = np.asarray(log_mass_formed, dtype=float)
+    log_mstar = np.asarray(log_mstar, dtype=float)
+    younger_than_young_edge = delayed_mass_fraction_younger_than(age, tau, LABEL_EDGES[0])
+    younger_than_old_edge = delayed_mass_fraction_younger_than(age, tau, LABEL_EDGES[1])
+    recent_fraction = delayed_mass_fraction_younger_than(age, tau, SFR_TIMESCALE)
+
+    recent_sfr = 10**log_mass_formed * recent_fraction / (SFR_TIMESCALE * GYR_TO_YEARS)
+    sfr_floor = SFR_FLOOR * 10**log_mstar
+    log_sfr = np.log10(np.maximum(recent_sfr, sfr_floor))
     return {
-        "log_mstar": bagpipes_sfh.stellar_mass,
+        "mw_age": delayed_mass_weighted_age(age, tau),
+        "f_young": younger_than_young_edge,
+        "f_mid": younger_than_old_edge - younger_than_young_edge,
+        "f_old": 1 - younger_than_old_edge,
         "log_sfr": log_sfr,
-        "mw_age": bagpipes_sfh.mass_weighted_age,
-        "f_young": fraction_younger_than[0],
-        "f_mid": fraction_younger_than[1] - fraction_younger_than[0],
-        "f_old": 1 - fraction_younger_than[1],
+        "log_ssfr": log_sfr - log_mstar,
     }
 
 
-def mass_weighted_metallicity(fractions, metallicities):
-    """Mean Z/Z_sun weighted by the mass formed in each bin.
+def summary_labels(bagpipes_sfh, drawn):
+    """Every TRAINING_LABELS value of one model.
 
-    Inputs: fractions: mass formed per bin (any normalisation); metallicities: Z/Z_sun per bin.
-    Returns: mass-weighted Z/Z_sun (dimensionless).
+    Inputs: bagpipes_sfh: the model's sfh object (stellar_mass in log M_sun, living stars);
+            drawn: dict from components() with the DRAWN_LABELS (extra keys are ignored).
+    Returns: dict ordered as TRAINING_LABELS: the drawn values; log_age and log_tau [log Gyr] and
+             log_metallicity [log Z/Z_sun]; log_mstar from Bagpipes; the delayed_tau_labels values as floats.
     """
-    return np.sum(fractions * metallicities) / np.sum(fractions)
+    labels = {}
+    for label in DRAWN_LABELS:
+        labels[label] = drawn[label]
+    labels["log_age"] = np.log10(drawn["age"])
+    labels["log_tau"] = np.log10(drawn["tau"])
+    labels["log_metallicity"] = np.log10(drawn["metallicity"])
+    labels["log_mstar"] = bagpipes_sfh.stellar_mass
+
+    analytic_labels = delayed_tau_labels(drawn["age"], drawn["tau"], drawn["log_mass_formed"],
+                                         bagpipes_sfh.stellar_mass)
+    for label in ("log_sfr", "log_ssfr", "mw_age", "f_young", "f_mid", "f_old"):
+        labels[label] = float(analytic_labels[label])
+    return labels
 
 
 def ab_magnitudes(flux_per_angstrom):
@@ -465,37 +267,30 @@ def ab_magnitudes(flux_per_angstrom):
 
 
 def simulate_models(unit_vectors):
-    """Drawn parameters, labels and AB magnitudes (10^10 M_sun formed) for a block of unit-cube vectors.
+    """Labels and AB magnitudes (10^10 M_sun formed) for a block of unit-cube vectors.
 
     Inputs: unit_vectors: iterable of unit-cube vectors (dimensionless, in [0, 1)), each ordered as DIMS.
-    Returns: DataFrame with one row per model: the drawn parameters (redshift, sfh_type, Z_fin, ...),
-             SUMMARY_LABEL_COLUMNS, BIN_LABEL_COLUMNS and the AB magnitudes [mag] in BANDS order
-             (NaN where a flux is not positive). The "z" column is the z-band magnitude, not the redshift.
+    Returns: DataFrame with one row per model: the TRAINING_LABELS, then the AB magnitudes [mag] in BANDS
+             order (NaN where a flux is not positive). The "z" column is the z-band magnitude, not the redshift.
 
-    One Bagpipes model is kept per number of bins: update() is ~70x faster than building a new one.
+    One Bagpipes model is built and then updated: update() is ~70x faster than building a new one, and safe
+    because every model has the same component set (Bagpipes fixes the components when it builds a model).
     """
-    models_by_bin_count = {}
+    model = None
     rows = []
     for u in unit_vectors:
         bagpipes_components, drawn = components(u)
-        fractions, metallicities, edges = bins_from_components(bagpipes_components)
-
-        n_bins = len(fractions)
-        if n_bins in models_by_bin_count:
-            model = models_by_bin_count[n_bins]
-            model.update(bagpipes_components)
-        else:
+        if model is None:
             model = pipes.model_galaxy(bagpipes_components, filt_list=FILTER_FILES)
-            models_by_bin_count[n_bins] = model
+        else:
+            model.update(bagpipes_components)
 
-        row = dict(drawn)
-        row.update(summary_labels(model.sfh))
-        row.update(bin_labels(fractions, metallicities, edges))
+        row = summary_labels(model.sfh, drawn)
         magnitudes = ab_magnitudes(model.photometry)
         for band, magnitude in zip(BANDS, magnitudes):
             row[band] = magnitude
         rows.append(row)
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=TRAINING_LABELS + BANDS)
 
 
 # =============================================================================

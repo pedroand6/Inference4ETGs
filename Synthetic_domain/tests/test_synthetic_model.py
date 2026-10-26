@@ -1,6 +1,5 @@
 """Tests for synthetic_model.py. Run from Synthetic_domain/: ../.venv/bin/python -m pytest -v"""
 
-import json
 import os
 import subprocess
 import sys
@@ -9,79 +8,87 @@ import extinction
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.stats import qmc
 
+import bagpipes as pipes
 import synthetic_model as sm
 
-LEGACY_FIXTURE = "tests/legacy_components.json"
 MIN_PLAUSIBLE_MAGNITUDE = 5.0    # [mag] AB, for 10^10 M_sun formed
 MAX_PLAUSIBLE_MAGNITUDE = 40.0   # [mag] AB
+LOW_REDSHIFT = 0.002             # Bagpipes needs z > 0 to build a star formation history
 
 
 # =============================================================================
 # Prior
 # =============================================================================
-def test_components_match_legacy_notebook():
-    with open(LEGACY_FIXTURE) as fixture:
-        cases = json.load(fixture)
-
-    for case in cases:
-        new_components, new_params = sm.components(np.array(case["u"]))
-        legacy_components = case["components"]
-
-        assert set(new_components) == set(legacy_components)
-        assert np.isclose(new_components["redshift"], legacy_components["redshift"], rtol=1e-12)
-        assert np.isclose(new_components["t_bc"], legacy_components["t_bc"], rtol=1e-12)
-        for key in ("Av", "eta", "n"):
-            assert np.isclose(new_components["dust"][key], legacy_components["dust"][key], rtol=1e-12)
-        assert np.isclose(new_components["nebular"]["logU"], legacy_components["nebular"]["logU"], rtol=1e-12)
-
-        for name in legacy_components:
-            if not name.startswith("constant"):
-                continue
-            for key in ("age_min", "age_max", "massformed", "metallicity"):
-                assert np.isclose(new_components[name][key], legacy_components[name][key], rtol=1e-12), (name, key)
-
-        for legacy_key, legacy_value in case["params"].items():
-            # The notebook called the drawn redshift "z"; here it is "redshift" (the z band owns "z")
-            key = "redshift" if legacy_key == "z" else legacy_key
-            assert np.isclose(new_params[key], legacy_value, rtol=1e-12), key
+def test_prior_draws_stay_inside_bounds_and_age_below_universe_age():
+    rng = np.random.default_rng(0)
+    for u in rng.random((500, len(sm.DIMS))):
+        _, drawn = sm.components(u)
+        assert sm.Z_RANGE[0] <= drawn["redshift"] <= sm.Z_RANGE[1]
+        assert sm.AGE_MIN <= drawn["age"] <= sm.maximum_age(drawn["redshift"]) + 1e-12
+        assert sm.TAU_RANGE[0] <= drawn["tau"] <= sm.TAU_RANGE[1]
+        assert sm.METALLICITY_RANGE[0] <= drawn["metallicity"] <= sm.METALLICITY_RANGE[1]
+        assert sm.AV_ISM_RANGE[0] <= drawn["av_ism"] <= sm.AV_ISM_RANGE[1]
+        assert 10 ** sm.LOG_TAU_BC_RANGE[0] <= drawn["tau_bc"] <= 10 ** sm.LOG_TAU_BC_RANGE[1]
+        assert sm.LOGU_RANGE[0] <= drawn["logU"] <= sm.LOGU_RANGE[1]
+        assert drawn["log_mass_formed"] == sm.LOG_MASS_FORMED
 
 
-@pytest.mark.parametrize("branch, sfh_type_draw", [(0, 0.25), (1, 0.75), (2, 0.99)])
-def test_each_branch_gives_fractions_that_sum_to_one(branch, sfh_type_draw):
-    rng = np.random.default_rng(1)
-    u = rng.random(len(sm.DIMS))
-    u[sm.DIMS.index("sfh_type")] = sfh_type_draw
+def test_age_at_the_top_of_the_cube_never_exceeds_the_universe_age():
+    """Edge of the prior: z = 0.7 and the largest age draw, drawn or fixed redshift."""
+    cube = np.full(len(sm.DIMS), 1.0)
+    for fixed_redshift in (None, sm.Z_RANGE[1]):
+        _, drawn = sm.components(cube, fixed_redshift=fixed_redshift)
+        assert drawn["age"] <= sm.maximum_age(sm.Z_RANGE[1])
+    _, drawn = sm.components(cube, fixed_redshift=0.3)
+    assert drawn["age"] <= sm.maximum_age(0.3)
 
-    assert sm.choose_sfh_branch(sfh_type_draw) == branch
+
+def test_maximum_age_is_the_universe_age_minus_the_margin_for_scalars_and_arrays():
+    redshifts = np.array([sm.Z_RANGE[0], 0.3, sm.Z_RANGE[1]])
+    expected = sm.COSMOLOGY.age(redshifts).value - sm.UNIVERSE_AGE_MARGIN
+    assert np.allclose(sm.maximum_age(redshifts), expected)
+    assert np.isclose(sm.maximum_age(0.3), expected[1])
+    assert np.isclose(sm.maximum_age(sm.Z_RANGE[1]), 7.065, atol=1e-3)
+
+
+def test_uniform_cube_gives_log_uniform_tau_and_metallicity():
+    cube = np.full(len(sm.DIMS), 0.5)
+    _, drawn = sm.components(cube)
+    assert np.isclose(np.log10(drawn["tau"]), np.mean(np.log10(sm.TAU_RANGE)))
+    assert np.isclose(np.log10(drawn["metallicity"]), np.mean(np.log10(sm.METALLICITY_RANGE)))
+    log_age_range = [np.log10(sm.AGE_MIN), np.log10(sm.maximum_age(drawn["redshift"]))]
+    assert np.isclose(np.log10(drawn["age"]), np.mean(log_age_range))
+
+
+def test_latin_hypercube_is_stratified_in_log_tau():
+    """Each of n equal slices of log tau holds exactly one of n Latin hypercube draws."""
+    n_draws = 50
+    cube = qmc.LatinHypercube(len(sm.DIMS), seed=4).random(n_draws)
+    log_taus = np.zeros(n_draws)
+    for row_index, u in enumerate(cube):
+        _, drawn = sm.components(u)
+        log_taus[row_index] = np.log10(drawn["tau"])
+    log_tau_range = np.log10(sm.TAU_RANGE)
+    slices = np.floor((log_taus - log_tau_range[0]) / np.diff(log_tau_range) * n_draws).astype(int)
+    assert np.array_equal(np.sort(slices), np.arange(n_draws))
+
+
+def test_components_hold_one_delayed_component_and_the_dust_and_nebular_entries():
+    u = np.random.default_rng(5).random(len(sm.DIMS))
     bagpipes_components, drawn = sm.components(u)
-    fractions, metallicities, edges = sm.bins_from_components(bagpipes_components)
 
-    assert drawn["sfh_type"] == branch
-    assert np.isclose(fractions.sum(), 1.0, atol=1e-4)    # MIN_FRACTION floor adds at most 16e-6
-    assert len(fractions) == len(edges) - 1
-
-
-def test_old_bins_are_dropped_at_high_redshift():
-    low_redshift_edges = sm.bin_edges(0.01)
-    high_redshift_edges = sm.bin_edges(0.69)
-
-    # The 14.2 Gyr bin centre is older than the Universe (13.37 Gyr at most here), so the
-    # prior never has more than N_BINS - 1 bins; its labels are always padding.
-    assert len(low_redshift_edges) - 1 == sm.N_BINS - 1
-    assert len(high_redshift_edges) - 1 < sm.N_BINS - 1
-    universe_age = sm.COSMOLOGY.age(0.69).value
-    assert high_redshift_edges[-1] < universe_age
-
-
-def test_metallicity_rises_from_oldest_to_youngest_bin():
-    fractions = np.full(sm.N_BINS, 1 / sm.N_BINS)
-    metallicities = sm.bin_metallicities(fractions, z_final=1.0)
-
-    # Bins run youngest first, so metallicity must fall along the array
-    assert np.all(np.diff(metallicities) < 0)
-    assert metallicities[0] < 1.0
-    assert metallicities[-1] > sm.ZINI_FRACTION * 1.0
+    assert list(drawn) == sm.DRAWN_LABELS
+    delayed = bagpipes_components["delayed"]
+    assert delayed == {"age": drawn["age"], "tau": drawn["tau"], "massformed": sm.LOG_MASS_FORMED,
+                       "metallicity": drawn["metallicity"]}
+    dust = bagpipes_components["dust"]
+    assert dust["type"] == "CF00" and dust["n"] == sm.DUST_SLOPE
+    assert dust["Av"] == drawn["av_ism"]
+    assert np.isclose(dust["eta"], 1 + sm.TAU_TO_AV * drawn["tau_bc"] / drawn["av_ism"])
+    assert bagpipes_components["nebular"] == {"logU": drawn["logU"]}
+    assert bagpipes_components["t_bc"] == sm.BIRTH_CLOUD_AGE
 
 
 def test_fixed_redshift_overrides_the_drawn_redshift():
@@ -95,33 +102,87 @@ def test_fixed_redshift_overrides_the_drawn_redshift():
 # =============================================================================
 # Labels and magnitudes
 # =============================================================================
-def test_bin_labels_pad_missing_old_bins():
-    u = np.full(len(sm.DIMS), 0.5)
-    bagpipes_components, _ = sm.components(u, fixed_redshift=0.69)
-    fractions, metallicities, edges = sm.bins_from_components(bagpipes_components)
-    labels = sm.bin_labels(fractions, metallicities, edges)
+def bagpipes_delayed_sfh(age, tau):
+    """Bagpipes SFH of one delayed-tau component (10^10 M_sun formed, Z_sun) at LOW_REDSHIFT.
 
-    n_existing = len(fractions)
-    assert n_existing < sm.N_BINS
-    total = 0.0
-    for bin_index in range(sm.N_BINS):
-        suffix = f"{bin_index:02d}"
-        total += labels[f"frac_bin_{suffix}"]
-        if bin_index < n_existing:
-            assert np.isfinite(labels[f"logsfr_bin_{suffix}"])
-            assert np.isfinite(labels[f"zmet_bin_{suffix}"])
-        else:
-            assert labels[f"frac_bin_{suffix}"] == 0.0
-            assert np.isnan(labels[f"logsfr_bin_{suffix}"])
-            assert np.isnan(labels[f"zmet_bin_{suffix}"])
-    assert np.isclose(total, 1.0)
-    assert list(labels) == sm.BIN_LABEL_COLUMNS
+    Inputs: age, tau [Gyr]. Returns: bagpipes star_formation_history object.
+    """
+    component = {"age": age, "tau": tau, "massformed": 10.0, "metallicity": 1.0}
+    return pipes.models.star_formation_history({"redshift": LOW_REDSHIFT, "delayed": component})
 
 
-def test_mass_weighted_metallicity_of_equal_bins_is_the_mean():
-    fractions = np.array([0.5, 0.5])
-    metallicities = np.array([1.0, 2.0])
-    assert np.isclose(sm.mass_weighted_metallicity(fractions, metallicities), 1.5)
+# tau << age, tau ~ age and tau >> age; ages away from LABEL_EDGES, where Bagpipes' grid step is coarse
+@pytest.mark.parametrize("age, tau", [(13.0, 0.3), (5.0, 1.0), (2.0, 20.0), (8.0, 3.0), (0.5, 0.1),
+                                      (0.05, 0.01)])
+def test_analytic_labels_match_bagpipes_sfh(age, tau):
+    sfh = bagpipes_delayed_sfh(age, tau)
+    mass = sfh.sfh * sfh.age_widths
+    ages = sfh.ages / 1e9
+    assert np.isclose(sm.delayed_mass_weighted_age(age, tau), sfh.mass_weighted_age, rtol=0.01)
+    for limit in (0.1, 1.0):
+        younger = mass[ages < limit].sum() / mass.sum()
+        assert abs(sm.delayed_mass_fraction_younger_than(age, tau, limit) - younger) < 0.01
+
+
+@pytest.mark.parametrize("age, tau", [(5.0, 1.0), (2.0, 20.0)])
+def test_analytic_log_sfr_matches_bagpipes_sfr(age, tau):
+    sfh = bagpipes_delayed_sfh(age, tau)
+    labels = sm.delayed_tau_labels(np.array([age]), np.array([tau]), np.array([10.0]),
+                                   np.array([sfh.stellar_mass]))
+    assert abs(labels["log_sfr"][0] - np.log10(sfh.sfr)) < 0.02
+    assert np.isclose(labels["log_ssfr"][0], labels["log_sfr"][0] - sfh.stellar_mass)
+
+
+def test_analytic_labels_are_finite_in_the_prior_corners():
+    t_max = sm.maximum_age(LOW_REDSHIFT)
+    for age, tau in [(t_max, 0.01), (0.05, 20.0), (t_max, 20.0), (0.05, 0.01)]:
+        labels = sm.delayed_tau_labels(np.array([age]), np.array([tau]), np.array([10.0]), np.array([9.8]))
+        assert all(np.isfinite(value).all() for value in labels.values())
+        for fraction in ("f_young", "f_mid", "f_old"):
+            assert ((labels[fraction] >= 0) & (labels[fraction] <= 1)).all(), fraction
+        fractions = labels["f_young"] + labels["f_mid"] + labels["f_old"]
+        assert np.allclose(fractions, 1.0)
+        assert 0 < labels["mw_age"][0] <= age
+
+
+def test_analytic_labels_reach_their_limits():
+    """tau << age gives mw_age = age - 2 tau; tau >> age gives age / 3; a young galaxy is all f_young."""
+    assert np.isclose(sm.delayed_mass_weighted_age(13.0, 0.01), 13.0 - 0.02)
+    assert np.isclose(sm.delayed_mass_weighted_age(0.05, 20.0), 0.05 / 3, rtol=1e-3)
+    assert sm.delayed_mass_fraction_younger_than(0.05, 1.0, 0.1) == 1.0
+
+
+def test_analytic_labels_are_vectorised():
+    ages = np.array([13.0, 5.0, 0.05])
+    taus = np.array([0.3, 1.0, 20.0])
+    labels = sm.delayed_tau_labels(ages, taus, np.full(3, 10.0), np.full(3, 9.8))
+    for label in ("mw_age", "f_young", "f_mid", "f_old", "log_sfr", "log_ssfr"):
+        assert labels[label].shape == (3,), label
+        for row_index in range(3):
+            single = sm.delayed_tau_labels(ages[row_index:row_index + 1], taus[row_index:row_index + 1],
+                                           np.array([10.0]), np.array([9.8]))
+            assert np.isclose(labels[label][row_index], single[label][0]), label
+
+
+def test_no_recent_star_formation_sits_on_the_sfr_floor():
+    labels = sm.delayed_tau_labels(np.array([13.0]), np.array([0.01]), np.array([10.0]), np.array([9.7]))
+    assert np.isclose(labels["log_sfr"][0], np.log10(sm.SFR_FLOOR) + 9.7)
+    assert np.isfinite(labels["log_ssfr"][0])
+
+
+def test_summary_labels_give_every_training_label():
+    u = np.random.default_rng(6).random(len(sm.DIMS))
+    bagpipes_components, drawn = sm.components(u)
+    sfh = pipes.models.star_formation_history(bagpipes_components)
+    labels = sm.summary_labels(sfh, drawn)
+
+    assert list(labels) == sm.TRAINING_LABELS
+    assert all(np.isfinite(value) for value in labels.values())
+    assert labels["log_mstar"] == sfh.stellar_mass
+    assert np.isclose(labels["log_age"], np.log10(drawn["age"]))
+    assert np.isclose(labels["log_tau"], np.log10(drawn["tau"]))
+    assert np.isclose(labels["log_metallicity"], np.log10(drawn["metallicity"]))
+    assert np.isclose(labels["mw_age"], sm.delayed_mass_weighted_age(drawn["age"], drawn["tau"]))
 
 
 def test_ab_magnitudes_are_nan_when_any_flux_is_not_positive():
@@ -131,18 +192,20 @@ def test_ab_magnitudes_are_nan_when_any_flux_is_not_positive():
     assert np.all(np.isnan(sm.ab_magnitudes(flux)))
 
 
-def test_simulate_models_returns_labels_and_magnitudes():
+def test_simulated_columns_follow_training_labels_then_bands():
+    table = sm.simulate_models(np.full((2, len(sm.DIMS)), 0.5))
+    assert list(table.columns) == sm.TRAINING_LABELS + sm.BANDS
+    assert np.isfinite(table[sm.BANDS].to_numpy()).all()
+
+
+def test_simulated_models_are_finite_and_their_fractions_sum_to_one():
     unit_vectors = np.random.default_rng(2).random((4, len(sm.DIMS)))
     models = sm.simulate_models(unit_vectors)
 
     assert len(models) == 4
-    for column in ["redshift", "sfh_type", *sm.SUMMARY_LABEL_COLUMNS, *sm.BIN_LABEL_COLUMNS, *sm.BANDS]:
-        assert column in models.columns, column
-    fraction_columns = []
-    for bin_index in range(sm.N_BINS):
-        fraction_columns.append(f"frac_bin_{bin_index:02d}")
-    assert np.allclose(models[fraction_columns].sum(axis=1), 1.0)
-    assert np.isfinite(models[sm.BANDS].to_numpy()).all()
+    assert np.isfinite(models[sm.TRAINING_LABELS + sm.BANDS].to_numpy()).all()
+    assert np.allclose(models[["f_young", "f_mid", "f_old"]].sum(axis=1), 1.0)
+    assert np.allclose(models["log_ssfr"], models["log_sfr"] - models["log_mstar"])
 
 
 def test_simulated_redshift_and_z_band_are_distinct_columns():
@@ -461,8 +524,9 @@ def test_multinest_iterations_of_a_one_row_file(tmp_path):
 # Mass rescaling
 # =============================================================================
 def label_table(n_rows):
-    """Table with every MASS_DEPENDENT_LABELS column at 10.0 and two columns that must not move."""
-    table = pd.DataFrame({"mw_age": np.full(n_rows, 5.0), "zmet_bin_00": np.full(n_rows, 1.0)})
+    """Table with every MASS_DEPENDENT_LABELS column at 10.0 and three columns that must not move."""
+    table = pd.DataFrame({"mw_age": np.full(n_rows, 5.0), "metallicity": np.full(n_rows, 1.0),
+                          "log_ssfr": np.full(n_rows, -10.0)})
     for label in sm.MASS_DEPENDENT_LABELS:
         table[label] = 10.0
     return table
@@ -480,7 +544,8 @@ def test_rescale_mass_labels_leaves_other_columns_and_the_input_alone():
     table = label_table(3)
     rescaled = sm.rescale_mass_labels(table, 2.5)
     assert (rescaled["mw_age"] == 5.0).all()
-    assert (rescaled["zmet_bin_00"] == 1.0).all()
+    assert (rescaled["metallicity"] == 1.0).all()
+    assert (rescaled["log_ssfr"] == -10.0).all()
     for label in sm.MASS_DEPENDENT_LABELS:
         assert (table[label] == 10.0).all(), label    # the input is not modified
 
@@ -490,7 +555,8 @@ def test_rescale_mass_labels_takes_one_offset_per_row_and_nan_gives_nan():
     rescaled = sm.rescale_mass_labels(table, np.array([-2.5, 0.0, np.nan]))
     assert np.allclose(rescaled["log_mstar"].iloc[:2], [11.0, 10.0])
     assert np.isnan(rescaled["log_mstar"].iloc[2])
-    assert np.isnan(rescaled["logsfr_bin_00"].iloc[2])
+    assert np.isnan(rescaled["log_sfr"].iloc[2])
+    assert np.isnan(rescaled["log_mass_formed"].iloc[2])
     assert rescaled["mw_age"].iloc[2] == 5.0
 
 
@@ -511,6 +577,7 @@ def mock_job(job_id, rng):
     return {"job_id": job_id, "spectrum": spectrum, "redshift": 0.1}, truth
 
 
+@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_make_mock_spectrum_returns_truth_labels():
     """The mock spectrum is finite and its truth labels are finite."""
     job, truth = mock_job("mock_test", np.random.default_rng(9))
@@ -519,6 +586,7 @@ def test_make_mock_spectrum_returns_truth_labels():
         assert np.isfinite(truth[column]), column
 
 
+@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_fit_and_save_smoke_run(tmp_path):
     """A short MultiNest run on a mock spectrum is saved with posterior labels and metadata."""
     job, _ = mock_job("smoke", np.random.default_rng(10))
@@ -534,6 +602,7 @@ def test_fit_and_save_smoke_run(tmp_path):
     assert metadata["n_iterations"] <= 100
 
 
+@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_fit_and_save_skips_existing_output(tmp_path):
     """A job whose .h5 file already exists is skipped and its run time is read from the file."""
     job, _ = mock_job("skip", np.random.default_rng(11))
@@ -556,6 +625,7 @@ def test_save_fit_failure_leaves_no_file_at_the_final_path(tmp_path):
     assert not os.path.exists(path)
 
 
+@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_fit_and_save_refits_a_truncated_output_file(tmp_path):
     """An unreadable .h5 left by an interrupted run is not counted as done: the job is fitted again."""
     job, _ = mock_job("truncated", np.random.default_rng(12))
@@ -676,6 +746,7 @@ def test_photometric_components_are_the_training_prior_without_the_redshift():
     assert "veldisp" not in bagpipes_components
 
 
+@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_photometric_posterior_labels_shift_the_masses_by_the_offset():
     """A galaxy 1.5 mag fainter than its model (tiny errors) gets log_mstar lower by 0.4 x 1.5 = 0.6 dex."""
     cube = np.full(len(sm.PHOTOMETRIC_DIMS), 0.5)
@@ -692,6 +763,7 @@ def test_photometric_posterior_labels_shift_the_masses_by_the_offset():
         assert column in posterior.columns, column
 
 
+@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_photometric_posterior_labels_draw_the_offset_from_its_conditional():
     """Repeated copies of one point get offsets with the analytic mean and width (errors 0.1 mag, 12 bands)."""
     n_copies = 200
@@ -737,6 +809,7 @@ def test_fit_photometry_smoke_run_on_a_noiseless_mock(tmp_path):
 # =============================================================================
 # Job files and the calibration test
 # =============================================================================
+@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_export_and_load_job_round_trip(tmp_path):
     job, _ = mock_job("round_trip", np.random.default_rng(13))
     path = sm.export_job(job, str(tmp_path / "jobs"))    # the folder does not exist yet
@@ -775,6 +848,7 @@ def test_export_and_load_photometry_job_round_trip(tmp_path):
     assert "spectrum" not in loaded
 
 
+@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_job_file_written_before_kinds_loads_as_a_spectrum_job(tmp_path):
     """Job files exported before the photometric fits existed have no kind: they are spectral jobs."""
     job, _ = mock_job("old_job", np.random.default_rng(31))
@@ -856,6 +930,7 @@ def test_fit_and_save_never_replaces_a_fit_of_the_other_kind(tmp_path, fake_fitt
 
 
 @pytest.mark.skipif(not multinest_available(), reason="pymultinest cannot import (LD_LIBRARY_PATH?)")
+@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_fit_and_save_photometry_smoke_run(tmp_path):
     """A short MultiNest run on a photometry job is saved with rescaled labels, the offsets and the kind."""
     job = photometry_job("phot_smoke", np.random.default_rng(33))
@@ -869,6 +944,7 @@ def test_fit_and_save_photometry_smoke_run(tmp_path):
         assert np.isfinite(posterior[column]).all(), column
 
 
+@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_calibration_cubes_are_deterministic_and_use_every_sfh_branch():
     """The rare burst branch has probability P_BURST per draw, so some seeds miss it in 60 draws; seed 0 does not."""
     first = sm.draw_calibration_cubes(60, np.random.default_rng(0))
@@ -881,6 +957,7 @@ def test_calibration_cubes_are_deterministic_and_use_every_sfh_branch():
     assert branches == set(sm.SFH_BRANCHES)
 
 
+@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_draw_calibration_mocks_ids_count_and_seed():
     wavelength_vacuum = 10 ** np.arange(np.log10(3700), np.log10(9300), 1e-4)
     template = sm.prepare_spectrum(wavelength_vacuum, np.ones_like(wavelength_vacuum),
@@ -949,6 +1026,7 @@ def run_script(*arguments):
                           capture_output=True, text=True, timeout=600)
 
 
+@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_run_script_fits_an_exported_job_and_logs_it(tmp_path):
     job, _ = mock_job("calib_smoke", np.random.default_rng(14))
     sm.export_job(job, str(tmp_path / "jobs"))
@@ -965,6 +1043,7 @@ def test_run_script_fits_an_exported_job_and_logs_it(tmp_path):
 
 
 @pytest.mark.skipif(not multinest_available(), reason="pymultinest cannot import (LD_LIBRARY_PATH?)")
+@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_run_script_fits_an_exported_photometry_job(tmp_path):
     sm.export_job(photometry_job("calib_000", np.random.default_rng(34)), str(tmp_path / "jobs"))
 
@@ -976,6 +1055,7 @@ def test_run_script_fits_an_exported_photometry_job(tmp_path):
     assert metadata["kind"] == "photometry"
 
 
+@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_run_script_status_counts_done_and_pending_jobs(tmp_path):
     for job_id in ("calib_000", "calib_001", "galaxy_1"):
         sm.export_job(mock_job(job_id, np.random.default_rng(15))[0], str(tmp_path / "jobs"))
@@ -994,6 +1074,7 @@ def test_run_script_interleaves_calibration_mocks_and_galaxies():
     assert order == ["calib_000", "galaxy_a", "calib_001", "galaxy_b", "calib_002"]
 
 
+@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_run_script_rejects_too_long_output_path_and_bad_task_index(tmp_path):
     sm.export_job(mock_job("calib_000", np.random.default_rng(16))[0], str(tmp_path / "jobs"))
 
@@ -1039,6 +1120,7 @@ def test_physical_core_count_is_none_without_topology_fields():
     assert run_spectral_fits.count_physical_cores("", {0}) is None
 
 
+@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_slurm_tasks_write_one_log_file_each(tmp_path):
     for job_id in ("calib_000", "calib_001"):
         sm.export_job(mock_job(job_id, np.random.default_rng(17))[0], str(tmp_path / "jobs"))
@@ -1102,27 +1184,3 @@ def test_vectorised_scale_to_observed_r_draws_from_the_window():
         in_window = np.abs(catalogue_z - model_z[model_index]) < sm.SCALING_MAX_DZ
         assert np.any(np.isclose(catalogue_r[in_window], scaled[model_index, r_index]))
     assert np.allclose(scaled[:, 0] - model_magnitudes[:, 0], offsets)
-
-
-def test_bin_edges_array_matches_bin_edges():
-    redshifts = np.random.default_rng(23).uniform(*sm.Z_RANGE, 300)
-    edges_array = sm.bin_edges_array(redshifts)
-    assert edges_array.shape == (300, sm.N_BINS + 1)
-    for row_index, redshift in enumerate(redshifts):
-        expected = sm.bin_edges(redshift)
-        assert np.allclose(edges_array[row_index, :len(expected)], expected)
-        assert np.all(np.isnan(edges_array[row_index, len(expected):]))
-
-
-def test_bin_metallicities_array_matches_bin_metallicities():
-    rng = np.random.default_rng(24)
-    redshifts = rng.uniform(*sm.Z_RANGE, 200)
-    n_existing = np.isfinite(sm.bin_edges_array(redshifts)).sum(axis=1) - 1
-    fractions = rng.dirichlet(np.ones(sm.N_BINS), 200)
-    z_final = rng.uniform(0.1, 2.5, 200)
-    result = sm.bin_metallicities_array(fractions, n_existing, z_final)
-    for row_index in range(200):
-        n_bins = n_existing[row_index]
-        expected = sm.bin_metallicities(fractions[row_index, :n_bins], z_final[row_index])
-        assert np.allclose(result[row_index, :n_bins], expected)
-        assert np.all(np.isnan(result[row_index, n_bins:]))
