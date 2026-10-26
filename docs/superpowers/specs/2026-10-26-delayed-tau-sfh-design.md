@@ -172,3 +172,14 @@ Order (one job at a time, so the jobs queue):
 - Changing the dust or nebular models.
 - Hyper-parameter searches.
 - The CNN.
+
+## Amendment (2026-10-26, from the code inventory)
+
+1. **`log_sfr` is derived, not a flow target.**
+   - About 20% of delayed-τ prior draws have no star formation in the last 100 Myr. Their `log_sfr` sits exactly on the floor (`SFR_FLOOR × M*`), and a flow cannot learn a target with that point mass.
+   - `log_sfr` is therefore computed analytically for training labels and posterior samples alike: SFR₁₀₀ = 10^log_mass_formed × F(<0.1 Gyr) / 10⁸ yr, with the floor.
+   - The flow has 9 targets: log age, log tau, log metallicity, av_ism, log tau_bc, logU, log_mass_formed, log_mstar, redshift (redshift last).
+2. **Age, τ and Z are compared in log.**
+   - The calibration test and the agreement test use `log_age`, `log_tau`, `log_metallicity` and `log_mstar`, since the prior spans several decades.
+   - These log columns are written next to the linear ones.
+3. **Checkpoints record their `target_names`.** Loading a run whose names differ from `ml_data.TARGET_NAMES` raises an error. The old runs move to `ml_runs/superseded/`.
