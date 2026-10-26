@@ -5,6 +5,7 @@ import subprocess
 import sys
 
 import extinction
+import h5py
 import numpy as np
 import pandas as pd
 import pytest
@@ -431,6 +432,7 @@ def test_spectral_components_fix_redshift_and_add_veldisp():
     assert sm.VELDISP_RANGE[0] <= bagpipes_components["veldisp"] <= sm.VELDISP_RANGE[1]
     assert drawn["veldisp"] == bagpipes_components["veldisp"]
     assert 1.0 <= noise_scale <= 5.0
+    assert bagpipes_components["delayed"]["age"] == drawn["age"] <= sm.maximum_age(0.08)
 
 
 def test_split_by_hash_is_stable():
@@ -577,16 +579,15 @@ def mock_job(job_id, rng):
     return {"job_id": job_id, "spectrum": spectrum, "redshift": 0.1}, truth
 
 
-@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_make_mock_spectrum_returns_truth_labels():
-    """The mock spectrum is finite and its truth labels are finite."""
+    """The mock spectrum is finite and its truth carries every training label, finite."""
     job, truth = mock_job("mock_test", np.random.default_rng(9))
     assert np.isfinite(job["spectrum"]["flux"]).all()
-    for column in ("mw_age", "Z_fin", "f_old", "model_r"):
+    for column in (*sm.TRAINING_LABELS, "veldisp", "noise_scale", "model_r"):
         assert np.isfinite(truth[column]), column
+    assert truth["noise_scale"] == 1.0    # the mock noise is the template's own
 
 
-@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_fit_and_save_smoke_run(tmp_path):
     """A short MultiNest run on a mock spectrum is saved with posterior labels and metadata."""
     job, _ = mock_job("smoke", np.random.default_rng(10))
@@ -595,14 +596,55 @@ def test_fit_and_save_smoke_run(tmp_path):
     assert summary["status"] == "fitted", summary["error"]
     posterior, metadata = sm.load_fit(str(tmp_path / "smoke.h5"))
     assert len(posterior) > 0
-    for column in ("mw_age", "Z_fin", "f_old", "frac_bin_00", "model_r", "veldisp"):
-        assert column in posterior.columns
+    for column in (*sm.TRAINING_LABELS, "model_r", "veldisp", "noise_scale"):
+        assert column in posterior.columns, column
     assert metadata["converged"] in (True, False)
     assert metadata["max_iterations"] == 100
     assert metadata["n_iterations"] <= 100
+    assert metadata["sfh_model"] == "delayed"
 
 
-@pytest.mark.xfail(reason="Task 2", strict=True)
+def test_fit_is_current_needs_the_delayed_model_and_the_production_iteration_limit():
+    """Fits without sfh_model (16-bin era), of another model or with a smaller limit are not current."""
+    assert not sm.fit_is_current({"converged": True, "max_iterations": sm.MAX_ITERATIONS})
+    assert sm.fit_is_current({"sfh_model": "delayed", "max_iterations": sm.MAX_ITERATIONS})
+    assert not sm.fit_is_current({"sfh_model": "nonparametric", "max_iterations": sm.MAX_ITERATIONS})
+    assert not sm.fit_is_current({"sfh_model": "delayed", "max_iterations": sm.MAX_ITERATIONS - 1})
+    assert not sm.fit_is_current({"sfh_model": "delayed"})
+    assert sm.SFH_MODEL == "delayed"
+
+
+def test_save_and_load_fit_round_trip_the_sfh_model(tmp_path):
+    """save_fit writes sfh_model on every fit, even when the caller's metadata lacks it."""
+    path = str(tmp_path / "round_trip.h5")
+    posterior = pd.DataFrame({"log_age": [0.1, 0.2]})
+    metadata = {"converged": True, "run_time": 5.0, "n_iterations": 10, "max_iterations": sm.MAX_ITERATIONS}
+    sm.save_fit(path, posterior, np.zeros((2, len(sm.SPECTRAL_DIMS))), metadata)
+
+    loaded_posterior, loaded_metadata = sm.load_fit(path)
+
+    assert loaded_metadata["sfh_model"] == sm.SFH_MODEL
+    assert sm.fit_is_current(loaded_metadata)
+    assert list(loaded_posterior["log_age"]) == [0.1, 0.2]
+    assert "sfh_model" not in metadata    # the caller's dict is left alone
+
+
+def test_posterior_labels_of_midpoint_cubes_give_every_training_label():
+    """Three midpoint samples: one row each, every TRAINING_LABELS column finite and as the prior maps it."""
+    cubes = np.full((3, len(sm.SPECTRAL_DIMS)), 0.5)
+    posterior = sm.posterior_labels(cubes, 0.1)
+
+    assert len(posterior) == 3
+    assert list(posterior.columns[:len(sm.TRAINING_LABELS)]) == sm.TRAINING_LABELS
+    for column in (*sm.TRAINING_LABELS, "veldisp", "noise_scale", "model_r"):
+        assert np.isfinite(posterior[column]).all(), column
+    _, drawn, _ = sm.spectral_components(cubes[0], 0.1)
+    for label in ("redshift", "age", "tau", "metallicity", "av_ism", "tau_bc", "logU", "log_mass_formed"):
+        assert posterior[label].iloc[0] == drawn[label], label
+    fractions = posterior[["f_young", "f_mid", "f_old"]].sum(axis=1)
+    assert np.allclose(fractions, 1.0)
+
+
 def test_fit_and_save_skips_existing_output(tmp_path):
     """A job whose .h5 file already exists is skipped and its run time is read from the file."""
     job, _ = mock_job("skip", np.random.default_rng(11))
@@ -625,7 +667,6 @@ def test_save_fit_failure_leaves_no_file_at_the_final_path(tmp_path):
     assert not os.path.exists(path)
 
 
-@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_fit_and_save_refits_a_truncated_output_file(tmp_path):
     """An unreadable .h5 left by an interrupted run is not counted as done: the job is fitted again."""
     job, _ = mock_job("truncated", np.random.default_rng(12))
@@ -746,7 +787,6 @@ def test_photometric_components_are_the_training_prior_without_the_redshift():
     assert "veldisp" not in bagpipes_components
 
 
-@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_photometric_posterior_labels_shift_the_masses_by_the_offset():
     """A galaxy 1.5 mag fainter than its model (tiny errors) gets log_mstar lower by 0.4 x 1.5 = 0.6 dex."""
     cube = np.full(len(sm.PHOTOMETRIC_DIMS), 0.5)
@@ -759,11 +799,11 @@ def test_photometric_posterior_labels_shift_the_masses_by_the_offset():
 
     assert np.isclose(posterior["magnitude_offset"].iloc[0], offset, atol=1e-3)
     assert np.isclose(posterior["log_mstar"].iloc[0], unscaled_log_mass - 0.4 * offset, atol=1e-3)
-    for column in ("mw_age", "Z_fin", "f_old", "log_sfr", "frac_bin_00", "model_r"):
+    assert np.isclose(posterior["log_mass_formed"].iloc[0], sm.LOG_MASS_FORMED - 0.4 * offset, atol=1e-3)
+    for column in (*sm.TRAINING_LABELS, "model_r", "magnitude_offset"):
         assert column in posterior.columns, column
 
 
-@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_photometric_posterior_labels_draw_the_offset_from_its_conditional():
     """Repeated copies of one point get offsets with the analytic mean and width (errors 0.1 mag, 12 bands)."""
     n_copies = 200
@@ -809,7 +849,6 @@ def test_fit_photometry_smoke_run_on_a_noiseless_mock(tmp_path):
 # =============================================================================
 # Job files and the calibration test
 # =============================================================================
-@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_export_and_load_job_round_trip(tmp_path):
     job, _ = mock_job("round_trip", np.random.default_rng(13))
     path = sm.export_job(job, str(tmp_path / "jobs"))    # the folder does not exist yet
@@ -848,7 +887,6 @@ def test_export_and_load_photometry_job_round_trip(tmp_path):
     assert "spectrum" not in loaded
 
 
-@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_job_file_written_before_kinds_loads_as_a_spectrum_job(tmp_path):
     """Job files exported before the photometric fits existed have no kind: they are spectral jobs."""
     job, _ = mock_job("old_job", np.random.default_rng(31))
@@ -930,7 +968,6 @@ def test_fit_and_save_never_replaces_a_fit_of_the_other_kind(tmp_path, fake_fitt
 
 
 @pytest.mark.skipif(not multinest_available(), reason="pymultinest cannot import (LD_LIBRARY_PATH?)")
-@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_fit_and_save_photometry_smoke_run(tmp_path):
     """A short MultiNest run on a photometry job is saved with rescaled labels, the offsets and the kind."""
     job = photometry_job("phot_smoke", np.random.default_rng(33))
@@ -939,25 +976,57 @@ def test_fit_and_save_photometry_smoke_run(tmp_path):
     assert summary["status"] == "fitted", summary["error"]
     posterior, metadata = sm.load_fit(str(tmp_path / "phot_smoke.h5"))
     assert metadata["kind"] == "photometry"
-    for column in ("mw_age", "Z_fin", "f_old", "log_mstar", "log_sfr", "magnitude_offset"):
+    for column in (*sm.TRAINING_LABELS, "magnitude_offset"):
         assert column in posterior.columns, column
         assert np.isfinite(posterior[column]).all(), column
+    assert metadata["sfh_model"] == "delayed"
 
 
-@pytest.mark.xfail(reason="Task 2", strict=True)
-def test_calibration_cubes_are_deterministic_and_use_every_sfh_branch():
-    """The rare burst branch has probability P_BURST per draw, so some seeds miss it in 60 draws; seed 0 does not."""
+def test_fit_and_save_never_reads_or_replaces_a_fit_of_an_older_sfh_model(tmp_path, fake_fitters):
+    """A same-kind file without sfh_model (a 16-bin fit) is neither skipped as done nor overwritten."""
+    path = str(tmp_path / "old_model.h5")
+    posterior = pd.DataFrame({"mw_age": [1.0, 2.0]})
+    metadata = {"converged": True, "run_time": 5.0, "n_iterations": 10, "log_evidence": -1.0}
+    sm.save_fit(path, posterior, np.zeros((2, len(sm.SPECTRAL_DIMS))), metadata)
+    with h5py.File(path, "a") as stored:
+        del stored.attrs["sfh_model"]    # what every fit written before the delayed-tau model looks like
+    job, _ = mock_job("old_model", np.random.default_rng(35))
+
+    summary = sm.fit_and_save(job, str(tmp_path), max_iterations=10, n_live_points=25)
+
+    assert summary["status"] == "failed"
+    assert "superseded" in summary["error"]
+    assert fake_fitters == []
+    _, stored_metadata = sm.load_fit(path)
+    assert "sfh_model" not in stored_metadata    # the old file is untouched
+
+
+def test_calibration_cubes_are_deterministic_and_fill_the_spectral_cube():
     first = sm.draw_calibration_cubes(60, np.random.default_rng(0))
     second = sm.draw_calibration_cubes(60, np.random.default_rng(0))
     assert np.array_equal(first, second)
     assert first.shape == (60, len(sm.SPECTRAL_DIMS))
-
-    sfh_draws = first[:, sm.SPECTRAL_DIMS.index("sfh_type")]
-    branches = {sm.choose_sfh_branch(draw) for draw in sfh_draws}
-    assert branches == set(sm.SFH_BRANCHES)
+    assert np.all((first >= 0) & (first < 1))
 
 
-@pytest.mark.xfail(reason="Task 2", strict=True)
+def test_calibration_labels_are_the_log_parameters_and_the_stellar_mass():
+    assert sm.CALIBRATION_LABELS == ["log_age", "log_tau", "log_metallicity", "log_mstar"]
+    assert len(sm.SPECTRAL_DIMS) == 8 and len(sm.PHOTOMETRIC_DIMS) == 6
+
+
+def test_calibration_coverage_runs_on_the_calibration_labels():
+    """Truth = one posterior sample: every calibration label has one usable mock and a finite coverage."""
+    cubes = np.random.default_rng(36).random((3, len(sm.SPECTRAL_DIMS)))
+    posterior = sm.posterior_labels(cubes, 0.1)
+    truth = posterior.iloc[1]
+
+    table = sm.calibration_coverage({"calib_000": posterior}, {"calib_000": truth}, sm.CALIBRATION_LABELS)
+
+    assert len(table) == len(sm.CALIBRATION_LABELS) * len(sm.CALIBRATION_LEVELS)
+    assert (table["n_jobs"] == 1).all()
+    assert table["coverage"].notna().all()
+
+
 def test_draw_calibration_mocks_ids_count_and_seed():
     wavelength_vacuum = 10 ** np.arange(np.log10(3700), np.log10(9300), 1e-4)
     template = sm.prepare_spectrum(wavelength_vacuum, np.ones_like(wavelength_vacuum),
@@ -1026,7 +1095,6 @@ def run_script(*arguments):
                           capture_output=True, text=True, timeout=600)
 
 
-@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_run_script_fits_an_exported_job_and_logs_it(tmp_path):
     job, _ = mock_job("calib_smoke", np.random.default_rng(14))
     sm.export_job(job, str(tmp_path / "jobs"))
@@ -1043,7 +1111,6 @@ def test_run_script_fits_an_exported_job_and_logs_it(tmp_path):
 
 
 @pytest.mark.skipif(not multinest_available(), reason="pymultinest cannot import (LD_LIBRARY_PATH?)")
-@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_run_script_fits_an_exported_photometry_job(tmp_path):
     sm.export_job(photometry_job("calib_000", np.random.default_rng(34)), str(tmp_path / "jobs"))
 
@@ -1055,7 +1122,6 @@ def test_run_script_fits_an_exported_photometry_job(tmp_path):
     assert metadata["kind"] == "photometry"
 
 
-@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_run_script_status_counts_done_and_pending_jobs(tmp_path):
     for job_id in ("calib_000", "calib_001", "galaxy_1"):
         sm.export_job(mock_job(job_id, np.random.default_rng(15))[0], str(tmp_path / "jobs"))
@@ -1074,7 +1140,6 @@ def test_run_script_interleaves_calibration_mocks_and_galaxies():
     assert order == ["calib_000", "galaxy_a", "calib_001", "galaxy_b", "calib_002"]
 
 
-@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_run_script_rejects_too_long_output_path_and_bad_task_index(tmp_path):
     sm.export_job(mock_job("calib_000", np.random.default_rng(16))[0], str(tmp_path / "jobs"))
 
@@ -1120,7 +1185,6 @@ def test_physical_core_count_is_none_without_topology_fields():
     assert run_spectral_fits.count_physical_cores("", {0}) is None
 
 
-@pytest.mark.xfail(reason="Task 2", strict=True)
 def test_slurm_tasks_write_one_log_file_each(tmp_path):
     for job_id in ("calib_000", "calib_001"):
         sm.export_job(mock_job(job_id, np.random.default_rng(17))[0], str(tmp_path / "jobs"))

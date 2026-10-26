@@ -5,6 +5,8 @@ metallicities (for Gallazzi et al. 2005), the Speagle et al. (2014) main sequenc
 literature scaling relations.
 """
 
+import functools
+
 import bagpipes as pipes
 import numpy as np
 import pandas as pd
@@ -266,43 +268,87 @@ def light_weighted_log_mean(values, luminosities):
     return np.log10(np.sum(luminosities * values) / np.sum(luminosities))
 
 
+@functools.lru_cache(maxsize=1)
+def ssp_r_band_luminosities():
+    """r-band luminosity per unit formed mass of every Bagpipes SSP: grid metallicity x Bagpipes age bin.
+
+    Built once from a dust-free, nebular-free model near rest frame (LIGHT_WEIGHT_REDSHIFT): its stellar grid
+    holds each SSP spectrum per M_sun formed on Bagpipes' 0.1-dex age bins (config.age_sampling), and its r
+    filter measures them exactly as it measures the model's own spectrum.
+    Inputs: none.
+    Returns: array of shape (len(pipes.config.metallicities), len(pipes.config.age_sampling)): filter-averaged
+             F_lambda per M_sun formed, in units common to every entry (only ratios are used).
+    """
+    r_filter = [sm.FILTER_FILES[sm.BANDS.index("r")]]
+    any_sfh = {"age": 1.0, "tau": 1.0, "massformed": sm.LOG_MASS_FORMED, "metallicity": 1.0}
+    any_population = {"redshift": LIGHT_WEIGHT_REDSHIFT, "delayed": any_sfh}
+    model = pipes.model_galaxy(any_population, filt_list=r_filter)
+    n_metallicities, n_ages = model.stellar.grid.shape[1:]
+    luminosities = np.zeros((n_metallicities, n_ages))
+    for metallicity_index in range(n_metallicities):
+        for age_index in range(n_ages):
+            ssp_spectrum = model.stellar.grid[:, metallicity_index, age_index]
+            photometry = model.filter_set.get_photometry(ssp_spectrum, LIGHT_WEIGHT_REDSHIFT)
+            # Bagpipes returns a 0-d array for a one-filter list, so promote it before indexing
+            luminosities[metallicity_index, age_index] = np.atleast_1d(photometry)[0]
+    return luminosities
+
+
+def r_band_light_per_age_step(star_formation, metallicity):
+    """r-band light of each age step of a Bagpipes SFH: formed mass x SSP r luminosity per unit mass.
+
+    It follows Bagpipes' own model: the SSP of a step is that of the 0.1-dex age bin it falls in (Bagpipes
+    histograms the SFH into config.age_bins), interpolated linearly in Z between the grid metallicities and
+    clamped at the ends (chemical_enrichment_history.delta). So the steps add up to the dust-free model's
+    r flux.
+    Inputs: star_formation: a Bagpipes star_formation_history (ages [yr], age_widths [yr], sfh [M_sun/yr]);
+            metallicity: the single metallicity [Z/Z_sun].
+    Returns: (ages [yr], r-band light per step [ssp_r_band_luminosities units x M_sun]), arrays of
+             len(star_formation.ages).
+    """
+    formed_mass = star_formation.sfh * star_formation.age_widths
+
+    # Linear interpolation is linear in the tabulated values: interpolating each unit vector gives the weights
+    grid_metallicities = pipes.config.metallicities
+    metallicity_weights = np.zeros(len(grid_metallicities))
+    for grid_index, unit_vector in enumerate(np.eye(len(grid_metallicities))):
+        metallicity_weights[grid_index] = np.interp(metallicity, grid_metallicities, unit_vector)
+    luminosity_per_age_bin = metallicity_weights @ ssp_r_band_luminosities()
+
+    # Steps past the last bin edge (the age of the Universe today) hold no mass: every age is below it
+    age_bin = np.searchsorted(pipes.config.age_bins, star_formation.ages, side="right") - 1
+    age_bin = np.clip(age_bin, 0, len(luminosity_per_age_bin) - 1)
+    return star_formation.ages, formed_mass * luminosity_per_age_bin[age_bin]
+
+
 def light_weighted_age_and_metallicity(unit_cube_samples, redshift, n_samples=N_LIGHT_WEIGHT_SAMPLES):
     """r-band light-weighted log age and log metallicity of posterior samples (Gallazzi et al. 2005 definition).
 
-    Each existing age bin is modelled alone (dust-free, no nebular emission, near rest frame) to get its r-band
-    luminosity L_i. Gallazzi et al. (2005, section 3.1) define the r-band light-weighted age as the linear mean
-    t_r = sum(L_i t_i) / sum(L_i), quoted as log10(t_r), and one light-weighted Z per model; so both outputs are
-    the log of a linear weighted mean (t_i = the bin's linear mid-age [yr], Z_i in Z/Z_sun). The mid-age
-    approximation costs <~0.05 dex (mostly in young bins), and the S-PLUS r filter stands in for SDSS r
-    (negligible difference).
-    Inputs: unit-cube samples; the galaxy redshift (sets the bins). Returns: DataFrame with log_age_light [log yr]
-            and log_metallicity_light [log Z/Z_sun], one row per kept sample.
+    Gallazzi et al. (2005, section 3.1) define the r-band light-weighted age as the linear mean
+    t_r = sum(L_i t_i) / sum(L_i), quoted as log10(t_r). Here i runs over Bagpipes' SFH age steps (0.0025 dex)
+    and L_i is the step's formed mass times the SSP r-band luminosity per unit mass at its age and the sample's
+    metallicity (r_band_light_per_age_step; dust-free, without nebular emission). With a single metallicity the
+    light-weighted Z is that metallicity. The S-PLUS r filter stands in for SDSS r (negligible difference).
+    Inputs: unit_cube_samples: unit-cube posterior samples (dimensionless, shape (n, len(SPECTRAL_DIMS)));
+            redshift: the galaxy redshift (dimensionless; it sets the oldest allowed age);
+            n_samples: at most this many evenly spaced samples are used (count).
+    Returns: DataFrame with log_age_light [log yr] and log_metallicity_light [log Z/Z_sun], one row per kept
+             sample.
     """
-    r_filter = [sm.FILTER_FILES[sm.BANDS.index("r")]]
     kept = evenly_spaced_rows(unit_cube_samples, n_samples)
-    model = None
+    star_formation = None
     rows = []
     for cube in kept:
-        components, _, _ = sm.spectral_components(cube, redshift)
-        fractions, metallicities, edges = sm.bins_from_components(components)
-        luminosities = np.zeros(len(fractions))
-        for bin_index in range(len(fractions)):
-            single_bin = {
-                "redshift": LIGHT_WEIGHT_REDSHIFT,
-                "constant": {"age_min": edges[bin_index], "age_max": edges[bin_index + 1],
-                             "massformed": sm.LOG_MASS_FORMED + np.log10(fractions[bin_index]),
-                             "metallicity": metallicities[bin_index]},
-            }
-            if model is None:
-                model = pipes.model_galaxy(single_bin, filt_list=r_filter)
-            else:
-                model.update(single_bin)
-            # Bagpipes returns a 0-d array for a one-filter list, so promote it before indexing
-            luminosities[bin_index] = np.atleast_1d(model.photometry)[0]
-        mid_ages = (edges[:-1] + edges[1:]) / 2 * sm.GYR_TO_YEARS
-        rows.append({"log_age_light": light_weighted_log_mean(mid_ages, luminosities),
-                     "log_metallicity_light": light_weighted_log_mean(metallicities, luminosities)})
-    return pd.DataFrame(rows)
+        components, drawn, _ = sm.spectral_components(cube, redshift)
+        # One SFH object updated in place; only the SFH is needed, not a full model
+        if star_formation is None:
+            star_formation = pipes.models.star_formation_history(components)
+        else:
+            star_formation.update(components)
+        ages, light = r_band_light_per_age_step(star_formation, drawn["metallicity"])
+        rows.append({"log_age_light": light_weighted_log_mean(ages, light),
+                     "log_metallicity_light": np.log10(drawn["metallicity"])})
+    return pd.DataFrame(rows, columns=["log_age_light", "log_metallicity_light"])
 
 
 # =============================================================================

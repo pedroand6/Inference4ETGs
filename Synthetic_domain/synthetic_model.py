@@ -761,8 +761,9 @@ def training_unit_vector(cube_by_name):
 def spectral_components(cube, redshift):
     """Bagpipes components, drawn parameters and noise scale for one spectral-fit unit-cube point.
 
-    The SFH, metallicity, dust and nebular part is the training prior (components) at the fixed
-    spectroscopic redshift; veldisp and noise_scale are the spectral nuisance parameters.
+    The delayed-tau SFH, the single metallicity, dust and nebular part is the training prior (components) at
+    the fixed spectroscopic redshift, which also sets the oldest allowed age; veldisp and noise_scale are the
+    spectral nuisance parameters.
     Inputs: cube: unit-cube values (dimensionless, in [0, 1)) ordered as SPECTRAL_DIMS;
             redshift: spectroscopic redshift (dimensionless).
     Returns: (bagpipes_components, drawn, noise_scale). The components are as in components() plus
@@ -809,6 +810,9 @@ MAX_ITERATIONS = 50000           # MultiNest iteration limit of a production fit
 OFFSET_DRAW_SEED = 0             # seed of the per-sample magnitude offsets of a photometric fit's labels
 SPECTRUM_JOB = "spectrum"        # job kind of a spectral fit; also every job or fit file stored without a kind
 PHOTOMETRY_JOB = "photometry"    # job kind of a photometric fit (spec amendment A)
+# SFH model of every fit this code writes, stored in each fit file: fits made under an earlier model
+# (the 16-bin non-parametric SFH, whose files have no sfh_model) must never be read as current ones
+SFH_MODEL = "delayed"
 
 # The photometric fit (spec amendment A) samples the training prior at the spectroscopic redshift and nothing
 # else: its brightness offset is marginalised analytically, and the simulator has no error multiplier
@@ -953,9 +957,8 @@ def posterior_labels(unit_cube_samples, redshift):
     model_r is the model r magnitude for 10^10 M_sun formed, used later to rescale mass-like labels.
     Inputs: unit_cube_samples: unit-cube points (dimensionless, shape (n_samples, len(SPECTRAL_DIMS)));
             redshift: spectroscopic redshift (dimensionless).
-    Returns: DataFrame with one row per kept sample: the drawn parameters (veldisp [km/s], Z_fin [Z/Z_sun], ...),
-             noise_scale (dimensionless), SUMMARY_LABEL_COLUMNS, BIN_LABEL_COLUMNS, mw_metallicity (Z/Z_sun)
-             and model_r [mag].
+    Returns: DataFrame with one row per kept sample: the TRAINING_LABELS (mass-like ones for 10^10 M_sun
+             formed), then veldisp [km/s], noise_scale (dimensionless) and model_r [mag].
     """
     # 1. Thin the samples evenly: neighbouring MultiNest samples are nearly identical
     kept_samples = thinned_samples(unit_cube_samples)
@@ -995,18 +998,19 @@ def updated_photometry_model(model, bagpipes_components):
 
 
 def sample_label_row(model, bagpipes_components, drawn):
-    """Labels of one posterior sample, read from its photometry model.
+    """Labels of one posterior sample, read from its photometry model as the training set labels a model.
 
     Inputs: model: photometry model_galaxy already at bagpipes_components; bagpipes_components: dict as from
-            components(); drawn: the drawn parameters to put first in the row (dict).
-    Returns: dict: drawn, SUMMARY_LABEL_COLUMNS, BIN_LABEL_COLUMNS, mw_metallicity (Z/Z_sun) and model_r
+            components(), the point the model is at (not read: the labels come from drawn and the model);
+            drawn: dict from components() with the DRAWN_LABELS, plus any extra parameters of the fit
+            (veldisp [km/s], noise_scale).
+    Returns: dict: the TRAINING_LABELS in order (summary_labels), then the extra drawn parameters, then model_r
              [mag], the model r magnitude for 10^10 M_sun formed. Mass-like labels are for that mass.
     """
-    fractions, metallicities, edges = bins_from_components(bagpipes_components)
-    row = dict(drawn)
-    row.update(summary_labels(model.sfh))
-    row.update(bin_labels(fractions, metallicities, edges))
-    row["mw_metallicity"] = mass_weighted_metallicity(fractions, metallicities)
+    row = summary_labels(model.sfh, drawn)
+    for key, value in drawn.items():
+        if key not in row:
+            row[key] = value
     row["model_r"] = ab_magnitudes(model.photometry)[BANDS.index("r")]
     return row
 
@@ -1088,7 +1092,7 @@ def fit_photometry(magnitudes, errors, redshift, output_basename, max_iterations
     if detected.sum() < MIN_DETECTED_BANDS:
         raise ValueError(f"{detected.sum()} detected bands, fewer than MIN_DETECTED_BANDS = {MIN_DETECTED_BANDS}")
 
-    # 2. Bagpipes model built once with the S-PLUS filters; the redshift, so the number of bins, never changes
+    # 2. Bagpipes model built once with the S-PLUS filters; every point has the same component set
     midpoint_cube = np.full(len(PHOTOMETRIC_DIMS), MIDPOINT_DRAW)
     starting_components, _ = photometric_components(midpoint_cube, redshift)
     model = updated_photometry_model(None, starting_components)
@@ -1122,9 +1126,9 @@ def photometric_posterior_labels(unit_cube_samples, redshift, magnitudes, errors
     Inputs: unit_cube_samples: unit-cube points (dimensionless), shape (n_samples, len(PHOTOMETRIC_DIMS));
             redshift: spectroscopic redshift (dimensionless); magnitudes, errors: [mag] the fitted photometry,
             as given to fit_photometry; rng: numpy Generator.
-    Returns: DataFrame with one row per kept sample (at most MAX_POSTERIOR_SAMPLES): the drawn parameters,
-             SUMMARY_LABEL_COLUMNS and BIN_LABEL_COLUMNS (mass-like ones already rescaled), mw_metallicity
-             (Z/Z_sun), model_r [mag, for 10^10 M_sun formed] and magnitude_offset [mag, observed minus model].
+    Returns: DataFrame with one row per kept sample (at most MAX_POSTERIOR_SAMPLES): the TRAINING_LABELS
+             (MASS_DEPENDENT_LABELS already rescaled), model_r [mag, for 10^10 M_sun formed] and
+             magnitude_offset [mag, observed minus model].
     """
     magnitudes = np.asarray(magnitudes, dtype=float)
     errors = np.asarray(errors, dtype=float)
@@ -1186,21 +1190,25 @@ def save_fit(path, posterior, unit_cube_samples, metadata):
     """Write posterior labels, unit-cube samples and fit metadata to one HDF5 file, all or nothing.
 
     The file is written as path + ".tmp" and renamed to path only once complete, so an interrupted
-    or failed write never leaves a partial file at path (which would count as a finished job).
+    or failed write never leaves a partial file at path (which would count as a finished job). Every file
+    also records sfh_model = SFH_MODEL, so fits of an earlier SFH model can be told apart (fit_is_current).
     Inputs: path: output file path (str); posterior: DataFrame of labels, one column per label;
             unit_cube_samples: unit-cube points (dimensionless, shape (n_samples, n_dims), n_dims that of the
             fit's kind: len(SPECTRAL_DIMS) or len(PHOTOMETRIC_DIMS));
             metadata: dict of scalars (converged, run_time [s], n_iterations, max_iterations, log_evidence, redshift,
             kind: SPECTRUM_JOB or PHOTOMETRY_JOB; files written before kinds existed have none and are spectral).
+            The caller's dict is not changed.
     Returns: None. An existing file at path is replaced.
     """
+    stored_metadata = dict(metadata)
+    stored_metadata["sfh_model"] = SFH_MODEL
     temporary_path = path + ".tmp"
     with h5py.File(temporary_path, "w") as output:
         output.create_dataset("unit_cube_samples", data=unit_cube_samples)
         labels_group = output.create_group("posterior")
         for column in posterior.columns:
             labels_group.create_dataset(column, data=posterior[column].to_numpy(dtype=float))
-        for key, value in metadata.items():
+        for key, value in stored_metadata.items():
             output.attrs[key] = value
     os.replace(temporary_path, path)
 
@@ -1209,7 +1217,9 @@ def load_fit(path):
     """Read a file written by save_fit.
 
     Inputs: path: file path (str).
-    Returns: (posterior DataFrame with one column per label, metadata dict with the attributes save_fit wrote).
+    Returns: (posterior DataFrame with one column per label (in alphabetical order, as HDF5 stores them),
+             metadata dict with the attributes save_fit wrote, sfh_model included; files written before the
+             delayed-tau model have none).
     """
     with h5py.File(path, "r") as source:
         columns = {}
@@ -1220,6 +1230,19 @@ def load_fit(path):
             # HDF5 returns numpy scalars; .item() gives back the plain Python value
             metadata[key] = value.item() if hasattr(value, "item") else value
     return pd.DataFrame(columns), metadata
+
+
+def fit_is_current(metadata):
+    """Whether a stored fit belongs to the current production run: SFH_MODEL and the full iteration limit.
+
+    Fits that fail this (16-bin fits without sfh_model, pilot runs with a smaller limit) are moved to
+    superseded/ by spectroscopic_reference.ipynb and never read as results.
+    Inputs: metadata: dict as load_fit returns it.
+    Returns: bool: True only when sfh_model == SFH_MODEL and max_iterations >= MAX_ITERATIONS.
+    """
+    same_model = metadata.get("sfh_model") == SFH_MODEL
+    full_run = metadata.get("max_iterations", 0) >= MAX_ITERATIONS
+    return same_model and full_run
 
 
 def job_kind(job):
@@ -1265,11 +1288,12 @@ JOB_FITTERS = {SPECTRUM_JOB: fit_spectrum_job, PHOTOMETRY_JOB: fit_photometry_jo
 def fit_and_save(job, output_directory, max_iterations, n_live_points=N_LIVE_POINTS):
     """Fit one job and save <output_directory>/<job_id>.h5. Never raises.
 
-    Skips jobs whose readable file already exists, so a batch can be re-run with more galaxies. An
-    unreadable file does not count as finished: the job is fitted again and the file replaced. A readable
-    file of the other kind is never replaced (job ids are specobjids, shared by the spectral and photometric
-    fits of one galaxy): the job fails instead. A failed fit comes back with status "failed" and the error
-    text instead of an exception.
+    Skips jobs whose readable file of the same kind and SFH_MODEL already exists, so a batch can be re-run with
+    more galaxies. An unreadable file does not count as finished: the job is fitted again and the file replaced.
+    A readable file of the other kind is never replaced (job ids are specobjids, shared by the spectral and
+    photometric fits of one galaxy), and neither is a fit of an earlier SFH model (the only copy of that result,
+    to be moved to superseded/): the job fails instead. A failed fit comes back with status "failed" and the
+    error text instead of an exception.
     Inputs: job: dict with job_id (str), redshift (dimensionless) and kind (SPECTRUM_JOB when absent); a
             spectrum job holds spectrum (dict as from prepare_spectrum), a photometry job magnitudes and
             errors ([mag], 12 in BANDS order); output_directory: folder for the .h5 file and the MultiNest
@@ -1284,16 +1308,23 @@ def fit_and_save(job, output_directory, max_iterations, n_live_points=N_LIVE_POI
                "run_time": None, "n_iterations": None, "error": None}
 
     # 2. Skip finished jobs; their run details come from the file. Any failure to read it (damaged,
-    # truncated or missing fields) means the job is not finished, so it is fitted again below
+    # truncated or missing fields) means the job is not finished, so it is fitted again below. A readable fit of
+    # an earlier SFH model is neither skipped (it is not a result of this model) nor overwritten (its only copy)
     stored_kind = None
+    stored_model = None
     if os.path.exists(output_path):
         try:
             _, metadata = load_fit(output_path)
             stored_details = {"converged": metadata["converged"], "run_time": metadata["run_time"],
                               "n_iterations": metadata["n_iterations"]}
             stored_kind = metadata.get("kind", SPECTRUM_JOB)
+            stored_model = metadata.get("sfh_model")
         except Exception:
             pass
+    if stored_kind == kind and stored_model != SFH_MODEL:
+        summary.update(status="failed", error=f"{output_path} holds a fit of an earlier SFH model "
+                                              f"({stored_model}, not {SFH_MODEL}): move it to superseded/")
+        return summary
     if stored_kind == kind:
         summary.update(status="skipped", **stored_details)
         return summary
@@ -1337,7 +1368,8 @@ def summarise_posterior(posterior, columns):
 # =============================================================================
 N_CALIBRATION_MOCKS = 33         # mocks drawn from the prior to test the fitter (count)
 MIN_COVERAGE_95 = 0.85           # smallest acceptable share of truths inside the 95% interval (fraction)
-CALIBRATION_LABELS = ["mw_age", "Z_fin", "f_old"]   # labels the calibration test checks
+# Labels the calibration test checks; age, tau and Z in log, because the prior spans several decades of each
+CALIBRATION_LABELS = ["log_age", "log_tau", "log_metallicity", "log_mstar"]
 CALIBRATION_LEVELS = (0.68, 0.95)                   # central-interval probabilities reported (fractions)
 CALIBRATION_ID_PREFIX = "calib_"                    # job ids are calib_000, calib_001, ...
 PERCENT = 100                    # percent per unit fraction
@@ -1391,7 +1423,8 @@ def load_job(path):
 def draw_calibration_cubes(n_mocks, rng):
     """Unit-cube points of the calibration mocks: uniform over every SPECTRAL_DIMS coordinate.
 
-    sfh_type is drawn too, so the mocks follow the training prior and use all three SFH branches.
+    Uniform on the unit cube is the training prior at the template's redshift (log-uniform age, tau and Z).
+    draw_calibration_mocks calls this first on its rng, so the cubes can be redrawn from the same seed.
     Inputs: n_mocks: number of points (count); rng: numpy Generator.
     Returns: array of shape (n_mocks, len(SPECTRAL_DIMS)), values in [0, 1) (dimensionless).
     """
@@ -1404,7 +1437,8 @@ def draw_calibration_mocks(n_mocks, templates, rng):
     Inputs: n_mocks: number of mocks (count); templates: list of (spectrum dict from prepare_spectrum,
             redshift (dimensionless)); rng: numpy Generator.
     Returns: (jobs, truths): jobs is a list of dicts as fit_and_save takes (job_id calib_000, calib_001, ...);
-             truths maps each job_id to its true labels (Series, as posterior_labels columns).
+             truths maps each job_id to its true labels (Series, as posterior_labels columns: the
+             TRAINING_LABELS, veldisp, noise_scale and model_r).
     """
     cubes = draw_calibration_cubes(n_mocks, rng)
     jobs = []

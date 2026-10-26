@@ -124,17 +124,61 @@ def test_index_comparison_p_uses_replicated_data_with_observational_noise():
     assert abs(comparison["D4000_n_p"] - 0.32) < 0.03
 
 
-def test_light_weighted_age_of_a_single_populated_bin_lies_in_that_bin():
+def delayed_cube(age, tau, redshift):
+    """Midpoint SPECTRAL_DIMS cube whose age [Gyr] and tau [Gyr] are the given ones at this redshift."""
     cube = np.full(len(sm.SPECTRAL_DIMS), 0.5)
-    cube[sm.SPECTRAL_DIMS.index("sfh_type")] = 0.25            # Dirichlet branch
-    for dimension_index, dimension in enumerate(sm.SPECTRAL_DIMS):
-        if dimension.startswith("dir"):
-            cube[dimension_index] = 1e-9                     # almost no mass in every bin ...
-    cube[sm.SPECTRAL_DIMS.index("dir10")] = 1 - 1e-9          # ... except bin 10
+    log_age_range = np.log10(sm.maximum_age(redshift)) - np.log10(sm.AGE_MIN)
+    cube[sm.SPECTRAL_DIMS.index("log_age_fraction")] = (np.log10(age) - np.log10(sm.AGE_MIN)) / log_age_range
+    log_tau_range = np.log10(sm.TAU_RANGE[1]) - np.log10(sm.TAU_RANGE[0])
+    cube[sm.SPECTRAL_DIMS.index("log_tau")] = (np.log10(tau) - np.log10(sm.TAU_RANGE[0])) / log_tau_range
+    _, drawn, _ = sm.spectral_components(cube, redshift)
+    assert np.isclose(drawn["age"], age) and np.isclose(drawn["tau"], tau)
+    return cube
+
+
+def test_light_weighted_age_of_a_short_burst_is_its_mass_weighted_age():
+    """tau = 0.01 Gyr, age = 5 Gyr: all stars are ~5 Gyr old, so light and mass weighting agree."""
+    tau = 0.01
+    cube = delayed_cube(5.0, tau, 0.05)
     result = sv.light_weighted_age_and_metallicity(cube[np.newaxis, :], 0.05, n_samples=1)
-    edges = sm.bin_edges(0.05)
-    log_age = result["log_age_light"].iloc[0]
-    assert np.log10(edges[10] * sm.GYR_TO_YEARS) - 0.1 <= log_age <= np.log10(edges[11] * sm.GYR_TO_YEARS) + 0.1
+    expected = np.log10(5e9 - 2 * tau * sm.GYR_TO_YEARS)
+    assert abs(result["log_age_light"].iloc[0] - expected) < 0.05
+
+
+def test_light_weighted_age_of_an_extended_sfh_is_below_its_mass_weighted_age():
+    """Young stars give more r light per unit mass: the light-weighted age is below the mass-weighted one."""
+    cube = delayed_cube(10.0, 20.0, 0.05)
+    result = sv.light_weighted_age_and_metallicity(cube[np.newaxis, :], 0.05, n_samples=1)
+    log_mass_weighted_age = np.log10(sm.delayed_mass_weighted_age(10.0, 20.0) * sm.GYR_TO_YEARS)
+    assert result["log_age_light"].iloc[0] < log_mass_weighted_age - 0.05
+
+
+def test_light_weighted_metallicity_is_the_single_metallicity():
+    cubes = np.random.default_rng(5).random((3, len(sm.SPECTRAL_DIMS)))
+    result = sv.light_weighted_age_and_metallicity(cubes, 0.1, n_samples=3)
+    assert list(result.columns) == ["log_age_light", "log_metallicity_light"]
+    for row_index, cube in enumerate(cubes):
+        _, drawn, _ = sm.spectral_components(cube, 0.1)
+        assert result["log_metallicity_light"].iloc[row_index] == np.log10(drawn["metallicity"])
+        assert np.isfinite(result["log_age_light"].iloc[row_index])
+
+
+@pytest.mark.parametrize("age, tau, metallicity", [(5.0, 1.0, 0.3), (0.3, 20.0, 2.0)])
+def test_r_band_light_per_age_step_adds_up_to_the_bagpipes_r_band_flux(age, tau, metallicity):
+    """The age-step weights are Bagpipes' own r light: their sum is the dust-free model's r flux (one scale)."""
+    r_filter = [sm.FILTER_FILES[sm.BANDS.index("r")]]
+    sfh = {"age": age, "tau": tau, "massformed": sm.LOG_MASS_FORMED, "metallicity": metallicity}
+    model = pipes.model_galaxy({"redshift": sv.LIGHT_WEIGHT_REDSHIFT, "delayed": sfh}, filt_list=r_filter)
+    _, light = sv.r_band_light_per_age_step(model.sfh, metallicity)
+
+    reference_sfh = {"age": 2.0, "tau": 2.0, "massformed": sm.LOG_MASS_FORMED, "metallicity": 1.0}
+    reference = pipes.model_galaxy({"redshift": sv.LIGHT_WEIGHT_REDSHIFT, "delayed": reference_sfh},
+                                   filt_list=r_filter)
+    _, reference_light = sv.r_band_light_per_age_step(reference.sfh, 1.0)
+
+    model_ratio = np.sum(light) / np.sum(reference_light)
+    flux_ratio = np.atleast_1d(model.photometry)[0] / np.atleast_1d(reference.photometry)[0]
+    assert np.isclose(model_ratio, flux_ratio, rtol=1e-6)
 
 
 def test_light_weighted_log_mean_is_log_of_the_mean_not_mean_of_the_log():
