@@ -3,6 +3,13 @@
 Retrieved on 2026-10-25 by `fetch_literature.py` (run from `Synthetic_domain/`). Raw downloads live in `literature/raw/`
 (git-ignored, never overwritten by the script).
 
+Refreshed on 2026-10-26 for all 168 reference galaxies (153 SDSS legacy, 15 BOSS), up from the 60 of the first run:
+- `mpa_jhu_reference.csv`: 168 rows; 142 with a finite `lgm_tot_p50` and 118 with a finite `sfr_fib_p50` (all legacy;
+  the BOSS rows have empty galSpec columns);
+- `gallazzi_reference.csv`: 144 rows (legacy spectra on DR4 plates), 124 of them with an age;
+- the 60 and 51 rows of the first run came back with identical values;
+- `relations/*.csv` and `dropped_ids.csv` came back identical to the 2026-10-25 files.
+
 ## Gallazzi et al. (2005) stellar ages, metallicities and masses
 
 - Paper: Gallazzi, Charlot, Brinchmann, White, Tremonti 2005, MNRAS 362, 41 (arXiv:astro-ph/0506539).
@@ -20,9 +27,8 @@ Retrieved on 2026-10-25 by `fetch_literature.py` (run from `Synthetic_domain/`).
   `t_r = int dtau psi(t - tau) f_r(tau) tau / int dtau psi(t - tau) f_r(tau)`, the r-band-flux-weighted LINEAR mean of
   stellar age (f_r = r-band flux of stars of age tau), quoted as log10. That is the log of the mean, not the mean of the
   log. Each model has a single metallicity for all its stars, interpreted as the "(optical) light-weighted" metallicity.
-- Caveat for Task 4: `sv.light_weighted_age_and_metallicity` currently computes the luminosity-weighted mean of
-  log10(age) (mean of log). For composite histories this differs from the paper's log of the mean (the linear mean is
-  pulled to the oldest populations). To compare like with like, Task 4 should use `log10(sum(L_i t_i) / sum(L_i))` for the age.
+- `sv.light_weighted_age_and_metallicity` follows this definition: the age is `log10(sum(L_i t_i) / sum(L_i))`
+  (`sv.light_weighted_log_mean`), and the metallicity is the model's single Z.
 
 ## MPA-JHU (SDSS galSpec) values
 

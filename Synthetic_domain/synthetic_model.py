@@ -7,11 +7,13 @@ so the training set and the spectral fits use exactly the same prior.
 
 import hashlib
 import os
+import shutil
 import time
 import warnings
 
 import extinction
 import h5py
+import joblib
 import numpy as np
 import pandas as pd
 from astropy.cosmology import FlatLambdaCDM
@@ -1236,7 +1238,7 @@ def fit_is_current(metadata):
     """Whether a stored fit belongs to the current production run: SFH_MODEL and the full iteration limit.
 
     Fits that fail this (16-bin fits without sfh_model, pilot runs with a smaller limit) are moved to
-    superseded/ by spectroscopic_reference.ipynb and never read as results.
+    superseded/ by supersede_outdated_fits (spectroscopic_reference.ipynb, section 4) and never read as results.
     Inputs: metadata: dict as load_fit returns it.
     Returns: bool: True only when sfh_model == SFH_MODEL and max_iterations >= MAX_ITERATIONS.
     """
@@ -1479,3 +1481,108 @@ def calibration_coverage(posteriors, truths, labels, levels=CALIBRATION_LEVELS):
             coverage = np.mean(inside) if inside else np.nan
             rows.append({"label": label, "level": level, "coverage": coverage, "n_jobs": len(inside)})
     return pd.DataFrame(rows)
+
+
+# =============================================================================
+# 8. Superseding the results of an earlier model or run (spectroscopic_reference.ipynb, section 4)
+# =============================================================================
+SUPERSEDED_SUBDIRECTORY = "superseded"     # inside each fits folder: results of earlier, replaced runs
+SUPERSEDED_NAME_SUFFIX = "_16bin"          # added to a name already taken there (first-run fits of the same id)
+CALIBRATION_MOCK_FILE = "calibration_mocks.joblib"   # (jobs, truths) of the calibration mocks of a fits folder
+JOBS_SUBDIRECTORY = "jobs"                 # exported fit jobs, one .npz each
+RUN_LOG_NAMES = ("fit_log.csv", "fit_logs")   # logs of run_spectral_fits.py; their rows name the fits that ran
+
+
+def move_to_superseded(fits_directory, name):
+    """Move a file or folder of fits_directory into its SUPERSEDED_SUBDIRECTORY, keeping its relative path.
+
+    A name already taken there gets SUPERSEDED_NAME_SUFFIX before its extension (then _2, _3, ... if that is
+    taken too), so an earlier superseded copy is never overwritten and nothing is left in place.
+    Inputs: fits_directory: folder of the fits (str); name: path relative to it (str), e.g. "123.h5",
+            "123" (a MultiNest folder) or "jobs/calib_000.npz".
+    Returns: the destination path (str), or None when the source does not exist.
+    """
+    source = os.path.join(fits_directory, name)
+    if not os.path.exists(source):
+        return None
+    superseded_directory = os.path.join(fits_directory, SUPERSEDED_SUBDIRECTORY)
+    stem, extension = os.path.splitext(name)
+    destination = os.path.join(superseded_directory, name)
+    copy_number = 1
+    while os.path.exists(destination):
+        counter = "" if copy_number == 1 else f"_{copy_number}"
+        destination = os.path.join(superseded_directory, f"{stem}{SUPERSEDED_NAME_SUFFIX}{counter}{extension}")
+        copy_number += 1
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    shutil.move(source, destination)
+    return destination
+
+
+def calibration_mocks_are_current(mock_file):
+    """Whether a stored calibration-mock file holds truths with the current calibration labels.
+
+    Inputs: mock_file: path of a joblib file with (jobs, truths), truths mapping job_id -> Series of true labels.
+    Returns: bool: True when every truth has every CALIBRATION_LABELS value (16-bin truths lack log_age).
+    """
+    _, truths = joblib.load(mock_file)
+    for truth in truths.values():
+        if not set(CALIBRATION_LABELS) <= set(truth.index):
+            return False
+    return True
+
+
+def supersede_outdated_fits(fits_directory):
+    """Move every result of an earlier model or run out of a fits folder, into its SUPERSEDED_SUBDIRECTORY.
+
+    Why: run_spectral_fits.py counts any top-level .h5 as done, and the new calibration mocks reuse the
+    calib_<k> ids, so an old file left in place would be skipped as finished or scored against a new truth.
+    Moved, in this order:
+      1. every readable .h5 fit that fails fit_is_current, with its MultiNest folder (the name without .h5);
+         an unreadable .h5 stays, because fit_and_save fits that job again;
+      2. CALIBRATION_MOCK_FILE when its truths lack the CALIBRATION_LABELS (mocks of the 16-bin model);
+      3. while no mock file is left, the jobs/calib_*.npz files, which then belong to no current mock;
+      4. when any fit moved, the run logs RUN_LOG_NAMES (notebook 2 reads failures from them, and
+         fetch_fits.sh drops new rows of ids already logged).
+    Inputs: fits_directory: folder with the .h5 fits, jobs/ and the mock file (str); a missing folder is fine.
+    Returns: list of the moved names (str), relative to fits_directory; empty when everything is current.
+    """
+    if not os.path.isdir(fits_directory):
+        return []
+    moved = []
+
+    # 1. Fits of an earlier model or run, with their MultiNest folders
+    for name in sorted(os.listdir(fits_directory)):
+        if not name.endswith(".h5"):
+            continue
+        try:
+            _, metadata = load_fit(os.path.join(fits_directory, name))
+        except (OSError, KeyError):
+            continue
+        if fit_is_current(metadata):
+            continue
+        for fit_name in (name, name[:-len(".h5")]):
+            if move_to_superseded(fits_directory, fit_name) is not None:
+                moved.append(fit_name)
+    fits_were_moved = len(moved) > 0
+
+    # 2. Calibration mocks of an earlier model
+    mock_file = os.path.join(fits_directory, CALIBRATION_MOCK_FILE)
+    if os.path.exists(mock_file) and not calibration_mocks_are_current(mock_file):
+        move_to_superseded(fits_directory, CALIBRATION_MOCK_FILE)
+        moved.append(CALIBRATION_MOCK_FILE)
+
+    # 3. Job files of mocks that no stored mock file holds (the notebook stores the mocks before exporting them)
+    jobs_directory = os.path.join(fits_directory, JOBS_SUBDIRECTORY)
+    if not os.path.exists(mock_file) and os.path.isdir(jobs_directory):
+        for name in sorted(os.listdir(jobs_directory)):
+            if name.startswith(CALIBRATION_ID_PREFIX):
+                job_name = os.path.join(JOBS_SUBDIRECTORY, name)
+                move_to_superseded(fits_directory, job_name)
+                moved.append(job_name)
+
+    # 4. Run logs of the moved fits
+    if fits_were_moved:
+        for name in RUN_LOG_NAMES:
+            if move_to_superseded(fits_directory, name) is not None:
+                moved.append(name)
+    return moved

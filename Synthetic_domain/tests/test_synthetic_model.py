@@ -6,6 +6,7 @@ import sys
 
 import extinction
 import h5py
+import joblib
 import numpy as np
 import pandas as pd
 import pytest
@@ -1080,6 +1081,116 @@ def test_calibration_coverage_without_jobs_is_nan():
     table = sm.calibration_coverage({}, {}, ["mw_age"])
     assert table["coverage"].isna().all()
     assert (table["n_jobs"] == 0).all()
+
+
+# =============================================================================
+# Superseding the results of an earlier model (spectroscopic_reference.ipynb, section 4)
+# =============================================================================
+def write_fit(path, max_iterations=sm.MAX_ITERATIONS, sfh_model=sm.SFH_MODEL):
+    """A small fit file; sfh_model=None writes it as a 16-bin fit did, without the key."""
+    metadata = {"converged": True, "run_time": 1.0, "n_iterations": 5, "max_iterations": max_iterations}
+    sm.save_fit(str(path), pd.DataFrame({"log_age": [0.5]}), np.zeros((1, len(sm.SPECTRAL_DIMS))), metadata)
+    with h5py.File(path, "a") as fit_file:
+        if sfh_model is None:
+            del fit_file.attrs["sfh_model"]
+        else:
+            fit_file.attrs["sfh_model"] = sfh_model
+
+
+def write_mock_file(path, truth_labels):
+    """A calibration-mock file as the notebook stores it: (jobs, truths), each truth a Series."""
+    truths = {"calib_000": pd.Series(np.zeros(len(truth_labels)), index=truth_labels)}
+    joblib.dump(([{"job_id": "calib_000"}], truths), path)
+
+
+def test_supersede_moves_old_fits_with_their_folders_and_keeps_current_ones(tmp_path):
+    """A fit without sfh_model = "delayed" (or from a pilot run) is superseded; a current one stays."""
+    write_fit(tmp_path / "123.h5", sfh_model=None)
+    (tmp_path / "123").mkdir()
+    (tmp_path / "123" / "ev.dat").write_text("multinest output")
+    write_fit(tmp_path / "456.h5", sfh_model="nonparametric")
+    write_fit(tmp_path / "pilot_789.h5", max_iterations=100)
+    write_fit(tmp_path / "current.h5")
+    (tmp_path / "broken.h5").write_bytes(b"not an hdf5 file")
+
+    moved = sm.supersede_outdated_fits(str(tmp_path))
+
+    superseded = tmp_path / sm.SUPERSEDED_SUBDIRECTORY
+    assert sorted(moved) == ["123", "123.h5", "456.h5", "pilot_789.h5"]
+    assert (superseded / "123.h5").exists() and (superseded / "123" / "ev.dat").exists()
+    assert (superseded / "456.h5").exists() and (superseded / "pilot_789.h5").exists()
+    assert (tmp_path / "current.h5").exists()
+    assert (tmp_path / "broken.h5").exists()    # unreadable: fit_and_save fits that job again
+    assert not (tmp_path / "123.h5").exists() and not (tmp_path / "123").exists()
+
+
+def test_supersede_renames_a_name_already_taken_in_superseded(tmp_path):
+    """Earlier superseded fits of the same job id get the _16bin suffix: nothing is skipped or overwritten."""
+    superseded = tmp_path / sm.SUPERSEDED_SUBDIRECTORY
+    superseded.mkdir()
+    (superseded / "123.h5").write_text("first-run fit")
+    (superseded / "123").mkdir()
+    write_fit(tmp_path / "123.h5", sfh_model=None)
+    (tmp_path / "123").mkdir()
+
+    moved = sm.supersede_outdated_fits(str(tmp_path))
+
+    assert sorted(moved) == ["123", "123.h5"]
+    assert (superseded / "123.h5").read_text() == "first-run fit"
+    assert (superseded / f"123{sm.SUPERSEDED_NAME_SUFFIX}.h5").exists()
+    assert (superseded / f"123{sm.SUPERSEDED_NAME_SUFFIX}").is_dir()
+    assert not (tmp_path / "123.h5").exists()
+    assert sm.SUPERSEDED_NAME_SUFFIX == "_16bin"
+
+
+def test_supersede_moves_old_mocks_their_jobs_and_the_run_logs(tmp_path):
+    """16-bin mock truths lack log_age: the mock file, its calib_* jobs and the logs of the old fits move."""
+    write_mock_file(tmp_path / sm.CALIBRATION_MOCK_FILE, ["mw_age", "Z_fin", "f_old", "log_mstar"])
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    (jobs / "calib_000.npz").write_bytes(b"old mock job")
+    (jobs / "123.npz").write_bytes(b"galaxy job")
+    write_fit(tmp_path / "calib_000.h5", sfh_model=None)
+    (tmp_path / "fit_log.csv").write_text("job_id,status\ncalib_000,fitted\n")
+    (tmp_path / "fit_logs").mkdir()
+
+    moved = sm.supersede_outdated_fits(str(tmp_path))
+
+    superseded = tmp_path / sm.SUPERSEDED_SUBDIRECTORY
+    old_mock_job = os.path.join("jobs", "calib_000.npz")
+    assert sorted(moved) == sorted(["calib_000.h5", sm.CALIBRATION_MOCK_FILE, old_mock_job, "fit_log.csv", "fit_logs"])
+    assert (superseded / sm.CALIBRATION_MOCK_FILE).exists()
+    assert (superseded / "jobs" / "calib_000.npz").read_bytes() == b"old mock job"
+    assert (jobs / "123.npz").exists()    # galaxy jobs do not depend on the model
+    assert (superseded / "fit_log.csv").exists() and (superseded / "fit_logs").is_dir()
+
+
+def test_supersede_keeps_current_mocks_their_jobs_and_logs(tmp_path):
+    """A second run after the new mocks and fits exist moves nothing."""
+    write_mock_file(tmp_path / sm.CALIBRATION_MOCK_FILE, sm.TRAINING_LABELS)
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    (jobs / "calib_000.npz").write_bytes(b"new mock job")
+    write_fit(tmp_path / "calib_000.h5")
+    (tmp_path / "fit_log.csv").write_text("job_id,status\ncalib_000,fitted\n")
+
+    moved = sm.supersede_outdated_fits(str(tmp_path))
+
+    assert moved == []
+    assert (jobs / "calib_000.npz").exists() and (tmp_path / "fit_log.csv").exists()
+    assert not (tmp_path / sm.SUPERSEDED_SUBDIRECTORY).exists()
+
+
+def test_supersede_moves_jobs_of_mocks_whose_file_is_missing(tmp_path):
+    """calib_* jobs without any mock file belong to no current mocks; a missing folder is no error."""
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    (jobs / "calib_004.npz").write_bytes(b"orphan job")
+
+    moved = sm.supersede_outdated_fits(str(tmp_path))
+
+    assert moved == [os.path.join("jobs", "calib_004.npz")]
+    assert sm.supersede_outdated_fits(str(tmp_path / "missing")) == []
 
 
 # =============================================================================
