@@ -7,12 +7,12 @@
 # out/ml_runs/<embedding>/, so a run that finished before the limit is never lost.
 #
 # Environment variables (set by submit_training.sh with hljob -e):
-#   EMBEDDINGS   embeddings to train, one after the other   [default "mlp cnn"]
+#   EMBEDDINGS   embeddings to train, one after the other   [default "mlp"]
 #   ALLOW_CPU_TRAINING  set to 1 to train on the CPU when no GPU is usable   [default: fail without a GPU]
 set -euo pipefail
 
 # 1. Settings
-EMBEDDINGS="${EMBEDDINGS:-mlp cnn}"
+EMBEDDINGS="${EMBEDDINGS:-mlp}"
 ALLOW_CPU_TRAINING="${ALLOW_CPU_TRAINING:-0}"
 JOB_DIR="/work"
 export OUT_DIR="$JOB_DIR/out"

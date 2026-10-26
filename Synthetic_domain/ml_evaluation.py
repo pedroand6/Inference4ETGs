@@ -1,6 +1,6 @@
 """
 Metrics for the SFH posterior estimator: calibration (coverage, ranks), accuracy (bias, NMAD),
-information per bin (posterior/prior width) and agreement with the Bagpipes reference posteriors
+information per label (posterior/prior width) and agreement with the Bagpipes reference posteriors
 (spectral or photometric fits).
 """
 
@@ -17,7 +17,7 @@ TWO_SIGMA_LEVEL = 0.95                       # central probability of a "2 sigma
 PERCENT = 100
 WINDOW_STEPS = 5                             # cell width = window / 5, so a galaxy's prior window is centred
                                              # within window / 10 of its redshift
-# The "works" test of the ML spec amendment (2026-10-26): a label agrees with a reference set when at least
+# The "works" test of the delayed-tau spec (2026-10-26): a label agrees with a reference set when at least
 # MIN_INSIDE_95 of the reference medians lie inside the ML 95% interval and the median offset is at most
 # MAX_ABS_MEDIAN_OFFSET combined 1-sigma widths
 MIN_INSIDE_95 = 0.80                         # fraction of galaxies
@@ -104,8 +104,9 @@ def width_ratio(posterior_samples, prior_samples, level=ONE_SIGMA_LEVEL, prior_w
             (e.g. windowed_prior_widths), used instead of the width of all prior_samples.
     Returns: ratio near 1 = prior-dominated, near 0 = well constrained.
 
-    A zero prior width (a bin that cannot exist at the galaxy's redshift, e.g. frac_bin_14 above z ~ 0.48)
-    carries no information and would give inf, so it becomes NaN and is left out of the median.
+    A zero prior width (a label the prior pins to one value in the galaxy's window, e.g. f_young of SFHs
+    with no recent star formation) carries no information and would give inf, so it becomes NaN and is
+    left out of the median.
     """
     if prior_widths is None:
         prior_low, prior_high = central_interval(prior_samples, level)

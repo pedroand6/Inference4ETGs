@@ -19,8 +19,9 @@ import ml_data
 # 1. Configuration
 # =============================================================================
 DEFAULT_CONFIG = {
-    "embedding": "mlp",              # "mlp" or "cnn"
+    "embedding": "mlp",              # "mlp" or "cnn"; only the MLP is trained (the CNN lost the 16-bin test)
     "n_targets": ml_data.N_TARGETS,
+    "target_names": list(ml_data.TARGET_NAMES),   # stored with the run, so a run for other targets cannot load
     "summary_size": 64,              # length of the embedding output
     "hidden_size": 256,              # width of the dense layers
     "mlp_layers": 3,
@@ -211,10 +212,21 @@ def train_estimator(estimator, make_epoch, validation_sets, config, device, log=
 # 4. Checkpoints and sampling
 # =============================================================================
 def save_run(directory, estimator, config, history, standardisers):
-    """Write model.pt (weights), config.json (config + standardisation statistics) and history.csv."""
+    """Write model.pt (weights), config.json (config, target names, standardisers) and history.csv.
+
+    Inputs: directory: output folder (created if missing); estimator: PosteriorEstimator; config: its
+            configuration, whose target_names (default ml_data.TARGET_NAMES) name the n_targets flow
+            dimensions in order; history: list of per-epoch dicts; standardisers: {name: ml_data.Standardiser}.
+    Raises: ValueError when target_names does not have n_targets entries.
+    """
+    target_names = list(config.get("target_names", ml_data.TARGET_NAMES))
+    if len(target_names) != config["n_targets"]:
+        raise ValueError(f"target_names has {len(target_names)} entries but the flow has "
+                         f"n_targets = {config['n_targets']}")
     os.makedirs(directory, exist_ok=True)
     torch.save(estimator.state_dict(), os.path.join(directory, MODEL_FILE))
     stored = dict(config)
+    stored["target_names"] = target_names
     stored["flow_hidden"] = list(config["flow_hidden"])
     stored["standardisers"] = {}
     for name, standardiser in standardisers.items():
@@ -227,10 +239,24 @@ def save_run(directory, estimator, config, history, standardisers):
             output.write(f"{row['epoch']},{row['train_loss']},{row['validation_loss']},{row.get('learning_rate', '')}\n")
 
 
-def load_run(directory, device="cpu"):
-    """Read a run written by save_run. Returns: (estimator on device, config, standardisers dict)."""
+def load_run(directory, device="cpu", target_names=None):
+    """Read a run written by save_run.
+
+    Why the check: an old checkpoint (e.g. the 19 targets of the 16-bin model) would otherwise load and its
+    samples be decoded as the current targets without any error.
+    Inputs: directory: run folder; device: torch device; target_names: the targets the caller decodes,
+            default ml_data.TARGET_NAMES.
+    Returns: (estimator on device, config, standardisers dict).
+    Raises: ValueError("run was trained for targets ...") when the stored target_names (None for a run saved
+            before they were recorded) differ from target_names.
+    """
+    if target_names is None:
+        target_names = ml_data.TARGET_NAMES
     with open(os.path.join(directory, CONFIG_FILE)) as source:
         stored = json.load(source)
+    if stored.get("target_names") != list(target_names):
+        raise ValueError(f"run was trained for targets {stored.get('target_names')}, "
+                         f"not {list(target_names)}: retrain it, or move {directory} to ml_runs/superseded/")
     standardisers = {}
     for name, statistics in stored.pop("standardisers").items():
         standardisers[name] = ml_data.Standardiser.from_dict(statistics)

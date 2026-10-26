@@ -7,7 +7,7 @@
 #   CORES            vCPUs of the job                                          [default 8]
 #   MEMORY_MB        memory limit in MB                                        [default 7000]
 #   TIME_LIMIT       wall-clock limit HH:MM:SS                                 [default 08:00:00]
-#   EMBEDDINGS       embeddings to train, one after the other                  [default "mlp cnn"]
+#   EMBEDDINGS       embeddings to train, one after the other                  [default "mlp"]
 #   ALLOW_CPU_TRAINING set to 1 to let the job train on the CPU if no GPU is usable    [default: the job fails]
 #   JOB_NAME         name shown in `hljob ls`                                  [default ml_training]
 #   MULTINEST_SOURCE the MultiNest source folder (build_env.sh builds it)      [default ~/Programs/MultiNest]
@@ -19,7 +19,7 @@ set -euo pipefail
 CORES="${CORES:-8}"
 MEMORY_MB="${MEMORY_MB:-7000}"
 TIME_LIMIT="${TIME_LIMIT:-08:00:00}"
-EMBEDDINGS="${EMBEDDINGS:-mlp cnn}"
+EMBEDDINGS="${EMBEDDINGS:-mlp}"
 ALLOW_CPU_TRAINING="${ALLOW_CPU_TRAINING:-0}"
 JOB_NAME="${JOB_NAME:-ml_training}"
 MULTINEST_SOURCE="${MULTINEST_SOURCE:-$HOME/Programs/MultiNest}"

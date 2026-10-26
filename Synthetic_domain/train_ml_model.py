@@ -2,10 +2,11 @@
 Train the SFH posterior estimator.
 
 Usage (from Synthetic_domain/):
-    python train_ml_model.py --embedding mlp
-    python train_ml_model.py --embedding cnn
-Each run writes ml_runs/<embedding>/{model.pt, config.json, history.csv}. The training set is noise-free;
-every epoch draws a fresh brightness, S-PLUS noise and observed redshift for every model (ml_data).
+    python train_ml_model.py                     # the MLP, the only embedding trained for the delayed-tau model
+    python train_ml_model.py --embedding cnn     # kept for comparison; not part of the pipeline
+Each run writes ml_runs/<embedding>/{model.pt, config.json, history.csv}; config.json records the
+ml_data.TARGET_NAMES the flow was trained for. The training set is noise-free; every epoch draws a fresh
+brightness, S-PLUS noise and observed redshift for every model (ml_data).
 """
 
 import argparse
@@ -26,6 +27,7 @@ NOISE_MODEL_FILE = "splus_noise_model.csv"
 CATALOGUE_FILE = "dr3_corrected.csv"
 MIN_PROB_GALAXY = 0.8
 VALIDATION_SEEDS = {"spectroscopic": 100, "photometric": 101}
+DEFAULT_EMBEDDING = "mlp"        # the CNN lost the 16-bin comparison, so only the MLP is trained
 
 
 def to_tensors(observations):
@@ -61,7 +63,7 @@ def git_commit():
 def main():
     """Parse arguments, build the data pipeline, train one embedding and save the run."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--embedding", choices=sorted(ml_networks.EMBEDDINGS), required=True)
+    parser.add_argument("--embedding", choices=sorted(ml_networks.EMBEDDINGS), default=DEFAULT_EMBEDDING)
     parser.add_argument("--data-dir", default=".")
     parser.add_argument("--output-dir", default="ml_runs")
     parser.add_argument("--epochs", type=int, default=ml_networks.DEFAULT_CONFIG["epochs"])
@@ -115,8 +117,8 @@ def main():
     # 4. Train and save
     config = dict(ml_networks.DEFAULT_CONFIG)
     config.update(embedding=arguments.embedding, epochs=arguments.epochs, seed=arguments.seed,
-                  training_commit=git_commit(), torch_version=torch.__version__,
-                  n_training_models=len(training), device=device)
+                  target_names=list(ml_data.TARGET_NAMES), training_commit=git_commit(),
+                  torch_version=torch.__version__, n_training_models=len(training), device=device)
     estimator = ml_networks.build_estimator(config)
     start = time.time()
     history = ml_networks.train_estimator(estimator, make_epoch, validation_sets, config, device,

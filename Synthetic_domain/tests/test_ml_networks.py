@@ -1,5 +1,7 @@
 """Tests for ml_networks.py (CPU, small). Run from Synthetic_domain/."""
 
+import json
+
 import numpy as np
 import pytest
 import torch
@@ -8,6 +10,7 @@ import ml_data
 import ml_networks
 
 NOISE_SIGMA = 0.5        # toy problem: x = theta + N(0, NOISE_SIGMA), theta ~ N(0, 1)
+TOY_TARGET_NAMES = ["toy_target_0", "toy_target_1"]
 
 
 def toy_problem(n_rows, generator):
@@ -24,9 +27,9 @@ def toy_problem(n_rows, generator):
 def small_config(embedding):
     """A small, fast configuration for tests."""
     config = dict(ml_networks.DEFAULT_CONFIG)
-    config.update(embedding=embedding, n_targets=2, summary_size=16, hidden_size=64,
-                  flow_transforms=3, flow_hidden=(64, 64), epochs=40, patience=40, batch_size=512,
-                  learning_rate=3e-3, seed=0)
+    config.update(embedding=embedding, n_targets=2, target_names=TOY_TARGET_NAMES, summary_size=16,
+                  hidden_size=64, flow_transforms=3, flow_hidden=(64, 64), epochs=40, patience=40,
+                  batch_size=512, learning_rate=3e-3, seed=0)
     return config
 
 
@@ -74,12 +77,54 @@ def test_save_load_round_trip_on_cpu(tmp_path):
     }
     history = [{"epoch": 0, "train_loss": 1.0, "validation_loss": 1.1}]
     ml_networks.save_run(str(tmp_path), estimator, config, history, standardisers)
-    loaded, loaded_config, loaded_standardisers = ml_networks.load_run(str(tmp_path), device="cpu")
+    loaded, loaded_config, loaded_standardisers = ml_networks.load_run(str(tmp_path), device="cpu",
+                                                                       target_names=TOY_TARGET_NAMES)
 
     flat = np.random.default_rng(0).normal(size=(4, ml_data.N_INPUTS))
     banded = np.random.default_rng(1).normal(size=(4, 12, ml_data.N_BAND_CHANNELS))
     before = ml_networks.posterior_samples(estimator, standardisers, flat, banded, 50, seed=3)
     after = ml_networks.posterior_samples(loaded, loaded_standardisers, flat, banded, 50, seed=3)
     assert loaded_config["embedding"] == "mlp"
+    assert loaded_config["target_names"] == TOY_TARGET_NAMES
     assert before.shape == (4, 50, 2)
     assert np.allclose(before, after)
+
+
+def save_toy_run(directory):
+    """Write an untrained toy run (2 targets named TOY_TARGET_NAMES) with save_run."""
+    config = small_config("mlp")
+    standardisers = {
+        "flat": ml_data.Standardiser(np.zeros(ml_data.N_INPUTS), np.ones(ml_data.N_INPUTS)),
+        "banded": ml_data.Standardiser(np.zeros(ml_data.N_BAND_CHANNELS), np.ones(ml_data.N_BAND_CHANNELS)),
+        "targets": ml_data.Standardiser(np.zeros(2), np.ones(2)),
+    }
+    history = [{"epoch": 0, "train_loss": 1.0, "validation_loss": 1.1}]
+    ml_networks.save_run(str(directory), ml_networks.build_estimator(config), config, history, standardisers)
+
+
+def test_default_config_records_the_ml_data_target_names():
+    assert ml_networks.DEFAULT_CONFIG["target_names"] == ml_data.TARGET_NAMES
+    assert ml_networks.DEFAULT_CONFIG["n_targets"] == len(ml_data.TARGET_NAMES)
+
+
+def test_load_run_of_a_checkpoint_without_target_names_raises(tmp_path):
+    save_toy_run(tmp_path)
+    config_path = tmp_path / ml_networks.CONFIG_FILE
+    stored = json.loads(config_path.read_text())
+    del stored["target_names"]                       # a checkpoint written before target names were recorded
+    config_path.write_text(json.dumps(stored))
+    with pytest.raises(ValueError, match="run was trained for targets"):
+        ml_networks.load_run(str(tmp_path), target_names=TOY_TARGET_NAMES)
+
+
+def test_load_run_of_other_targets_raises(tmp_path):
+    save_toy_run(tmp_path)
+    with pytest.raises(ValueError, match="run was trained for targets"):
+        ml_networks.load_run(str(tmp_path))          # expects ml_data.TARGET_NAMES
+
+
+def test_save_run_rejects_target_names_that_do_not_match_n_targets(tmp_path):
+    config = small_config("mlp")
+    config["target_names"] = ml_data.TARGET_NAMES   # 9 names for a 2-target flow
+    with pytest.raises(ValueError, match="target_names"):
+        ml_networks.save_run(str(tmp_path), ml_networks.build_estimator(small_config("mlp")), config, [], {})

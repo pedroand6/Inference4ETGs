@@ -70,7 +70,7 @@ def test_width_ratio_uses_per_galaxy_prior_widths():
 
 def test_zero_prior_width_is_left_out_not_infinite():
     rng = np.random.default_rng(46)
-    posterior = rng.normal(0, 1e-3, (300, 2000))                         # a bin absent at high redshift
+    posterior = rng.normal(0, 1e-3, (300, 2000))                         # a label the prior pins to one value
     widths = np.full(300, 2 * 0.994 * 2e-3)
     widths[:200] = 0.0                                                   # most priors collapsed: inf would win
     ratio = ev.width_ratio(posterior, None, prior_widths=widths)
@@ -98,13 +98,14 @@ def comparison_rows(labels, reference_median, n_galaxies=60, seed=47):
 
 
 def test_agreement_verdict_of_an_agreeing_set_is_true():
-    verdict = ev.agreement_verdict(comparison_rows(["mw_age", "Z_fin"], 0.0), ["mw_age", "Z_fin"])
+    labels = ["mw_age", "log_metallicity"]
+    verdict = ev.agreement_verdict(comparison_rows(labels, 0.0), labels)
     by_label = verdict.set_index("label")
-    assert list(verdict["label"]) == ["mw_age", "Z_fin", ev.ALL_LABELS_ROW]
+    assert list(verdict["label"]) == ["mw_age", "log_metallicity", ev.ALL_LABELS_ROW]
     assert by_label.loc["mw_age", "inside_95"] == 1.0
     assert abs(by_label.loc["mw_age", "median_offset"]) < 0.05
     assert by_label.loc["mw_age", "n_galaxies"] == 60
-    assert bool(by_label.loc["Z_fin", "agrees"])
+    assert bool(by_label.loc["log_metallicity", "agrees"])
     assert bool(by_label.loc[ev.ALL_LABELS_ROW, "agrees"])
 
 

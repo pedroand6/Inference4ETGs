@@ -2,19 +2,42 @@
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
+from scipy.stats import qmc
 
 import ml_data
 import synthetic_model as sm
 
+VALIDATION_FILE = "synthetic_validation.parquet"
+ROUND_TRIP_TOLERANCE = 1e-9      # the decode uses the same analytic functions as the labels: exact
+
+
+def parquet_has_column(path, column):
+    """True when the parquet file exists and its schema holds the column (read without loading the data)."""
+    try:
+        return column in pq.read_schema(path).names
+    except OSError:
+        return False
+
 
 @pytest.fixture(scope="module")
 def simulated_models():
-    """Twenty prior draws with labels and noiseless magnitudes."""
-    unit_vectors = np.random.default_rng(30).random((20, len(sm.DIMS)))
-    models = sm.simulate_models(unit_vectors)
-    models["log_mass_formed"] = sm.LOG_MASS_FORMED
-    return models
+    """Two hundred prior draws (Latin hypercube) with labels and noiseless magnitudes."""
+    unit_vectors = qmc.LatinHypercube(d=len(sm.DIMS), seed=30).random(200)
+    return sm.simulate_models(unit_vectors)
+
+
+def theta_rows(rows):
+    """Flow targets (n, N_TARGETS) from dicts keyed by TARGET_NAMES; missing targets take typical values."""
+    typical = {"log_age": 0.0, "log_tau": 0.0, "log_metallicity": 0.0, "av_ism": 0.5, "log_tau_bc": 0.0,
+               "logU": -2.5, "log_mass_formed": 10.0, "log_mstar": 9.8, "redshift": 0.1}
+    theta = np.zeros((len(rows), ml_data.N_TARGETS))
+    for row_index, row in enumerate(rows):
+        values = dict(typical, **row)
+        for target_index, name in enumerate(ml_data.TARGET_NAMES):
+            theta[row_index, target_index] = values[name]
+    return theta
 
 
 def detections(n_rows, detected_bands):
@@ -55,29 +78,36 @@ def test_colour_inputs_only_r_detected_has_no_nan():
     assert inputs["flat"][:, 22:33].sum() == 0      # every colour flag is 0
 
 
-def test_encode_decode_round_trip(simulated_models):
+def test_targets_are_the_delayed_tau_parameters_with_redshift_last():
+    assert ml_data.TARGET_NAMES == ["log_age", "log_tau", "log_metallicity", "av_ism", "log_tau_bc", "logU",
+                                    "log_mass_formed", "log_mstar", "redshift"]
+    assert ml_data.N_TARGETS == 9
+
+
+def test_encode_targets_takes_logs_of_age_tau_metallicity_and_tau_bc(simulated_models):
     theta = ml_data.encode_targets(simulated_models)
     assert theta.shape == (len(simulated_models), ml_data.N_TARGETS)
-    decoded = ml_data.decode_samples(theta)
-    for column in ["redshift", "Z_fin", "Av_ism", "log_mstar"]:
-        assert np.allclose(decoded[column], simulated_models[column])
-    for bin_index in range(sm.N_BINS):
-        for kind in ("frac_bin", "logsfr_bin", "zmet_bin"):
-            column = f"{kind}_{bin_index:02d}"
-            expected = simulated_models[column].to_numpy(dtype=float)
-            result = decoded[column].to_numpy(dtype=float)
-            assert np.array_equal(np.isnan(expected), np.isnan(result)), column
-            finite = np.isfinite(expected)
-            assert np.allclose(result[finite], expected[finite], rtol=1e-6, atol=1e-9), column
+    expected = {
+        "log_age": np.log10(simulated_models["age"]),
+        "log_tau": np.log10(simulated_models["tau"]),
+        "log_metallicity": np.log10(simulated_models["metallicity"]),
+        "av_ism": simulated_models["av_ism"],
+        "log_tau_bc": np.log10(simulated_models["tau_bc"]),
+        "logU": simulated_models["logU"],
+        "log_mass_formed": simulated_models["log_mass_formed"],
+        "log_mstar": simulated_models["log_mstar"],
+        "redshift": simulated_models["redshift"],
+    }
+    for target_index, name in enumerate(ml_data.TARGET_NAMES):
+        assert np.array_equal(theta[:, target_index], expected[name].to_numpy(dtype=float)), name
 
 
-def test_decoded_summary_labels_match_bagpipes(simulated_models):
+def test_encode_decode_round_trip_is_exact_for_every_training_label(simulated_models):
     decoded = ml_data.decode_samples(ml_data.encode_targets(simulated_models))
-    assert np.allclose(decoded["mw_age"], simulated_models["mw_age"], rtol=0.02)
-    for column in ("f_young", "f_mid", "f_old"):
-        assert np.allclose(decoded[column], simulated_models[column], atol=0.01), column
-    star_forming = simulated_models["log_sfr"] > np.log10(sm.SFR_FLOOR) + simulated_models["log_mstar"] + 0.5
-    assert np.allclose(decoded["log_sfr"][star_forming], simulated_models["log_sfr"][star_forming], atol=0.05)
+    assert list(decoded.columns) == sm.TRAINING_LABELS
+    for label in sm.TRAINING_LABELS:
+        expected = simulated_models[label].to_numpy(dtype=float)
+        assert np.allclose(decoded[label], expected, rtol=0, atol=ROUND_TRIP_TOLERANCE), label
 
 
 def test_decode_clips_redshift_to_prior(simulated_models):
@@ -88,14 +118,51 @@ def test_decode_clips_redshift_to_prior(simulated_models):
     assert decoded["redshift"].between(*sm.Z_RANGE).all()
 
 
-def test_decode_extreme_log_ratios_stay_finite(simulated_models):
-    theta = ml_data.encode_targets(simulated_models.iloc[:3])
-    theta[:, :14] = np.array([[500.0], [-500.0], [0.0]])
+def test_decode_clips_age_to_the_oldest_age_at_the_sample_redshift():
+    log_age_too_old = np.log10(10.0)        # older than t_max at z = 0.7 (7.07 Gyr), not at z = 0.1 (12.07)
+    theta = theta_rows([
+        {"log_age": log_age_too_old, "redshift": 0.7},
+        {"log_age": log_age_too_old, "redshift": 0.1},
+        {"log_age": np.log10(sm.maximum_age(0.7)), "redshift": 0.7},
+        {"log_age": np.log10(0.01), "redshift": 0.1},
+        {"log_age": log_age_too_old, "redshift": 1.5},
+    ])
     decoded = ml_data.decode_samples(theta)
-    fraction_columns = [f"frac_bin_{bin_index:02d}" for bin_index in range(sm.N_BINS)]
-    sums = decoded[fraction_columns].sum(axis=1)
-    assert np.allclose(sums, 1.0)
-    assert np.isfinite(decoded[fraction_columns].to_numpy()).all()
+    assert decoded["age"][0] <= sm.maximum_age(0.7)
+    assert np.isclose(decoded["age"][0], sm.maximum_age(0.7), rtol=1e-12)
+    assert np.isclose(decoded["age"][1], 10.0, rtol=1e-12)
+    assert np.isclose(decoded["age"][2], sm.maximum_age(0.7), rtol=1e-12)
+    assert decoded["age"][3] == sm.AGE_MIN
+    assert np.isclose(decoded["age"][4], sm.maximum_age(sm.Z_RANGE[1]), rtol=1e-12)
+    assert np.allclose(decoded["log_age"], np.log10(decoded["age"]))
+
+
+def test_decode_clips_tau_and_metallicity_to_their_ranges():
+    theta = theta_rows([
+        {"log_tau": -5.0, "log_metallicity": -6.0},
+        {"log_tau": 5.0, "log_metallicity": 3.0},
+    ])
+    decoded = ml_data.decode_samples(theta)
+    assert list(decoded["tau"]) == list(sm.TAU_RANGE)
+    assert list(decoded["metallicity"]) == list(sm.METALLICITY_RANGE)
+    assert np.allclose(decoded["log_tau"], np.log10(sm.TAU_RANGE))
+    assert np.allclose(decoded["log_metallicity"], np.log10(sm.METALLICITY_RANGE))
+
+
+def test_decode_extreme_samples_stay_finite():
+    theta = theta_rows([
+        {"log_age": 50.0, "log_tau": -50.0, "redshift": 0.7},
+        {"log_age": -50.0, "log_tau": 50.0, "redshift": 0.002},
+        {"log_age": 50.0, "log_tau": 50.0, "log_metallicity": 40.0},
+        {"log_age": -50.0, "log_tau": -50.0, "log_metallicity": -40.0},
+    ])
+    with np.errstate(divide="raise", over="raise", invalid="raise"):
+        decoded = ml_data.decode_samples(theta)
+    assert np.isfinite(decoded.to_numpy()).all()
+    fractions = decoded[["f_young", "f_mid", "f_old"]].to_numpy()
+    assert np.all((fractions >= 0) & (fractions <= 1))
+    assert np.allclose(fractions.sum(axis=1), 1.0)
+    assert np.allclose(decoded["log_ssfr"], decoded["log_sfr"] - decoded["log_mstar"])
 
 
 @pytest.fixture(scope="module")
@@ -108,12 +175,13 @@ def noise_and_catalogue():
 
 def test_simulate_observations_shifts_mass_and_draws_redshift(simulated_models, noise_and_catalogue):
     noise_table, catalogue_r, catalogue_z = noise_and_catalogue
-    # Repeat the 20 models 10 times: each copy gets its own brightness and noise draw, so enough
+    # Repeat the models 10 times: each copy gets its own brightness and noise draw, so enough
     # galaxies end up with a precise r (the check below needs at least 5)
     repeated_models = pd.concat([simulated_models] * 10, ignore_index=True)
     observations = ml_data.simulate_observations(repeated_models, catalogue_r, catalogue_z, noise_table,
                                                  np.random.default_rng(31))
     targets = observations["targets"]
+    assert targets.shape == (len(repeated_models), ml_data.N_TARGETS)
     flat = observations["flat"]
     log_mass_formed_index = ml_data.TARGET_NAMES.index("log_mass_formed")
     r_magnitude = flat[:, 33]
@@ -132,8 +200,10 @@ def test_simulate_observations_shifts_mass_and_draws_redshift(simulated_models, 
     assert np.allclose(sigma_z[photometric], sm.SIGMA_Z * (1 + repeated_models["redshift"].to_numpy()[photometric]))
 
 
+@pytest.mark.skipif(not parquet_has_column(VALIDATION_FILE, "age"),
+                    reason="synthetic sets not yet regenerated on the PC")
 def test_validation_observations_modes():
-    held_out = pd.read_parquet("synthetic_validation.parquet").iloc[:200]
+    held_out = pd.read_parquet(VALIDATION_FILE).iloc[:200]
     spectroscopic = ml_data.validation_observations(held_out, "spectroscopic", np.random.default_rng(32))
     photometric = ml_data.validation_observations(held_out, "photometric", np.random.default_rng(32))
     assert np.all(spectroscopic["flat"][:, 36] == 0)

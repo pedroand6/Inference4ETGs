@@ -3,8 +3,9 @@ Network inputs and targets for the SFH posterior estimator (Phase 3).
 
 Model tables (training set, held-out sets, real galaxies) become:
 - inputs: 11 colours (band - r) with errors and detection flags, plus r, its error, z_obs and sigma_z;
-- targets: 19 numbers (bin log-ratios, metallicity, dust, masses, redshift) that a flow can model.
-Every physical definition (noise, brightness, bins, enrichment) comes from synthetic_model.
+- targets: the 9 delayed-tau parameters a flow models (log age, log tau, log metallicity, dust, nebular,
+  masses, redshift); every other label is derived from them when decoding.
+Every physical definition (prior, analytic labels, noise, brightness) comes from synthetic_model.
 """
 
 import numpy as np
@@ -26,20 +27,14 @@ N_INPUTS = 3 * N_COLOURS + 4                     # colours, colour errors, flags
 SCALAR_INPUT_SLICE = slice(3 * N_COLOURS, N_INPUTS)   # [m_r, sigma_r, z_obs, sigma_z]
 N_BAND_CHANNELS = 4                              # [m_b - m_r, sigma_b, detected, log10 pivot]
 
-N_FRACTION_BINS = sm.N_BINS - 1                  # 15 populated bins (index 15 never exists)
-REFERENCE_BIN = 13                               # oldest bin that exists at every redshift of the prior
-LOG_RATIO_LIMIT = 12.0                           # [dex] clip of sampled log-ratios (flow tails)
 P_SPECTROSCOPIC = 0.5                            # share of simulated galaxies with an exact redshift
 
-RATIO_BINS = []
-for bin_index in range(N_FRACTION_BINS):
-    if bin_index != REFERENCE_BIN:
-        RATIO_BINS.append(bin_index)
-TARGET_NAMES = []
-for bin_index in RATIO_BINS:
-    TARGET_NAMES.append(f"log_ratio_bin_{bin_index:02d}")
-TARGET_NAMES += ["log_Z_fin", "Av_ism", "log_mass_formed", "log_mstar", "redshift"]
-N_TARGETS = len(TARGET_NAMES)                    # 19
+# Flow targets. Age, tau, metallicity and tau_bc are log-uniform in the prior, so the flow models their logs.
+# log_sfr is not a target: a fifth of the prior sits on its floor, a point mass a flow cannot learn.
+# The redshift stays last (decoded first, since the oldest allowed age depends on it).
+TARGET_NAMES = ["log_age", "log_tau", "log_metallicity", "av_ism", "log_tau_bc", "logU",
+                "log_mass_formed", "log_mstar", "redshift"]
+N_TARGETS = len(TARGET_NAMES)                    # 9
 
 
 # =============================================================================
@@ -92,118 +87,69 @@ def colour_inputs(magnitudes, errors, z_obs, sigma_z):
 # =============================================================================
 # 3. Targets and decoding
 # =============================================================================
-def fraction_columns(n_bins):
-    """Names frac_bin_00 ... of the first n_bins bins."""
-    names = []
-    for bin_index in range(n_bins):
-        names.append(f"frac_bin_{bin_index:02d}")
-    return names
-
-
 def encode_targets(table):
-    """The 19 flow targets of each row.
+    """The N_TARGETS flow targets of each row.
 
-    Inputs: table with frac_bin_00..14, Z_fin [Z_sun], Av_ism [mag], log_mass_formed and log_mstar [log M_sun],
-            redshift.
-    Returns: array (n, 19) in TARGET_NAMES order. Bins that do not exist (fraction 0) take sm.MIN_FRACTION
-             before the log-ratio, so every row has the same dimension.
+    Inputs: table with redshift, age and tau [Gyr], metallicity [Z/Z_sun], av_ism [mag], tau_bc, logU,
+            log_mass_formed and log_mstar [log M_sun] (the sm.TRAINING_LABELS names).
+    Returns: array (n, N_TARGETS) in TARGET_NAMES order: log10 of age, tau, metallicity and tau_bc;
+             the other targets as they are.
     """
-    fractions = table[fraction_columns(N_FRACTION_BINS)].to_numpy(dtype=float)
-    fractions = np.where(fractions > 0, fractions, sm.MIN_FRACTION)
-    reference = fractions[:, REFERENCE_BIN]
-
+    targets = {
+        "log_age": np.log10(table["age"].to_numpy(dtype=float)),
+        "log_tau": np.log10(table["tau"].to_numpy(dtype=float)),
+        "log_metallicity": np.log10(table["metallicity"].to_numpy(dtype=float)),
+        "av_ism": table["av_ism"].to_numpy(dtype=float),
+        "log_tau_bc": np.log10(table["tau_bc"].to_numpy(dtype=float)),
+        "logU": table["logU"].to_numpy(dtype=float),
+        "log_mass_formed": table["log_mass_formed"].to_numpy(dtype=float),
+        "log_mstar": table["log_mstar"].to_numpy(dtype=float),
+        "redshift": table["redshift"].to_numpy(dtype=float),
+    }
     columns = []
-    for bin_index in RATIO_BINS:
-        columns.append(np.log10(fractions[:, bin_index] / reference))
-    columns.append(np.log10(table["Z_fin"].to_numpy(dtype=float)))
-    columns.append(table["Av_ism"].to_numpy(dtype=float))
-    columns.append(table["log_mass_formed"].to_numpy(dtype=float))
-    columns.append(table["log_mstar"].to_numpy(dtype=float))
-    columns.append(table["redshift"].to_numpy(dtype=float))
+    for name in TARGET_NAMES:
+        columns.append(targets[name])
     return np.column_stack(columns)
 
 
-def mass_formed_younger_than(fractions, edges, age_limit):
-    """Share of the formed mass younger than age_limit, with constant SFR inside each bin.
-
-    Inputs: fractions (n, N_BINS) summing to 1; edges (n, N_BINS + 1) [Gyr ago], NaN beyond the last edge;
-            age_limit [Gyr].
-    Returns: (n,) fraction of the mass formed more recently than age_limit.
-    """
-    starts = edges[:, :-1]
-    ends = edges[:, 1:]
-    widths = ends - starts
-    overlap = np.clip(np.minimum(ends, age_limit) - starts, 0, None)
-    share_of_bin = np.where(widths > 0, overlap / widths, 0.0)
-    share_of_bin = np.nan_to_num(share_of_bin)
-    return np.sum(fractions * share_of_bin, axis=1)
-
-
 def decode_samples(theta):
-    """Physical labels of flow samples, with the same definitions as the training labels.
+    """Every training label of flow samples, with the same analytic definitions as the training labels.
 
-    Inputs: theta: array (n, 19) in TARGET_NAMES order (posterior samples or encoded truths).
-    Returns: DataFrame with redshift, Z_fin, Av_ism, log_mass_formed, log_mstar, log_sfr, mw_age, f_young,
-             f_mid, f_old and the 48 sm.BIN_LABEL_COLUMNS. The redshift is clipped to the prior; bins that do
-             not exist at the sampled redshift get frac 0, logsfr and zmet NaN, as in sm.bin_labels.
+    Each sample is decoded at its own redshift. The flow's tails can leave the prior, so the redshift is
+    clipped to sm.Z_RANGE, then age to [sm.AGE_MIN, sm.maximum_age(redshift)] and tau and metallicity to
+    their prior ranges; values inside the prior pass unchanged, so encoded truths decode exactly.
+    Inputs: theta: array (n, N_TARGETS) in TARGET_NAMES order (posterior samples or encoded truths).
+    Returns: DataFrame with the sm.TRAINING_LABELS columns, in that order: redshift, age and tau [Gyr],
+             metallicity [Z/Z_sun], av_ism [mag], tau_bc, logU, log_mass_formed, their logs, log_mstar
+             [log M_sun], and log_sfr, log_ssfr, mw_age and f_young/f_mid/f_old from sm.delayed_tau_labels.
     """
     theta = np.asarray(theta, dtype=float)
-    n_samples = len(theta)
     redshift = np.clip(theta[:, TARGET_NAMES.index("redshift")], *sm.Z_RANGE)
-    z_final = 10 ** theta[:, TARGET_NAMES.index("log_Z_fin")]
+
+    # 1. The SFH parameters, inside the prior at each sample's redshift
+    age = np.clip(10 ** theta[:, TARGET_NAMES.index("log_age")], sm.AGE_MIN, sm.maximum_age(redshift))
+    tau = np.clip(10 ** theta[:, TARGET_NAMES.index("log_tau")], *sm.TAU_RANGE)
+    metallicity = np.clip(10 ** theta[:, TARGET_NAMES.index("log_metallicity")], *sm.METALLICITY_RANGE)
     log_mass_formed = theta[:, TARGET_NAMES.index("log_mass_formed")]
     log_mstar = theta[:, TARGET_NAMES.index("log_mstar")]
 
-    # 1. Bins that exist at each sampled redshift
-    edges = sm.bin_edges_array(redshift)
-    n_existing = np.isfinite(edges).sum(axis=1) - 1
-    exists = np.arange(sm.N_BINS)[np.newaxis, :] < n_existing[:, np.newaxis]
-
-    # 2. Fractions from the log-ratios (clipped: the flow's tails can be extreme)
-    log_ratios = np.clip(theta[:, :len(RATIO_BINS)], -LOG_RATIO_LIMIT, LOG_RATIO_LIMIT)
-    relative_mass = np.zeros((n_samples, sm.N_BINS))
-    relative_mass[:, REFERENCE_BIN] = 1.0
-    for ratio_index, bin_index in enumerate(RATIO_BINS):
-        relative_mass[:, bin_index] = 10 ** log_ratios[:, ratio_index]
-    relative_mass = np.where(exists, relative_mass, 0.0)
-    fractions = relative_mass / relative_mass.sum(axis=1, keepdims=True)
-
-    # 3. Per-bin labels, as sm.bin_labels defines them
-    widths_in_years = np.diff(edges, axis=1) * sm.GYR_TO_YEARS
-    with np.errstate(divide="ignore", invalid="ignore"):
-        log_sfr_bins = log_mass_formed[:, np.newaxis] + np.log10(fractions) - np.log10(widths_in_years)
-    log_sfr_bins = np.where(exists, log_sfr_bins, np.nan)
-    metallicities = sm.bin_metallicities_array(fractions, n_existing, z_final)
-
-    # 4. Summary labels from the bins (constant SFR inside each bin)
-    midpoints = np.nan_to_num((edges[:, :-1] + edges[:, 1:]) / 2)
-    mw_age = np.sum(fractions * midpoints, axis=1)
-    younger_than_first = mass_formed_younger_than(fractions, edges, sm.LABEL_EDGES[0])
-    younger_than_second = mass_formed_younger_than(fractions, edges, sm.LABEL_EDGES[1])
-    recent_mass = 10**log_mass_formed * younger_than_first
-    recent_sfr = recent_mass / (sm.LABEL_EDGES[0] * sm.GYR_TO_YEARS)
-    sfr_floor = sm.SFR_FLOOR * 10**log_mstar
-    log_sfr = np.log10(np.maximum(recent_sfr, sfr_floor))
-
+    # 2. Labels derived from them, as sm.summary_labels defines them
     labels = {
         "redshift": redshift,
-        "Z_fin": z_final,
-        "Av_ism": theta[:, TARGET_NAMES.index("Av_ism")],
+        "age": age,
+        "tau": tau,
+        "metallicity": metallicity,
+        "av_ism": theta[:, TARGET_NAMES.index("av_ism")],
+        "tau_bc": 10 ** theta[:, TARGET_NAMES.index("log_tau_bc")],
+        "logU": theta[:, TARGET_NAMES.index("logU")],
         "log_mass_formed": log_mass_formed,
+        "log_age": np.log10(age),
+        "log_tau": np.log10(tau),
+        "log_metallicity": np.log10(metallicity),
         "log_mstar": log_mstar,
-        "log_sfr": log_sfr,
-        "mw_age": mw_age,
-        "f_young": younger_than_first,
-        "f_mid": younger_than_second - younger_than_first,
-        "f_old": 1 - younger_than_second,
     }
-    for bin_index in range(sm.N_BINS):
-        labels[f"frac_bin_{bin_index:02d}"] = fractions[:, bin_index]
-    for bin_index in range(sm.N_BINS):
-        labels[f"logsfr_bin_{bin_index:02d}"] = log_sfr_bins[:, bin_index]
-    for bin_index in range(sm.N_BINS):
-        labels[f"zmet_bin_{bin_index:02d}"] = metallicities[:, bin_index]
-    return pd.DataFrame(labels)
+    labels.update(sm.delayed_tau_labels(age, tau, log_mass_formed, log_mstar))
+    return pd.DataFrame(labels, columns=sm.TRAINING_LABELS)
 
 
 # =============================================================================
@@ -226,7 +172,8 @@ def simulate_observations(table, catalogue_r, catalogue_z, noise_table, rng):
 
     Inputs: table: noise-free models (training_set.parquet columns); catalogue_r [mag], catalogue_z: DR3 r_auto
             and zml (brightness donors); noise_table: splus_noise_model.csv; rng: numpy Generator.
-    Returns: dict(flat, banded, valid, targets) — inputs as colour_inputs gives them and the (n, 19) targets.
+    Returns: dict(flat, banded, valid, targets) — inputs as colour_inputs gives them and the targets
+             (n, N_TARGETS), with the mass-like labels rescaled to the drawn brightness.
              valid is False where r is undetected or no DR3 galaxy lies at the model's redshift.
     """
     true_redshift = table["redshift"].to_numpy(dtype=float)
@@ -235,9 +182,8 @@ def simulate_observations(table, catalogue_r, catalogue_z, noise_table, rng):
     # 1. Realistic brightness, and the masses that go with it
     scaled, offsets = sm.scale_to_observed_r(noiseless, true_redshift, catalogue_r, catalogue_z, rng)
     labels = table.copy()
-    labels["log_mass_formed"] = sm.LOG_MASS_FORMED
+    labels["log_mass_formed"] = sm.LOG_MASS_FORMED     # the noise-free models' value, rescaled below
     labels = sm.rescale_mass_labels(labels, offsets)
-    labels["log_mass_formed"] = sm.LOG_MASS_FORMED - sm.DEX_PER_MAGNITUDE * offsets
 
     # 2. S-PLUS noise and non-detections
     noisy, errors, _ = sm.add_splus_noise(scaled, noise_table, rng)
