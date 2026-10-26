@@ -13,7 +13,7 @@ Synthetic_domain/spectra/
 Synthetic_domain/spectral_fits/
 Synthetic_domain/*.parquet
 *.env
-Synthetic_domain/ml_runs/*/model.pt
+Synthetic_domain/ml_runs/**/model.pt
 Synthetic_domain/ml_sfh_catalogue.parquet
 Synthetic_domain/literature/raw/
 Synthetic_domain/notebook_job_logs/
