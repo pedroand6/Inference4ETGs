@@ -8,7 +8,7 @@ This project predicts the **star-formation history (SFH)** of a galaxy from its 
 
 The predictor is a **neural posterior estimator (NPE)**: an embedding network followed by a `zuko` normalizing flow. It is trained on synthetic Bagpipes galaxies. The project tries hard to **validate honestly**: there are held-out synthetic sets, a set of real galaxies whose labels come from Bagpipes fits of their SDSS spectra (and of their S-PLUS photometry), a locked test set, and independent physical checks that do not depend on full-spectrum fitting.
 
-> Status in one line (2026-10-26): the pipeline was rebuilt around the delayed-τ model (it replaces the earlier 16-bin non-parametric SFH, which is kept in git as the tag `nonparametric-16bin`). The code and its unit tests are done; **every result for this model is pending the PC runs** (sets, fits, training, evaluation), so [§8](#8-current-status-and-results) has no numbers for it yet.
+> Status in one line (2026-10-26): the pipeline was rebuilt around the delayed-τ model (it replaces the earlier 16-bin non-parametric SFH, which is kept in git as the tag `nonparametric-16bin`). The code and its unit tests are done, and the synthetic sets are generated (commit `0d6316d`; the Part 1 numbers are in [§8](#8-current-status-and-results)). **The fits, the training and the evaluation (Parts 2 and 3) are still pending the PC runs**, so §8 has no results for them yet.
 
 ---
 
@@ -338,18 +338,25 @@ One job at a time, all on the PC except step 2:
 
 ## 8. Current status and results
 
-As of 2026-10-26. **There are no results yet for the delayed-τ model**: the code is rebuilt and unit-tested (157 tests), and the PC runs listed in §7 are pending. The committed notebook outputs, CSVs, figures and `ml_runs/` that predate those runs still describe the 16-bin model and are replaced as the runs finish.
+As of 2026-10-26. The code is rebuilt and unit-tested (157 tests), and **Part 1 has been run on the PC** (commit `0d6316d`: the executed `training_set.ipynb` and the regenerated `color_color.png` and `coverage_criterion.png`). **There are no results yet for Parts 2 and 3**: the fits, the training and the evaluation are pending the PC runs listed in §7. The committed outputs of notebooks 2 and 3, their CSVs, the part-2 figures and `ml_runs/` still describe the 16-bin model and are replaced as those runs finish.
+
+### Part 1 results (delayed-τ, from the committed outputs of `training_set.ipynb`)
+
+- **Sets:** 524,288 training models, and 16,384 each in the validation and test sets (`synthetic_validation.parquet`, `synthetic_test.parquet`), none without a magnitude offset.
+- **Detected bands:** the held-out sets have 9.2 (validation) and 9.1 (test) detected bands on average, against 8.7 for DR3 (the mean over all galaxies with `PROB_GAL` above the cut, as the notebook prints it). The 51,456 DR3 galaxies kept for the coverage test have 8.9 on average; 4,632 of them have `zml` outside the prior range.
+- **Coverage of DR3 by the training domain** (coverage v2, p > 0.01): **91.2% of the 51,456 DR3 galaxies**, and 93.0% of the 46,824 with `zml` inside the redshift range. The 16-bin domain covered 92.1%. The old geometric test (K = 2) gives 99.1%.
+- **Synthetic validation galaxies covered:** 96.2% (the expected value is about 99%).
+- **Where coverage is lowest:** `zml` in (0.7, 1.0] (72.2%, outside the prior range) and the bright end (r ≤ 17: 77.4%; 17–18: 84.1%), then the faintest bin (21.0–21.5: 86.7%). It is 89–96% for `zml` up to 0.7 and 90–94% for r between 18 and 21, and it does not depend on the number of detected bands (90–92%).
 
 ### What exists for the delayed-τ model
 
 - The prior, components and analytic labels (`synthetic_model.py` §1–2), the 8-dimensional spectral and 6-dimensional photometric fit priors, `sfh_model` metadata and the superseding of old fits (§6–8).
-- `training_set.ipynb`, `spectroscopic_reference.ipynb` and `ml_model.ipynb` rewritten for the new labels and targets, and checked only for valid JSON and compiling code (they are executed on the PC).
+- `training_set.ipynb`, `spectroscopic_reference.ipynb` and `ml_model.ipynb` rewritten for the new labels and targets, and checked only for valid JSON and compiling code (notebook 1 has since been executed on the PC, see Part 1 results above; notebooks 2 and 3 are pending).
 - `ml_data.py` / `ml_networks.py` / `train_ml_model.py` with 9 targets, analytic decoding and `target_names` checkpoints.
 - Literature tables (MPA-JHU, Gallazzi) refetched for all 168 galaxies.
 
 ### What the PC runs will answer
 
-- Part 1: the number of detected bands in the held-out sets against DR3 (8.7), and the coverage of DR3 by the new training domain (the 16-bin domain covered 92.1% of 51,456 galaxies).
 - Part 2: whether the spectral and photometric fitters pass the calibration test (95% coverage ≥ 0.85 for `log_age`, `log_tau`, `log_metallicity`, `log_mstar`, with 68% reported), the new validation/test split, and the three validation layers.
 - Part 3: synthetic calibration of the MLP, the two "works" verdicts (against photometric and spectral Bagpipes) on the validation half, and the DR3 catalogue. The locked test runs once, after the validation results are inspected.
 
@@ -374,7 +381,7 @@ These results are superseded; they explain why the model changed.
 - **Spectral-fit calibration.** In the 16-bin run the spectral fits were overconfident at 1σ (68% coverage ≈ 0.5–0.67). Whether the delayed-τ fits are is open.
 - **[Mg/Fe] > 0** in passive galaxies cannot be modelled by solar-scaled BC03 (the Mgb excess seen in the 16-bin run).
 - **BOSS galaxies** have 2″ fibres against 3″ apertures. They are reported separately and have no MPA-JHU or Gallazzi values.
-- **Notebook outputs lag their source.** The saved outputs of all three notebooks, `spectroscopic_reference.csv`, `validation_summary.csv`, `ml_evaluation_summary.csv` and the figures still show the 16-bin pass until the PC re-runs replace them.
+- **Notebook outputs lag their source.** `training_set.ipynb` and its two figures (`color_color.png`, `coverage_criterion.png`) are delayed-τ. The saved outputs of notebooks 2 and 3, `spectroscopic_reference.csv`, `validation_summary.csv`, `ml_evaluation_summary.csv` and the part-2 figures still show the 16-bin pass until the PC re-runs replace them.
 - **Notebook 2 on the PC** needs network access (SDSS queries) and a large upload (the CSFD map alone is 289 MB); see the remote README.
 
 ---
