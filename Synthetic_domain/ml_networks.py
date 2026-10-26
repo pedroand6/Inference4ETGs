@@ -19,9 +19,9 @@ import ml_data
 # 1. Configuration
 # =============================================================================
 DEFAULT_CONFIG = {
-    "embedding": "mlp",              # "mlp" or "cnn"; only the MLP is trained (the CNN lost the 16-bin test)
+    "embedding": "mlp",              # "mlp" or "cnn"; only the MLP is trained (the CNN lost in 16-bin runs)
     "n_targets": ml_data.N_TARGETS,
-    "target_names": list(ml_data.TARGET_NAMES),   # stored with the run, so a run for other targets cannot load
+    "target_names": list(ml_data.TARGET_NAMES),   # stored with the run: a run for other targets cannot load
     "summary_size": 64,              # length of the embedding output
     "hidden_size": 256,              # width of the dense layers
     "mlp_layers": 3,
@@ -216,7 +216,8 @@ def save_run(directory, estimator, config, history, standardisers):
 
     Inputs: directory: output folder (created if missing); estimator: PosteriorEstimator; config: its
             configuration, whose target_names (default ml_data.TARGET_NAMES) name the n_targets flow
-            dimensions in order; history: list of per-epoch dicts; standardisers: {name: ml_data.Standardiser}.
+            dimensions in order; history: list of per-epoch dicts;
+            standardisers: {name: ml_data.Standardiser}.
     Raises: ValueError when target_names does not have n_targets entries.
     """
     target_names = list(config.get("target_names", ml_data.TARGET_NAMES))

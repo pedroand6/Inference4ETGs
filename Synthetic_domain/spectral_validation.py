@@ -325,10 +325,11 @@ def light_weighted_age_and_metallicity(unit_cube_samples, redshift, n_samples=N_
     """r-band light-weighted log age and log metallicity of posterior samples (Gallazzi et al. 2005 definition).
 
     Gallazzi et al. (2005, section 3.1) define the r-band light-weighted age as the linear mean
-    t_r = sum(L_i t_i) / sum(L_i), quoted as log10(t_r). Here i runs over Bagpipes' SFH age steps (0.0025 dex)
-    and L_i is the step's formed mass times the SSP r-band luminosity per unit mass at its age and the sample's
-    metallicity (r_band_light_per_age_step; dust-free, without nebular emission). With a single metallicity the
-    light-weighted Z is that metallicity. The S-PLUS r filter stands in for SDSS r (negligible difference).
+    t_r = sum(L_i t_i) / sum(L_i), quoted as log10(t_r). Here i runs over Bagpipes' SFH age steps
+    (0.0025 dex) and L_i is the step's formed mass times the SSP r-band luminosity per unit mass at its age
+    and the sample's metallicity (r_band_light_per_age_step; dust-free, without nebular emission). With a
+    single metallicity the light-weighted Z is that metallicity. The S-PLUS r filter stands in for SDSS r
+    (negligible difference).
     Inputs: unit_cube_samples: unit-cube posterior samples (dimensionless, shape (n, len(SPECTRAL_DIMS)));
             redshift: the galaxy redshift (dimensionless; it sets the oldest allowed age);
             n_samples: at most this many evenly spaced samples are used (count).

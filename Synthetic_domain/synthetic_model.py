@@ -65,7 +65,7 @@ def uniform(draw, low, high):
 def maximum_age(redshift):
     """Oldest allowed age [Gyr]: the age of the Universe at the redshift minus UNIVERSE_AGE_MARGIN.
 
-    Why the margin: Bagpipes flags a model that forms stars before the Big Bang as unphysical (NaN magnitudes).
+    Why the margin: Bagpipes flags a model forming stars before the Big Bang as unphysical (NaN magnitudes).
     Inputs: redshift: dimensionless z, scalar or array.
     Returns: maximum age [Gyr], a float for a scalar redshift or an array of the same shape.
     """
@@ -273,7 +273,8 @@ def simulate_models(unit_vectors):
 
     Inputs: unit_vectors: iterable of unit-cube vectors (dimensionless, in [0, 1)), each ordered as DIMS.
     Returns: DataFrame with one row per model: the TRAINING_LABELS, then the AB magnitudes [mag] in BANDS
-             order (NaN where a flux is not positive). The "z" column is the z-band magnitude, not the redshift.
+             order (NaN where a flux is not positive). The "z" column is the z-band magnitude, not the
+             redshift.
 
     One Bagpipes model is built and then updated: update() is ~70x faster than building a new one, and safe
     because every model has the same component set (Bagpipes fixes the components when it builds a model).
@@ -1000,14 +1001,14 @@ def updated_photometry_model(model, bagpipes_components):
 
 
 def sample_label_row(model, bagpipes_components, drawn):
-    """Labels of one posterior sample, read from its photometry model as the training set labels a model.
+    """Labels of one posterior sample, computed from its photometry model as for a training-set model.
 
     Inputs: model: photometry model_galaxy already at bagpipes_components; bagpipes_components: dict as from
             components(), the point the model is at (not read: the labels come from drawn and the model);
             drawn: dict from components() with the DRAWN_LABELS, plus any extra parameters of the fit
             (veldisp [km/s], noise_scale).
-    Returns: dict: the TRAINING_LABELS in order (summary_labels), then the extra drawn parameters, then model_r
-             [mag], the model r magnitude for 10^10 M_sun formed. Mass-like labels are for that mass.
+    Returns: dict: the TRAINING_LABELS in order (summary_labels), then the extra drawn parameters, then
+             model_r [mag], the model r magnitude for 10^10 M_sun formed. Mass-like labels are for that mass.
     """
     row = summary_labels(model.sfh, drawn)
     for key, value in drawn.items():
@@ -1238,7 +1239,7 @@ def fit_is_current(metadata):
     """Whether a stored fit belongs to the current production run: SFH_MODEL and the full iteration limit.
 
     Fits that fail this (16-bin fits without sfh_model, pilot runs with a smaller limit) are moved to
-    superseded/ by supersede_outdated_fits (spectroscopic_reference.ipynb, section 4) and never read as results.
+    superseded/ by supersede_outdated_fits (spectroscopic_reference.ipynb, section 4), never read as results.
     Inputs: metadata: dict as load_fit returns it.
     Returns: bool: True only when sfh_model == SFH_MODEL and max_iterations >= MAX_ITERATIONS.
     """
@@ -1290,12 +1291,12 @@ JOB_FITTERS = {SPECTRUM_JOB: fit_spectrum_job, PHOTOMETRY_JOB: fit_photometry_jo
 def fit_and_save(job, output_directory, max_iterations, n_live_points=N_LIVE_POINTS):
     """Fit one job and save <output_directory>/<job_id>.h5. Never raises.
 
-    Skips jobs whose readable file of the same kind and SFH_MODEL already exists, so a batch can be re-run with
-    more galaxies. An unreadable file does not count as finished: the job is fitted again and the file replaced.
-    A readable file of the other kind is never replaced (job ids are specobjids, shared by the spectral and
-    photometric fits of one galaxy), and neither is a fit of an earlier SFH model (the only copy of that result,
-    to be moved to superseded/): the job fails instead. A failed fit comes back with status "failed" and the
-    error text instead of an exception.
+    Skips jobs whose readable file of the same kind and SFH_MODEL already exists, so a batch can be re-run
+    with more galaxies. An unreadable file does not count as finished: the job is fitted again and the file
+    replaced. A readable file of the other kind is never replaced (job ids are specobjids, shared by the
+    spectral and photometric fits of one galaxy), and neither is a fit of an earlier SFH model (the only copy
+    of that result, to be moved to superseded/): the job fails instead. A failed fit comes back with status
+    "failed" and the error text instead of an exception.
     Inputs: job: dict with job_id (str), redshift (dimensionless) and kind (SPECTRUM_JOB when absent); a
             spectrum job holds spectrum (dict as from prepare_spectrum), a photometry job magnitudes and
             errors ([mag], 12 in BANDS order); output_directory: folder for the .h5 file and the MultiNest
@@ -1310,8 +1311,8 @@ def fit_and_save(job, output_directory, max_iterations, n_live_points=N_LIVE_POI
                "run_time": None, "n_iterations": None, "error": None}
 
     # 2. Skip finished jobs; their run details come from the file. Any failure to read it (damaged,
-    # truncated or missing fields) means the job is not finished, so it is fitted again below. A readable fit of
-    # an earlier SFH model is neither skipped (it is not a result of this model) nor overwritten (its only copy)
+    # truncated or missing fields) means the job is not finished, so it is fitted again below. A readable
+    # fit of an earlier SFH model is neither skipped (not a result of this model) nor overwritten (only copy)
     stored_kind = None
     stored_model = None
     if os.path.exists(output_path):
@@ -1487,10 +1488,10 @@ def calibration_coverage(posteriors, truths, labels, levels=CALIBRATION_LEVELS):
 # 8. Superseding the results of an earlier model or run (spectroscopic_reference.ipynb, section 4)
 # =============================================================================
 SUPERSEDED_SUBDIRECTORY = "superseded"     # inside each fits folder: results of earlier, replaced runs
-SUPERSEDED_NAME_SUFFIX = "_16bin"          # added to a name already taken there (first-run fits of the same id)
-CALIBRATION_MOCK_FILE = "calibration_mocks.joblib"   # (jobs, truths) of the calibration mocks of a fits folder
+SUPERSEDED_NAME_SUFFIX = "_16bin"          # added to a name already taken there (first-run fits, same id)
+CALIBRATION_MOCK_FILE = "calibration_mocks.joblib"   # (jobs, truths) of a fits folder's calibration mocks
 JOBS_SUBDIRECTORY = "jobs"                 # exported fit jobs, one .npz each
-RUN_LOG_NAMES = ("fit_log.csv", "fit_logs")   # logs of run_spectral_fits.py; their rows name the fits that ran
+RUN_LOG_NAMES = ("fit_log.csv", "fit_logs")   # logs of run_spectral_fits.py; their rows name the fits run
 
 
 def move_to_superseded(fits_directory, name):
@@ -1511,7 +1512,8 @@ def move_to_superseded(fits_directory, name):
     copy_number = 1
     while os.path.exists(destination):
         counter = "" if copy_number == 1 else f"_{copy_number}"
-        destination = os.path.join(superseded_directory, f"{stem}{SUPERSEDED_NAME_SUFFIX}{counter}{extension}")
+        new_name = f"{stem}{SUPERSEDED_NAME_SUFFIX}{counter}{extension}"
+        destination = os.path.join(superseded_directory, new_name)
         copy_number += 1
     os.makedirs(os.path.dirname(destination), exist_ok=True)
     shutil.move(source, destination)
@@ -1521,10 +1523,14 @@ def move_to_superseded(fits_directory, name):
 def calibration_mocks_are_current(mock_file):
     """Whether a stored calibration-mock file holds truths with the current calibration labels.
 
-    Inputs: mock_file: path of a joblib file with (jobs, truths), truths mapping job_id -> Series of true labels.
-    Returns: bool: True when every truth has every CALIBRATION_LABELS value (16-bin truths lack log_age).
+    Inputs: mock_file: path of a joblib file with (jobs, truths), truths mapping job_id -> Series of the
+            true labels.
+    Returns: bool: True when there is at least one truth and every truth has every CALIBRATION_LABELS value
+             (16-bin truths lack log_age). A file without mocks is not current, so it is redrawn, not reused.
     """
     _, truths = joblib.load(mock_file)
+    if len(truths) == 0:
+        return False
     for truth in truths.values():
         if not set(CALIBRATION_LABELS) <= set(truth.index):
             return False
@@ -1539,7 +1545,7 @@ def supersede_outdated_fits(fits_directory):
     Moved, in this order:
       1. every readable .h5 fit that fails fit_is_current, with its MultiNest folder (the name without .h5);
          an unreadable .h5 stays, because fit_and_save fits that job again;
-      2. CALIBRATION_MOCK_FILE when its truths lack the CALIBRATION_LABELS (mocks of the 16-bin model);
+      2. CALIBRATION_MOCK_FILE when its truths lack the CALIBRATION_LABELS (16-bin mocks) or it holds none;
       3. while no mock file is left, the jobs/calib_*.npz files, which then belong to no current mock;
       4. when any fit moved, the run logs RUN_LOG_NAMES (notebook 2 reads failures from them, and
          fetch_fits.sh drops new rows of ids already logged).
@@ -1571,7 +1577,7 @@ def supersede_outdated_fits(fits_directory):
         move_to_superseded(fits_directory, CALIBRATION_MOCK_FILE)
         moved.append(CALIBRATION_MOCK_FILE)
 
-    # 3. Job files of mocks that no stored mock file holds (the notebook stores the mocks before exporting them)
+    # 3. Job files of mocks that no stored mock file holds (the notebook stores mocks before exporting them)
     jobs_directory = os.path.join(fits_directory, JOBS_SUBDIRECTORY)
     if not os.path.exists(mock_file) and os.path.isdir(jobs_directory):
         for name in sorted(os.listdir(jobs_directory)):

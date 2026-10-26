@@ -2,7 +2,7 @@
 Train the SFH posterior estimator.
 
 Usage (from Synthetic_domain/):
-    python train_ml_model.py                     # the MLP, the only embedding trained for the delayed-tau model
+    python train_ml_model.py                     # the MLP, the only embedding trained (delayed-tau model)
     python train_ml_model.py --embedding cnn     # kept for comparison; not part of the pipeline
 Each run writes ml_runs/<embedding>/{model.pt, config.json, history.csv}; config.json records the
 ml_data.TARGET_NAMES the flow was trained for. The training set is noise-free; every epoch draws a fresh

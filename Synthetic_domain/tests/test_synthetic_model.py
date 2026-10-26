@@ -1143,6 +1143,29 @@ def test_supersede_renames_a_name_already_taken_in_superseded(tmp_path):
     assert sm.SUPERSEDED_NAME_SUFFIX == "_16bin"
 
 
+def test_move_to_superseded_counts_up_when_the_suffixed_name_is_taken_too(tmp_path):
+    """A third copy of one name gets _16bin_2, a fourth _16bin_3: no earlier superseded copy is overwritten."""
+    superseded = tmp_path / sm.SUPERSEDED_SUBDIRECTORY
+    destinations = []
+    for copy in ("first", "second", "third", "fourth"):
+        (tmp_path / "123.h5").write_text(copy)
+        destinations.append(sm.move_to_superseded(str(tmp_path), "123.h5"))
+
+    suffix = sm.SUPERSEDED_NAME_SUFFIX
+    names = ["123.h5", f"123{suffix}.h5", f"123{suffix}_2.h5", f"123{suffix}_3.h5"]
+    assert destinations == [str(superseded / name) for name in names]
+    assert [(superseded / name).read_text() for name in names] == ["first", "second", "third", "fourth"]
+    assert sm.move_to_superseded(str(tmp_path), "123.h5") is None    # nothing left to move
+
+
+def test_calibration_mocks_without_truths_are_not_current(tmp_path):
+    """A mock file holding no mock (e.g. every photometric mock lacked detected bands) is redrawn, not reused."""
+    joblib.dump(([], {}), tmp_path / sm.CALIBRATION_MOCK_FILE)
+    assert not sm.calibration_mocks_are_current(str(tmp_path / sm.CALIBRATION_MOCK_FILE))
+    write_mock_file(tmp_path / "current.joblib", sm.TRAINING_LABELS)
+    assert sm.calibration_mocks_are_current(str(tmp_path / "current.joblib"))
+
+
 def test_supersede_moves_old_mocks_their_jobs_and_the_run_logs(tmp_path):
     """16-bin mock truths lack log_age: the mock file, its calib_* jobs and the logs of the old fits move."""
     write_mock_file(tmp_path / sm.CALIBRATION_MOCK_FILE, ["mw_age", "Z_fin", "f_old", "log_mstar"])
@@ -1158,7 +1181,8 @@ def test_supersede_moves_old_mocks_their_jobs_and_the_run_logs(tmp_path):
 
     superseded = tmp_path / sm.SUPERSEDED_SUBDIRECTORY
     old_mock_job = os.path.join("jobs", "calib_000.npz")
-    assert sorted(moved) == sorted(["calib_000.h5", sm.CALIBRATION_MOCK_FILE, old_mock_job, "fit_log.csv", "fit_logs"])
+    expected = ["calib_000.h5", sm.CALIBRATION_MOCK_FILE, old_mock_job, "fit_log.csv", "fit_logs"]
+    assert sorted(moved) == sorted(expected)
     assert (superseded / sm.CALIBRATION_MOCK_FILE).exists()
     assert (superseded / "jobs" / "calib_000.npz").read_bytes() == b"old mock job"
     assert (jobs / "123.npz").exists()    # galaxy jobs do not depend on the model

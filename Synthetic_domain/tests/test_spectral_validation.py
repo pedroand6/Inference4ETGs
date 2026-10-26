@@ -165,7 +165,7 @@ def test_light_weighted_metallicity_is_the_single_metallicity():
 
 @pytest.mark.parametrize("age, tau, metallicity", [(5.0, 1.0, 0.3), (0.3, 20.0, 2.0)])
 def test_r_band_light_per_age_step_adds_up_to_the_bagpipes_r_band_flux(age, tau, metallicity):
-    """The age-step weights are Bagpipes' own r light: their sum is the dust-free model's r flux (one scale)."""
+    """The age-step weights are Bagpipes' own r light: they sum to the dust-free model's r flux (a scale)."""
     r_filter = [sm.FILTER_FILES[sm.BANDS.index("r")]]
     sfh = {"age": age, "tau": tau, "massformed": sm.LOG_MASS_FORMED, "metallicity": metallicity}
     model = pipes.model_galaxy({"redshift": sv.LIGHT_WEIGHT_REDSHIFT, "delayed": sfh}, filt_list=r_filter)
