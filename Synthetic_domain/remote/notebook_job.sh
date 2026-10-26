@@ -46,7 +46,14 @@ INSTALL_TORCH=1 SKIP_MULTINEST="$skip_multinest" bash build_env.sh
 source env/activate.sh
 export PATH="$HOME/.local/bin:$PATH"     # uv, installed by build_env.sh
 uv pip install --quiet --python "$(command -v python)" "${NOTEBOOK_PACKAGES[@]}"
-python -m ipykernel install --sys-prefix --name "$KERNEL_NAME"
+# The kernel spec is written by hand: `ipykernel install` copies logo files that are read-only in the CPU
+# container (permission denied), and the spec only needs kernel.json
+kernel_dir="$(python -c 'import sys; print(sys.prefix)')/share/jupyter/kernels/$KERNEL_NAME"
+mkdir -p "$kernel_dir"
+cat > "$kernel_dir/kernel.json" <<KERNEL_SPEC
+{"argv": ["$(command -v python)", "-m", "ipykernel_launcher", "-f", "{connection_file}"],
+ "display_name": "$KERNEL_NAME", "language": "python"}
+KERNEL_SPEC
 
 # 3b. GPU check: without it the notebook would silently sample on the CPU for hours
 if [[ "$NEEDS_GPU" == "1" ]]; then
