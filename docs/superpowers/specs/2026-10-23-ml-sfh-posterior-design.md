@@ -1,5 +1,7 @@
 # Phase 3: ML posterior for 16-bin SFHs from S-PLUS colours — design
 
+> **Superseded in part (2026-10-26):** the 16-bin targets (title, "Targets", the 19th-target amendment) and the A → B → C diagnostic amendments are replaced by `2026-10-26-delayed-tau-sfh-design.md` (9 flow targets, MLP only, the "works" test against photometric and spectral Bagpipes). Everything else here still holds. The 16-bin code is the git tag `nonparametric-16bin`.
+
 **Date:** 2026-10-23
 **Builds on:** `docs/superpowers/specs/2026-10-23-training-and-reference-sets-design.md` (training set v2, synthetic held-out sets, coverage test, spectroscopic reference set).
 

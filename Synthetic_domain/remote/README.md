@@ -1,6 +1,6 @@
 # Running the spectral fits on the job server
 
-The 93 fits (33 calibration mocks and 60 galaxies, `spectral_fits/jobs/`) run on the job server through the
+The 201 spectral fits (33 calibration mocks and 168 galaxies, `spectral_fits/jobs/`) run on the job server through the
 `hljob` client (installed in `~/.local/bin`, logged in with `hljob login`; the token lives in
 `~/.config/hljob/config`, never commit it). Every job starts from a fresh container, so each job builds its
 own Python 3.10 environment and MultiNest (about 40 s) before fitting.
@@ -25,15 +25,17 @@ Defaults are the full run: 16 cores, 7000 MB, 24 h, `WORKERS=14`, `MAX_ITERATION
 environment variables, for example `WORKERS=12 TIME_LIMIT=12:00:00 submit_fits.sh`. Extra arguments go to
 `hljob run` (for example `-e SYNC_SECONDS=300`). The script prints the job id.
 
-**Photometric fits** (spec amendment A: Bagpipes fits of the 12-band aperture photometry, exported by
-`spectroscopic_reference.ipynb` to `photometric_fits/jobs/`) use the same scripts with `FITS_SUBDIR`:
+**Photometric fits** (Bagpipes fits of the 12-band aperture photometry under the same delayed-tau prior, exported by
+`spectroscopic_reference.ipynb` to `photometric_fits/jobs/`: the 87 validation galaxies and 33 calibration mocks)
+use the same scripts with `FITS_SUBDIR`:
 
     FITS_SUBDIR=photometric_fits Synthetic_domain/remote/submit_fits.sh
 
 They share job ids (specobjids, `calib_<k>`) with the spectral fits, so they never share a folder: the
 job records its folder in `out/fits_subdir.txt`, `fetch_fits.sh` copies into that folder (and stops if a
 `FITS_SUBDIR` you set differs from it), and `sm.fit_and_save` never replaces a fit of the other kind.
-`skipped_fit_jobs.txt` applies to the spectral fits only (`SKIP_LIST` overrides it). `BUNDLE_ONLY=<folder>`
+`skipped_fit_jobs.txt` applies to the spectral fits only (`SKIP_LIST` overrides it). It is empty for the delayed-tau
+model: the ids it listed named 16-bin mocks, and the new mocks reuse the `calib_<k>` ids. `BUNDLE_ONLY=<folder>`
 writes the bundle and submits nothing. `JOB_SCRIPT=benchmark_job.sh` benchmarks the jobs of `FITS_SUBDIR` too.
 
 ## Follow
@@ -59,6 +61,13 @@ After a timeout, a cancel or a failure, fetch the job and submit again. The fini
 `spectral_fits/` travel in the bundle (`finished_fits/`) and the runner skips them. A fit that was running when the
 job stopped starts again from the beginning.
 
+**Fits of the 16-bin model must never be at the top level of the fits folder.** The runner skips by file presence, so
+a 16-bin `.h5` there would be bundled as a finished fit and never refitted. Every fit of the current model records
+`sfh_model = "delayed"` in its metadata; `sm.fit_and_save` refuses a file without it, and
+`sm.supersede_outdated_fits` moves such files (and the 16-bin mocks, calibration jobs and run logs) to
+`superseded/`. The local command is in "Notebook 2" below. `fetch_fits.sh` appends a row to `fit_log.csv` only for
+job ids not already in it, which is why the old log is superseded too.
+
 ## Server facts (probe and benchmark)
 
 - Container: Fedora 43, Python 3.14 (not used), no root, 16 vCPUs, 7000 MB limit with `--pause-llm`.
@@ -68,21 +77,30 @@ job stopped starts again from the beginning.
 
 # Training the ML posterior estimator (GPU)
 
-One GPU job trains both embeddings (MLP and CNN) one after the other with `train_ml_model.py`.
+One GPU job trains the MLP embedding with `train_ml_model.py`. The CNN lost clearly in the 16-bin comparison and is
+not trained for the delayed-tau model (the code still accepts `--embedding cnn`; list it in `EMBEDDINGS` to train
+both). The flow has 9 targets (`ml_data.TARGET_NAMES`); `config.json` records them, and `ml_networks.load_run`
+refuses a run trained for other targets, so the old 16-bin runs (moved to `ml_runs/superseded/`, as `mlp_16bin` and
+`cnn_16bin`) cannot be loaded.
 
 | File | Runs | Does |
 |---|---|---|
 | `submit_training.sh` | locally | packs the bundle (code, training and validation sets, noise model, a 3-column copy of the DR3 catalogue, MultiNest source), submits a detached GPU job, prints the job id |
-| `train_job.sh` | in the job | unpacks, runs `build_env.sh` with `INSTALL_TORCH=1` (PyTorch 2.5.1 CUDA 12.1 and zuko 1.2.0), trains each embedding, writes `out/ml_runs/<embedding>/` and `out/train_<embedding>.log` |
+| `train_job.sh` | in the job | unpacks, runs `build_env.sh` with `INSTALL_TORCH=1` (PyTorch 2.5.1 CUDA 12.1 and zuko 1.2.0), trains each embedding in `EMBEDDINGS`, writes `out/ml_runs/<embedding>/` and `out/train_<embedding>.log` |
+
+The bundle packs the sets that `training_set.ipynb` writes (`training_set.parquet`, `synthetic_validation.parquet`),
+so run that notebook first (next section). Training on the 16-bin sets fails: the parquet has no delayed-tau
+columns.
 
 ## Submit
 
     Synthetic_domain/remote/submit_training.sh
 
-Defaults: GPU, 8 cores, 7000 MB, 08:00:00, `EMBEDDINGS="mlp cnn"`. Change them with environment variables, for
-example `EMBEDDINGS=mlp TIME_LIMIT=04:00:00 submit_training.sh`; extra arguments go to `hljob run`. Only one job runs
-at a time, so submit it after the spectral fits have finished. `BUNDLE_ONLY=<folder> submit_training.sh` writes the
-bundle there and submits nothing (to check what travels).
+Defaults: GPU, 8 cores, 7000 MB, 08:00:00, `EMBEDDINGS=mlp`. Change them with environment variables, for
+example `TIME_LIMIT=04:00:00 submit_training.sh`; extra arguments go to `hljob run`. Only one job runs
+at a time, so the jobs queue. `BUNDLE_ONLY=<folder> submit_training.sh` writes the
+bundle there and submits nothing (to check what travels). New modules must be added by hand to the `cp` list of
+`submit_training.sh` (and to the one in `submit_fits.sh`); `submit_notebook.sh` packs every `./*.py` by itself.
 
 ## Follow
 
@@ -118,6 +136,22 @@ installs Jupyter and the packages only `spectroscopic_reference.ipynb` needs (as
 notebook logs in to the S-PLUS Cloud only for galaxies missing from `splus_aperture_photometry.csv`, so with a
 complete cache it needs no `.env`.
 
+## Notebook 1 (`training_set.ipynb`): the delayed-tau training and synthetic sets
+
+CPU job; it needs only the DR3 catalogue (the filter curves always travel, the noise model is refitted from the
+catalogue and rewritten):
+
+    cd Synthetic_domain
+    remote/submit_notebook.sh training_set.ipynb dr3_corrected.csv splus_noise_model.csv
+    remote/fetch_notebook.sh ID
+
+Defaults are 8 cores, 16000 MB and 4 h; the notebook uses `N_JOBS=7` workers (one core is left for the main
+process). The notebook is slow (about 2^19 + 2 x 2^14 Bagpipes models and a coverage test), so raise `TIME_LIMIT`,
+for example `TIME_LIMIT=06:00:00`. It writes `training_set.parquet` (about 275 MB for the 16-bin set), `synthetic_validation.parquet`,
+`synthetic_test.parquet`, `splus_noise_model.csv` and the two figures, and `fetch_notebook.sh` brings back every
+file it wrote, so the download is large: check its size first, or split the job if it is too big. The parquet files
+are git-ignored and reproducible from the seeds; the CSV and the figures are committed.
+
 ## Notebook 2 (`spectroscopic_reference.ipynb`)
 
 The job server buffers the whole upload in a small memory limit, so keep the bundle small:
@@ -131,7 +165,9 @@ The job server buffers the whole upload in a small memory limit, so keep the bun
   `dr3_corrected.csv` changes.
 - **CSFD dust map:** `../dustMaps/csfd` is 289 MB (`csfd_ebv.fits` 201 MB, `mask.fits` 101 MB). It cannot be
   cut down, so if the upload fails, try `HLJOB_OPTIONS=--pause-llm` first.
-- **Training set:** only `redshift` and the bands are read, so send it as float32 (`FLOAT32_FILES`).
+- **Training set:** the coverage test reads only `redshift` and the bands, so send it as float32
+  (`FLOAT32_FILES`). It must be the delayed-tau set from notebook 1, because the coverage test, and with it the
+  validation/test split, is computed against it.
 
 **Before every notebook-2 job, supersede locally** (file moves only, seconds). Cell 10 moves outdated fits,
 mock files, calibration jobs and run logs to `superseded/`, but in the job it moves only the job's copies: a move
@@ -142,7 +178,18 @@ old `.h5` files would be bundled by `submit_fits.sh` as finished fits (and repor
     cd Synthetic_domain && LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python -c "import synthetic_model as sm; \
         [print(d, len(sm.supersede_outdated_fits(d))) for d in ('spectral_fits', 'photometric_fits')]"
 
-First run (exports `photometric_fits/jobs/` and `photometric_fits/calibration_mocks.joblib`):
+The notebook runs three times, in this order (the full run order of the delayed-tau model is: notebook 1, notebook 2,
+spectral fits, MLP training, notebook 2, photometric fits, notebook 2, then `ml_model.ipynb`):
+
+1. **Export.** With no spectral fits yet, it exports the 168 galaxy jobs and the 33 calibration mocks to
+   `spectral_fits/jobs/` (its own superseding finds nothing left to move, because the local step ran first).
+   Section 6b draws no photometric mocks and exports no photometric job, because it needs the validation half,
+   and that comes from the spectral fits.
+2. **After the spectral fits** are fetched: it reads them, makes the split and exports `photometric_fits/jobs/`
+   (the validation galaxies and 33 mocks) with `photometric_fits/calibration_mocks.joblib`.
+3. **After the photometric fits** are fetched: it reads them and writes the `phot_*` columns.
+
+The command is the same each time:
 
     cd Synthetic_domain
     FLOAT32_FILES=training_set.parquet remote/submit_notebook.sh spectroscopic_reference.ipynb \
@@ -151,8 +198,9 @@ First run (exports `photometric_fits/jobs/` and `photometric_fits/calibration_mo
         spectroscopic_reference.csv literature
     remote/fetch_notebook.sh ID
 
-Then run and fetch the photometric fits (`FITS_SUBDIR=photometric_fits remote/submit_fits.sh`,
-`remote/fetch_fits.sh ID`). **The second run, which reads the fits, must also bundle `photometric_fits`** (the
+Run and fetch the spectral fits (`remote/submit_fits.sh`, `remote/fetch_fits.sh ID`) between runs 1 and 2, and the
+photometric fits (`FITS_SUBDIR=photometric_fits remote/submit_fits.sh`, `remote/fetch_fits.sh ID`) between runs 2 and
+3. **Run 3, which reads the photometric fits, must also bundle `photometric_fits`** (the
 `.h5` files and `calibration_mocks.joblib`): add `photometric_fits` to the inputs above. Without the mock file,
 cell 18 would draw new mocks whose truths differ from the fitted ones, so it stops when `calib_*.h5` fits exist
 but the mock file is missing.

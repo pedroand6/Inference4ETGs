@@ -1,5 +1,7 @@
 # Training set v2 and spectroscopic reference sets — design
 
+> **Superseded in part (2026-10-26):** the 16-bin SFH, its labels, the enrichment law and the SFH branches (Part 1 "Labels" and "Prior", and the parts that use them) are replaced by `2026-10-26-delayed-tau-sfh-design.md`. Everything else here still holds. The 16-bin code is the git tag `nonparametric-16bin`.
+
 **Date:** 2026-10-23
 **Scope:** parts 1 and 2 of the Inference4ETGs ML pipeline. Part 3 (the ML model) gets its own spec after this one is done.
 
