@@ -1,9 +1,11 @@
 """
 Metrics for the SFH posterior estimator: calibration (coverage, ranks), accuracy (bias, NMAD),
-information per bin (posterior/prior width) and agreement with the Bagpipes spectral posteriors.
+information per bin (posterior/prior width) and agreement with the Bagpipes reference posteriors
+(spectral or photometric fits).
 """
 
 import numpy as np
+import pandas as pd
 
 # =============================================================================
 # 1. Constants
@@ -15,6 +17,12 @@ TWO_SIGMA_LEVEL = 0.95                       # central probability of a "2 sigma
 PERCENT = 100
 WINDOW_STEPS = 5                             # cell width = window / 5, so a galaxy's prior window is centred
                                              # within window / 10 of its redshift
+# The "works" test of the ML spec amendment (2026-10-26): a label agrees with a reference set when at least
+# MIN_INSIDE_95 of the reference medians lie inside the ML 95% interval and the median offset is at most
+# MAX_ABS_MEDIAN_OFFSET combined 1-sigma widths
+MIN_INSIDE_95 = 0.80                         # fraction of galaxies
+MAX_ABS_MEDIAN_OFFSET = 1.0                  # [combined 1-sigma widths]
+ALL_LABELS_ROW = "all"                       # label of the verdict row that holds for every label at once
 
 
 # =============================================================================
@@ -129,3 +137,42 @@ def compare_with_spectral(ml_samples, spectral_p16, spectral_median, spectral_p8
     inside_68 = (spectral_median >= ml_low) & (spectral_median <= ml_high)
     inside_95 = (spectral_median >= low_95) & (spectral_median <= high_95)
     return {"offset_in_widths": offset, "inside_68": inside_68, "inside_95": inside_95}
+
+
+def agreement_verdict(comparison_rows, labels, min_inside_95=MIN_INSIDE_95,
+                      max_abs_median_offset=MAX_ABS_MEDIAN_OFFSET):
+    """Whether the ML agrees with a reference label set, per label and for all labels at once.
+
+    A label agrees when at least min_inside_95 of the reference medians lie inside the ML 95% interval
+    and the median of offset_in_widths is within +-max_abs_median_offset (both limits inclusive).
+    Inputs: comparison_rows: one row per (galaxy, label) with label, offset_in_widths (ML minus reference
+            median, in combined 1-sigma widths) and inside_95 (bool), as built from compare_with_spectral
+            (DataFrame or list of dicts); labels: the labels to judge, in output order;
+            min_inside_95: fraction; max_abs_median_offset: combined 1-sigma widths.
+    Returns: DataFrame with one row per label and a last row ALL_LABELS_ROW: label, n_galaxies (count),
+             inside_95 (fraction), median_offset (combined widths) and agrees (bool). A label without
+             galaxies has NaN fractions and does not agree; the last row agrees only if every label does.
+    """
+    rows = pd.DataFrame(comparison_rows)
+    verdict_rows = []
+    for label in labels:
+        # Why the column check: an empty comparison has no columns at all
+        if "label" in rows.columns:
+            label_rows = rows[rows["label"] == label]
+        else:
+            label_rows = rows
+        n_galaxies = len(label_rows)
+        if n_galaxies == 0:
+            verdict_rows.append({"label": label, "n_galaxies": 0, "inside_95": np.nan,
+                                 "median_offset": np.nan, "agrees": False})
+            continue
+        inside_95 = float(np.mean(label_rows["inside_95"].to_numpy(dtype=bool)))
+        median_offset = float(np.nanmedian(label_rows["offset_in_widths"].to_numpy(dtype=float)))
+        agrees = inside_95 >= min_inside_95 and abs(median_offset) <= max_abs_median_offset
+        verdict_rows.append({"label": label, "n_galaxies": n_galaxies, "inside_95": inside_95,
+                             "median_offset": median_offset, "agrees": agrees})
+
+    every_label_agrees = all(row["agrees"] for row in verdict_rows)
+    verdict_rows.append({"label": ALL_LABELS_ROW, "n_galaxies": np.nan, "inside_95": np.nan,
+                         "median_offset": np.nan, "agrees": every_label_agrees})
+    return pd.DataFrame(verdict_rows)

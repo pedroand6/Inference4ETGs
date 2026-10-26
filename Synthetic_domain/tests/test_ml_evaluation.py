@@ -74,3 +74,67 @@ def test_zero_prior_width_is_left_out_not_infinite():
     ratio = ev.width_ratio(posterior, None, prior_widths=widths)
     assert np.isfinite(ratio)
     assert np.isclose(ratio, 0.5, atol=0.05)
+
+
+def comparison_rows(labels, reference_median, n_galaxies=60, seed=47):
+    """Per-galaxy rows of ML vs reference comparisons: ML posteriors N(0, 1), reference median given, sigma 1.
+
+    Inputs: labels: label names; reference_median: the reference median of every galaxy (label units);
+            n_galaxies: count; seed: rng seed.
+    Returns: list of dicts with label, offset_in_widths and inside_95, as ml_model.ipynb builds them.
+    """
+    rng = np.random.default_rng(seed)
+    rows = []
+    for label in labels:
+        ml_samples = rng.normal(0, 1, (n_galaxies, 4000))
+        medians = np.full(n_galaxies, reference_median)
+        comparison = ev.compare_with_spectral(ml_samples, medians - 1, medians, medians + 1)
+        for galaxy_index in range(n_galaxies):
+            rows.append({"label": label, "offset_in_widths": comparison["offset_in_widths"][galaxy_index],
+                         "inside_95": comparison["inside_95"][galaxy_index]})
+    return rows
+
+
+def test_agreement_verdict_of_an_agreeing_set_is_true():
+    verdict = ev.agreement_verdict(comparison_rows(["mw_age", "Z_fin"], 0.0), ["mw_age", "Z_fin"])
+    by_label = verdict.set_index("label")
+    assert list(verdict["label"]) == ["mw_age", "Z_fin", ev.ALL_LABELS_ROW]
+    assert by_label.loc["mw_age", "inside_95"] == 1.0
+    assert abs(by_label.loc["mw_age", "median_offset"]) < 0.05
+    assert by_label.loc["mw_age", "n_galaxies"] == 60
+    assert bool(by_label.loc["Z_fin", "agrees"])
+    assert bool(by_label.loc[ev.ALL_LABELS_ROW, "agrees"])
+
+
+def test_agreement_verdict_of_a_set_shifted_by_three_sigma_is_false():
+    """Reference medians 3 sigma away: outside the ML 95% interval, offset -3 / sqrt(2) combined widths."""
+    verdict = ev.agreement_verdict(comparison_rows(["mw_age"], 3.0), ["mw_age"])
+    by_label = verdict.set_index("label")
+    assert by_label.loc["mw_age", "inside_95"] < 0.80
+    assert by_label.loc["mw_age", "median_offset"] < -1.0
+    assert not bool(by_label.loc["mw_age", "agrees"])
+    assert not bool(by_label.loc[ev.ALL_LABELS_ROW, "agrees"])
+
+
+def test_agreement_verdict_thresholds_are_inclusive_and_settable():
+    """A label passes when exactly at the thresholds; stricter thresholds fail it."""
+    rows = []
+    for offset, inside in ((0.0, True), (1.0, True), (1.0, True), (2.0, False), (-1.0, True)):
+        rows.append({"label": "f_old", "offset_in_widths": offset, "inside_95": inside})
+    verdict = ev.agreement_verdict(rows, ["f_old"]).set_index("label")
+    assert verdict.loc["f_old", "inside_95"] == 0.80 and verdict.loc["f_old", "median_offset"] == 1.0
+    assert bool(verdict.loc["f_old", "agrees"])
+    strict = ev.agreement_verdict(rows, ["f_old"], min_inside_95=0.9).set_index("label")
+    assert not bool(strict.loc["f_old", "agrees"])
+
+
+def test_agreement_verdict_of_a_label_without_galaxies_is_nan_and_false():
+    verdict = ev.agreement_verdict(comparison_rows(["mw_age"], 0.0), ["mw_age", "log_mstar"])
+    by_label = verdict.set_index("label")
+    assert np.isnan(by_label.loc["log_mstar", "inside_95"])
+    assert np.isnan(by_label.loc["log_mstar", "median_offset"])
+    assert by_label.loc["log_mstar", "n_galaxies"] == 0
+    assert not bool(by_label.loc["log_mstar", "agrees"])
+    assert not bool(by_label.loc[ev.ALL_LABELS_ROW, "agrees"])
+    empty = ev.agreement_verdict([], ["mw_age"]).set_index("label")    # no comparison at all
+    assert not bool(empty.loc[ev.ALL_LABELS_ROW, "agrees"])
