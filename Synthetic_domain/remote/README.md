@@ -25,6 +25,16 @@ Defaults are the full run: 16 cores, 7000 MB, 24 h, `WORKERS=14`, `MAX_ITERATION
 environment variables, for example `WORKERS=12 TIME_LIMIT=12:00:00 submit_fits.sh`. Extra arguments go to
 `hljob run` (for example `-e SYNC_SECONDS=300`). The script prints the job id.
 
+**Photometric fits** (spec amendment A: Bagpipes fits of the 12-band aperture photometry, exported by
+`spectroscopic_reference.ipynb` to `photometric_fits/jobs/`) use the same scripts with `FITS_SUBDIR`:
+
+    FITS_SUBDIR=photometric_fits Synthetic_domain/remote/submit_fits.sh
+
+They share job ids (specobjids, `calib_<k>`) with the spectral fits, so they never share a folder: the job records
+its folder in `out/fits_subdir.txt`, `fetch_fits.sh` copies into that folder (and stops if a `FITS_SUBDIR` you set
+differs from it), and `sm.fit_and_save` never replaces a fit of the other kind. `skipped_fit_jobs.txt` applies to
+the spectral fits only (`SKIP_LIST` overrides it). `BUNDLE_ONLY=<folder>` writes the bundle and submits nothing.
+
 ## Follow
 
     hljob logs ID -f          # live log (Ctrl-C only stops watching)
@@ -95,3 +105,13 @@ is already in `out/ml_runs/`, so it can be fetched after a timeout too.
     cd Synthetic_domain
     python train_ml_model.py --embedding mlp --output-dir /tmp/ml_test --epochs 2 \
         --max-train-rows 3000 --max-validation-rows 500 --device cpu
+
+# Running a notebook on the job server
+
+`submit_notebook.sh <notebook> <input> ...` packs the notebook, every module, `splus-filters/` and the listed inputs
+(paths relative to `Synthetic_domain/`; a path starting with `../` is elsewhere in the repository, e.g.
+`../dustMaps/csfd`) into a bundle with the repository layout, and the job executes the notebook from
+`Synthetic_domain/`. `.env` is never packed. `fetch_notebook.sh ID` puts every file the notebook wrote back at its
+repository path. `BUNDLE_ONLY=<folder>` writes the bundle and submits nothing. The job installs Jupyter and the
+packages only `spectroscopic_reference.ipynb` needs (astroquery, dustmaps). That notebook logs in to the S-PLUS
+Cloud only for galaxies missing from `splus_aperture_photometry.csv`, so with a complete cache it needs no `.env`.

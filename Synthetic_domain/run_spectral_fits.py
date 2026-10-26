@@ -1,7 +1,11 @@
-"""Run the MultiNest spectral fits of the exported jobs, one single-core fit per process.
+"""Run the MultiNest fits of the exported jobs, one single-core fit per process.
 
 Each job is a file <jobs-dir>/<job_id>.npz written by the reference notebook (sm.export_job). Each finished
 fit is <output-dir>/<job_id>.h5, so a run can be stopped and started again: finished jobs are skipped.
+A job is a spectral fit (kind "spectrum", the default) or a fit of the 12-band aperture photometry (kind
+"photometry", spec amendment A); sm.fit_and_save picks the fitter from the job file and stores the kind in
+the .h5 file. The two kinds share job ids (the specobjid), so they live in separate folders:
+spectral_fits/ and photometric_fits/ (pass --jobs-dir photometric_fits/jobs --output-dir photometric_fits).
 
 1. Environment (the PC or cluster needs the same software as the notebook)
    - Python 3.10 with numpy, pandas, h5py, scipy, astropy, extinction, bagpipes and pymultinest.
@@ -12,7 +16,7 @@ fit is <output-dir>/<job_id>.h5, so a run can be stopped and started again: fini
 2. Files to copy to the machine, keeping this layout (into one folder, from which you run the commands)
    - synthetic_model.py, run_spectral_fits.py, slurm_fit.sh
    - splus-filters/
-   - spectral_fits/jobs/  (all the .npz files)
+   - spectral_fits/jobs/  (all the .npz files; photometric_fits/jobs/ for the photometric fits)
 
 3. Run on one machine, one fit per physical core (hardware threads of one core are not counted).
    By default the number of workers is the physical cores this process may use (Linux /proc/cpuinfo, within
@@ -26,8 +30,8 @@ fit is <output-dir>/<job_id>.h5, so a run can be stopped and started again: fini
    Each array task writes its own log file, <output-dir>/fit_logs/<job_id>.csv, so tasks never write to the
    same file on a shared filesystem.
 
-5. Copy the results back: every <job_id>.h5 in the output folder (spectral_fits/) goes into the
-   notebook's spectral_fits/ folder. Then run the notebook's analysis cells again.
+5. Copy the results back: every <job_id>.h5 in the output folder (spectral_fits/ or photometric_fits/) goes
+   into the notebook's folder of the same name. Then run the notebook's analysis cells again.
    fit_log.csv (local runs) and fit_logs/*.csv (Slurm tasks) list the run time, iterations and convergence
    of every fit made here; copy them back too (the notebook reads both).
 """
@@ -214,7 +218,7 @@ def parse_arguments():
 
     Returns: argparse.Namespace.
     """
-    parser = argparse.ArgumentParser(description="Run the MultiNest spectral fits of the exported jobs.")
+    parser = argparse.ArgumentParser(description="Run the MultiNest fits (spectral or photometric) of the exported jobs.")
     parser.add_argument("--jobs-dir", default=DEFAULT_JOBS_DIRECTORY, help="folder with the job .npz files")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIRECTORY,
                         help="folder for the .h5 results and fit_log.csv (keep the path short: MultiNest limit)")

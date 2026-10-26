@@ -747,6 +747,125 @@ def test_export_and_load_job_round_trip(tmp_path):
     assert loaded["redshift"] == job["redshift"]
     for key in ("wavelength", "flux", "ivar"):
         assert np.array_equal(loaded["spectrum"][key], job["spectrum"][key]), key
+    assert loaded["kind"] == "spectrum"
+
+
+def photometry_job(job_id, rng):
+    """A photometry job at z = 0.1: noiseless model magnitudes of a random point, 0.05 mag errors, u undetected.
+
+    Inputs: job_id: identifier (str); rng: numpy Generator.
+    Returns: job dict with job_id, kind, magnitudes [mag], errors [mag] and redshift.
+    """
+    magnitudes, _ = noiseless_photometry(rng.random(len(sm.PHOTOMETRIC_DIMS)), 0.1)
+    magnitudes[0] = 99.0
+    return {"job_id": job_id, "kind": "photometry", "magnitudes": magnitudes,
+            "errors": np.full(len(sm.BANDS), 0.05), "redshift": 0.1}
+
+
+def test_export_and_load_photometry_job_round_trip(tmp_path):
+    job = photometry_job("10311134961714089984", np.random.default_rng(30))
+    path = sm.export_job(job, str(tmp_path / "jobs"))
+
+    loaded = sm.load_job(path)
+    assert loaded["kind"] == "photometry"
+    assert loaded["job_id"] == "10311134961714089984"
+    assert loaded["redshift"] == 0.1
+    assert np.array_equal(loaded["magnitudes"], job["magnitudes"])
+    assert np.array_equal(loaded["errors"], job["errors"])
+    assert "spectrum" not in loaded
+
+
+def test_job_file_written_before_kinds_loads_as_a_spectrum_job(tmp_path):
+    """Job files exported before the photometric fits existed have no kind: they are spectral jobs."""
+    job, _ = mock_job("old_job", np.random.default_rng(31))
+    path = str(tmp_path / "old_job.npz")
+    np.savez(path, wavelength=job["spectrum"]["wavelength"], flux=job["spectrum"]["flux"],
+             ivar=job["spectrum"]["ivar"], redshift=job["redshift"], job_id="old_job")
+
+    loaded = sm.load_job(path)
+    assert loaded["kind"] == "spectrum"
+    assert np.array_equal(loaded["spectrum"]["flux"], job["spectrum"]["flux"])
+
+
+def fake_fit(n_dims):
+    """What a fitter returns, without running MultiNest: two unit-cube samples of n_dims coordinates."""
+    return {"samples": np.full((2, n_dims), 0.5), "log_evidence": -1.0, "n_iterations": 7,
+            "converged": True, "run_time": 3.0}
+
+
+@pytest.fixture
+def fake_fitters(monkeypatch):
+    """Replace both fitters and both labellers; returns the list of fitters called, in order."""
+    called = []
+
+    def fake_fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_points):
+        called.append("spectrum")
+        return fake_fit(len(sm.SPECTRAL_DIMS))
+
+    def fake_fit_photometry(magnitudes, errors, redshift, output_basename, max_iterations, n_live_points):
+        called.append("photometry")
+        return fake_fit(len(sm.PHOTOMETRIC_DIMS))
+
+    def fake_spectral_labels(unit_cube_samples, redshift):
+        return pd.DataFrame({"mw_age": [1.0, 2.0]})
+
+    def fake_photometric_labels(unit_cube_samples, redshift, magnitudes, errors, rng):
+        return pd.DataFrame({"mw_age": [3.0, 4.0], "magnitude_offset": [1.0, 1.0]})
+
+    monkeypatch.setattr(sm, "fit_spectrum", fake_fit_spectrum)
+    monkeypatch.setattr(sm, "fit_photometry", fake_fit_photometry)
+    monkeypatch.setattr(sm, "posterior_labels", fake_spectral_labels)
+    monkeypatch.setattr(sm, "photometric_posterior_labels", fake_photometric_labels)
+    return called
+
+
+def test_fit_and_save_routes_each_job_to_its_fitter_and_stores_the_kind(tmp_path, fake_fitters):
+    spectral_job, _ = mock_job("spectral", np.random.default_rng(32))    # no kind: a spectral job by default
+    photometric_job = {"job_id": "photometric", "kind": "photometry", "magnitudes": np.full(12, 20.0),
+                       "errors": np.full(12, 0.05), "redshift": 0.1}
+
+    spectral_summary = sm.fit_and_save(spectral_job, str(tmp_path), max_iterations=10, n_live_points=25)
+    photometric_summary = sm.fit_and_save(photometric_job, str(tmp_path), max_iterations=10, n_live_points=25)
+
+    assert fake_fitters == ["spectrum", "photometry"]
+    assert spectral_summary["status"] == "fitted", spectral_summary["error"]
+    assert photometric_summary["status"] == "fitted", photometric_summary["error"]
+    spectral_posterior, spectral_metadata = sm.load_fit(str(tmp_path / "spectral.h5"))
+    photometric_posterior, photometric_metadata = sm.load_fit(str(tmp_path / "photometric.h5"))
+    assert spectral_metadata["kind"] == "spectrum"
+    assert photometric_metadata["kind"] == "photometry"
+    assert list(photometric_posterior["mw_age"]) == [3.0, 4.0]
+
+
+def test_fit_and_save_never_replaces_a_fit_of_the_other_kind(tmp_path, fake_fitters):
+    """Job ids are specobjids, shared by the spectral and photometric fits of one galaxy."""
+    posterior = pd.DataFrame({"mw_age": [1.0, 2.0]})
+    metadata = {"converged": True, "run_time": 5.0, "n_iterations": 10, "log_evidence": -1.0}
+    path = str(tmp_path / "1105771463723476992.h5")
+    sm.save_fit(path, posterior, np.zeros((2, len(sm.SPECTRAL_DIMS))), metadata)   # no kind: a spectral fit
+    photometric_job = {"job_id": "1105771463723476992", "kind": "photometry", "magnitudes": np.full(12, 20.0),
+                       "errors": np.full(12, 0.05), "redshift": 0.1}
+
+    summary = sm.fit_and_save(photometric_job, str(tmp_path), max_iterations=10, n_live_points=25)
+
+    assert summary["status"] == "failed"
+    assert "spectrum fit" in summary["error"]
+    assert fake_fitters == []
+    _, stored_metadata = sm.load_fit(path)
+    assert "kind" not in stored_metadata    # the spectral file is untouched
+
+
+def test_fit_and_save_photometry_smoke_run(tmp_path):
+    """A short MultiNest run on a photometry job is saved with rescaled labels, the offsets and the kind."""
+    job = photometry_job("phot_smoke", np.random.default_rng(33))
+    summary = sm.fit_and_save(job, str(tmp_path), max_iterations=200, n_live_points=25)
+
+    assert summary["status"] == "fitted", summary["error"]
+    posterior, metadata = sm.load_fit(str(tmp_path / "phot_smoke.h5"))
+    assert metadata["kind"] == "photometry"
+    for column in ("mw_age", "Z_fin", "f_old", "log_mstar", "log_sfr", "magnitude_offset"):
+        assert column in posterior.columns, column
+        assert np.isfinite(posterior[column]).all(), column
 
 
 def test_calibration_cubes_are_deterministic_and_use_every_sfh_branch():
@@ -842,6 +961,17 @@ def test_run_script_fits_an_exported_job_and_logs_it(tmp_path):
     assert list(log["job_id"]) == ["calib_smoke"]
     assert list(log["status"]) == ["fitted"]
     assert log["n_iterations"].iloc[0] <= 100
+
+
+def test_run_script_fits_an_exported_photometry_job(tmp_path):
+    sm.export_job(photometry_job("calib_000", np.random.default_rng(34)), str(tmp_path / "jobs"))
+
+    result = run_script("--jobs-dir", str(tmp_path / "jobs"), "--output-dir", str(tmp_path),
+                        "--max-iterations", "200", "--n-live", "25", "--workers", "1")
+
+    assert result.returncode == 0, result.stderr
+    _, metadata = sm.load_fit(str(tmp_path / "calib_000.h5"))
+    assert metadata["kind"] == "photometry"
 
 
 def test_run_script_status_counts_done_and_pending_jobs(tmp_path):

@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# Runs LOCALLY: downloads a job's results and copies the fits and logs into Synthetic_domain/spectral_fits/,
+# Runs LOCALLY: downloads a job's results and copies the fits and logs into Synthetic_domain/<fits folder>/,
 # without overwriting a local file that is newer than the downloaded one.
 # Works on a running job too (it gets the files copied to out/ so far) and after a timeout.
 #
+# The fits folder is the one the job recorded in out/fits_subdir.txt (spectral_fits or photometric_fits). Jobs
+# made before it was recorded are spectral fits; for them FITS_SUBDIR may name the folder [default spectral_fits].
+# A FITS_SUBDIR that differs from the recorded folder stops the script: spectral and photometric fits share
+# job ids (specobjids), so a fit copied into the wrong folder would replace another.
+#
 # Usage:  fetch_fits.sh <job-id>
+#         FITS_SUBDIR=photometric_fits fetch_fits.sh <job-id>   (optional: checked against the job's record)
 set -euo pipefail
 
 # 1. Arguments and paths
@@ -13,7 +19,6 @@ if [[ $# -ne 1 ]]; then
 fi
 job_id="$1"
 REMOTE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FITS_DIR="$(dirname "$REMOTE_DIR")/spectral_fits"
 export PATH="$HOME/.local/bin:$PATH"
 
 # 2. Download into a scratch folder, never straight into the repository
@@ -21,6 +26,20 @@ scratch_dir="$(mktemp -d)"
 trap 'rm -rf "$scratch_dir"' EXIT
 hljob fetch "$job_id" -o "$scratch_dir/job"
 downloaded_out="$scratch_dir/job/out"
+
+# 2b. The fits folder: the job's own record wins; a different FITS_SUBDIR is an error, not an override
+if [[ -f "$downloaded_out/fits_subdir.txt" ]]; then
+    recorded_subdir="$(tr -d '[:space:]' < "$downloaded_out/fits_subdir.txt")"
+    if [[ -n "${FITS_SUBDIR:-}" && "$FITS_SUBDIR" != "$recorded_subdir" ]]; then
+        echo "Job $job_id fitted $recorded_subdir, but FITS_SUBDIR=$FITS_SUBDIR; nothing copied" >&2
+        exit 1
+    fi
+    fits_subdir="$recorded_subdir"
+else
+    fits_subdir="${FITS_SUBDIR:-spectral_fits}"
+fi
+FITS_DIR="$(dirname "$REMOTE_DIR")/$fits_subdir"
+echo "Copying into $FITS_DIR"
 mkdir -p "$FITS_DIR" "$FITS_DIR/job_logs"
 
 # 3. Fits: cp -u copies only when the downloaded file is newer than the local one (or the local one is missing)
@@ -56,4 +75,5 @@ for diagnostic in build_env.log env_build_seconds.txt memory_peak_bytes.txt memo
 done
 cp -p "$scratch_dir/job/stdout.log" "$scratch_dir/job/stderr.log" "$scratch_dir/job/job.json" "$FITS_DIR/job_logs/$job_id/" 2>/dev/null || true
 
-echo "Done. Next: python run_spectral_fits.py --status   (from Synthetic_domain/)"
+echo "Done. Next: python run_spectral_fits.py --jobs-dir $fits_subdir/jobs --output-dir $fits_subdir --status" \
+     "  (from Synthetic_domain/)"

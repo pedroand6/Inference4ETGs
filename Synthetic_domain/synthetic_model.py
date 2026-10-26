@@ -1012,6 +1012,8 @@ MEDIAN_PERCENTILE = 50           # central posterior summary (percent)
 HIGH_PERCENTILE = 84             # upper posterior summary (percent), 1 sigma
 MAX_ITERATIONS = 50000           # MultiNest iteration limit of a production fit (count)
 OFFSET_DRAW_SEED = 0             # seed of the per-sample magnitude offsets of a photometric fit's labels
+SPECTRUM_JOB = "spectrum"        # job kind of a spectral fit; also every job or fit file stored without a kind
+PHOTOMETRY_JOB = "photometry"    # job kind of a photometric fit (spec amendment A)
 
 # The photometric fit (spec amendment A) samples the training prior at the spectroscopic redshift and nothing
 # else: its brightness offset is marginalised analytically, and the simulator has no error multiplier
@@ -1391,8 +1393,10 @@ def save_fit(path, posterior, unit_cube_samples, metadata):
     The file is written as path + ".tmp" and renamed to path only once complete, so an interrupted
     or failed write never leaves a partial file at path (which would count as a finished job).
     Inputs: path: output file path (str); posterior: DataFrame of labels, one column per label;
-            unit_cube_samples: unit-cube points (dimensionless, shape (n_samples, len(SPECTRAL_DIMS)));
-            metadata: dict of scalars (converged, run_time [s], n_iterations, max_iterations, log_evidence, redshift).
+            unit_cube_samples: unit-cube points (dimensionless, shape (n_samples, n_dims), n_dims that of the
+            fit's kind: len(SPECTRAL_DIMS) or len(PHOTOMETRIC_DIMS));
+            metadata: dict of scalars (converged, run_time [s], n_iterations, max_iterations, log_evidence, redshift,
+            kind: SPECTRUM_JOB or PHOTOMETRY_JOB; files written before kinds existed have none and are spectral).
     Returns: None. An existing file at path is replaced.
     """
     temporary_path = path + ".tmp"
@@ -1423,42 +1427,93 @@ def load_fit(path):
     return pd.DataFrame(columns), metadata
 
 
+def job_kind(job):
+    """Kind of a fit job: SPECTRUM_JOB or PHOTOMETRY_JOB.
+
+    Inputs: job: job dict (as fit_and_save takes).
+    Returns: job["kind"], or SPECTRUM_JOB for a job without one (jobs made before the photometric fits existed).
+    """
+    return job.get("kind", SPECTRUM_JOB)
+
+
+def fit_spectrum_job(job, multinest_basename, max_iterations, n_live_points):
+    """Fit a spectrum job and label its posterior samples.
+
+    Inputs: job: dict with spectrum (as from prepare_spectrum) and redshift (dimensionless); multinest_basename:
+            directory prefix for the MultiNest files (str); max_iterations, n_live_points: counts.
+    Returns: (fit dict from fit_spectrum, posterior DataFrame from posterior_labels).
+    """
+    fit = fit_spectrum(job["spectrum"], job["redshift"], multinest_basename, max_iterations, n_live_points)
+    posterior = posterior_labels(fit["samples"], job["redshift"])
+    return fit, posterior
+
+
+def fit_photometry_job(job, multinest_basename, max_iterations, n_live_points):
+    """Fit a photometry job and label its posterior samples at the galaxy's brightness.
+
+    Inputs: job: dict with magnitudes and errors ([mag], 12 in BANDS order) and redshift (dimensionless);
+            multinest_basename: directory prefix for the MultiNest files (str); max_iterations, n_live_points: counts.
+    Returns: (fit dict from fit_photometry, posterior DataFrame from photometric_posterior_labels).
+    """
+    fit = fit_photometry(job["magnitudes"], job["errors"], job["redshift"], multinest_basename,
+                         max_iterations, n_live_points)
+    # A fixed seed, so labelling the same samples again gives the same offsets
+    rng = np.random.default_rng(OFFSET_DRAW_SEED)
+    posterior = photometric_posterior_labels(fit["samples"], job["redshift"], job["magnitudes"], job["errors"], rng)
+    return fit, posterior
+
+
+# The fitter of each job kind: same signature, (job, multinest_basename, max_iterations, n_live_points)
+JOB_FITTERS = {SPECTRUM_JOB: fit_spectrum_job, PHOTOMETRY_JOB: fit_photometry_job}
+
+
 def fit_and_save(job, output_directory, max_iterations, n_live_points=N_LIVE_POINTS):
     """Fit one job and save <output_directory>/<job_id>.h5. Never raises.
 
     Skips jobs whose readable file already exists, so a batch can be re-run with more galaxies. An
-    unreadable file does not count as finished: the job is fitted again and the file replaced. A failed
-    fit comes back with status "failed" and the error text instead of an exception.
-    Inputs: job: dict with job_id (str), spectrum (dict as from prepare_spectrum) and redshift (dimensionless);
-            output_directory: folder for the .h5 file and the MultiNest files (str); max_iterations: MultiNest
-            iteration limit (count); n_live_points: live points (count).
+    unreadable file does not count as finished: the job is fitted again and the file replaced. A readable
+    file of the other kind is never replaced (job ids are specobjids, shared by the spectral and photometric
+    fits of one galaxy): the job fails instead. A failed fit comes back with status "failed" and the error
+    text instead of an exception.
+    Inputs: job: dict with job_id (str), redshift (dimensionless) and kind (SPECTRUM_JOB when absent); a
+            spectrum job holds spectrum (dict as from prepare_spectrum), a photometry job magnitudes and
+            errors ([mag], 12 in BANDS order); output_directory: folder for the .h5 file and the MultiNest
+            files (str); max_iterations: MultiNest iteration limit (count); n_live_points: live points (count).
     Returns: dict with job_id, status ("fitted", "skipped" or "failed"), converged (bool or None),
              run_time [s] (or None), n_iterations (count or None) and error (str or None).
     """
     # 1. Output path and a summary that the steps below fill in
     output_path = os.path.join(output_directory, f"{job['job_id']}.h5")
+    kind = job_kind(job)
     summary = {"job_id": job["job_id"], "status": None, "converged": None,
                "run_time": None, "n_iterations": None, "error": None}
 
     # 2. Skip finished jobs; their run details come from the file. Any failure to read it (damaged,
     # truncated or missing fields) means the job is not finished, so it is fitted again below
+    stored_kind = None
     if os.path.exists(output_path):
         try:
             _, metadata = load_fit(output_path)
-            summary.update(status="skipped", converged=metadata["converged"],
-                           run_time=metadata["run_time"], n_iterations=metadata["n_iterations"])
-            return summary
+            stored_details = {"converged": metadata["converged"], "run_time": metadata["run_time"],
+                              "n_iterations": metadata["n_iterations"]}
+            stored_kind = metadata.get("kind", SPECTRUM_JOB)
         except Exception:
             pass
+    if stored_kind == kind:
+        summary.update(status="skipped", **stored_details)
+        return summary
+    if stored_kind is not None:
+        summary.update(status="failed", error=f"{output_path} holds a {stored_kind} fit and this job is a "
+                                              f"{kind} fit: use a separate output folder for each kind")
+        return summary
 
     # 3. Fit, label the posterior and save; any error is recorded rather than raised
     try:
         multinest_basename = os.path.join(output_directory, str(job["job_id"])) + "/"
-        fit = fit_spectrum(job["spectrum"], job["redshift"], multinest_basename, max_iterations, n_live_points)
-        posterior = posterior_labels(fit["samples"], job["redshift"])
+        fit, posterior = JOB_FITTERS[kind](job, multinest_basename, max_iterations, n_live_points)
         metadata = {"converged": fit["converged"], "run_time": fit["run_time"],
                     "n_iterations": fit["n_iterations"], "max_iterations": max_iterations,
-                    "log_evidence": fit["log_evidence"], "redshift": job["redshift"]}
+                    "log_evidence": fit["log_evidence"], "redshift": job["redshift"], "kind": kind}
         save_fit(output_path, posterior, fit["samples"], metadata)
         summary.update(status="fitted", converged=fit["converged"],
                        run_time=fit["run_time"], n_iterations=fit["n_iterations"])
@@ -1496,14 +1551,24 @@ PERCENT = 100                    # percent per unit fraction
 def export_job(job, jobs_directory):
     """Write one fit job to <jobs_directory>/<job_id>.npz, a portable file for run_spectral_fits.py.
 
-    Inputs: job: dict with job_id (str), spectrum (dict with wavelength [Angstrom, observed], flux and
-            ivar) and redshift (dimensionless); jobs_directory: folder for the file (str), created if missing.
+    Inputs: job: dict with job_id (str), redshift (dimensionless) and kind (SPECTRUM_JOB when absent); a
+            spectrum job holds spectrum (dict with wavelength [Angstrom, observed], flux and ivar), a photometry
+            job magnitudes and errors ([mag], 12 in BANDS order); jobs_directory: folder for the file (str),
+            created if missing.
     Returns: path of the written file (str).
     """
     os.makedirs(jobs_directory, exist_ok=True)
     path = os.path.join(jobs_directory, f"{job['job_id']}.npz")
-    np.savez(path, wavelength=job["spectrum"]["wavelength"], flux=job["spectrum"]["flux"],
-             ivar=job["spectrum"]["ivar"], redshift=job["redshift"], job_id=str(job["job_id"]))
+    kind = job_kind(job)
+    arrays = {"job_id": str(job["job_id"]), "redshift": job["redshift"], "kind": kind}
+    if kind == PHOTOMETRY_JOB:
+        arrays["magnitudes"] = job["magnitudes"]
+        arrays["errors"] = job["errors"]
+    else:
+        arrays["wavelength"] = job["spectrum"]["wavelength"]
+        arrays["flux"] = job["spectrum"]["flux"]
+        arrays["ivar"] = job["spectrum"]["ivar"]
+    np.savez(path, **arrays)
     return path
 
 
@@ -1511,12 +1576,21 @@ def load_job(path):
     """Read a file written by export_job.
 
     Inputs: path: file path (str).
-    Returns: job dict in the format fit_and_save takes: job_id (str), spectrum (wavelength, flux, ivar)
-             and redshift (dimensionless float).
+    Returns: job dict in the format fit_and_save takes: job_id (str), kind, redshift (dimensionless float) and
+             either spectrum (wavelength, flux, ivar) or magnitudes and errors [mag]. A file without a kind
+             (exported before the photometric fits existed) is a spectrum job.
     """
     with np.load(path) as source:
-        spectrum = {"wavelength": source["wavelength"], "flux": source["flux"], "ivar": source["ivar"]}
-        return {"job_id": str(source["job_id"]), "spectrum": spectrum, "redshift": float(source["redshift"])}
+        kind = SPECTRUM_JOB
+        if "kind" in source.files:
+            kind = str(source["kind"])
+        job = {"job_id": str(source["job_id"]), "kind": kind, "redshift": float(source["redshift"])}
+        if kind == PHOTOMETRY_JOB:
+            job["magnitudes"] = source["magnitudes"]
+            job["errors"] = source["errors"]
+        else:
+            job["spectrum"] = {"wavelength": source["wavelength"], "flux": source["flux"], "ivar": source["ivar"]}
+        return job
 
 
 def draw_calibration_cubes(n_mocks, rng):

@@ -9,6 +9,7 @@
 #   WORKERS          parallel fits, one core each        [default 14]
 #   MAX_ITERATIONS   MultiNest iteration limit per fit   [default 50000]
 #   SYNC_SECONDS     seconds between copies of the results to out/   [default 600]
+#   FITS_SUBDIR      folder of the jobs and results: spectral_fits or photometric_fits   [default spectral_fits]
 set -euo pipefail
 
 # 1. Settings
@@ -18,9 +19,11 @@ SYNC_SECONDS="${SYNC_SECONDS:-600}"
 JOB_DIR="/work"
 export OUT_DIR="$JOB_DIR/out"
 RUN_DIR="$JOB_DIR/run"        # short path: MultiNest limits the length of its output paths
-FIT_DIR="spectral_fits"       # relative to RUN_DIR, as run_spectral_fits.py expects
+FIT_DIR="${FITS_SUBDIR:-spectral_fits}"   # relative to RUN_DIR, as run_spectral_fits.py expects
 
 mkdir -p "$OUT_DIR" "$RUN_DIR"
+# fetch_fits.sh reads this, so the results of photometric fits can never land among the spectral ones
+echo "$FIT_DIR" > "$OUT_DIR/fits_subdir.txt"
 
 # 2. Unpack the bundle
 echo "== 2. Unpacking the bundle"
