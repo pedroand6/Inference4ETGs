@@ -157,7 +157,7 @@ installs Jupyter and the packages only `spectroscopic_reference.ipynb` needs (as
 notebook logs in to the S-PLUS Cloud only for galaxies missing from `splus_aperture_photometry.csv`, so with a
 complete cache it needs no `.env`.
 
-## Notebook 1 (`training_set.ipynb`): the delayed-tau training and synthetic sets
+## Notebook 1 (`training_set.ipynb`): the training and synthetic sets of each SFH model
 
 CPU job. It reads only the DR3 catalogue (the filter curves always travel); the noise model is refitted from the
 catalogue and rewritten, so the `splus_noise_model.csv` sent below is only overwritten. The delayed-tau run
@@ -168,7 +168,12 @@ catalogue and rewritten, so the `splus_noise_model.csv` sent below is only overw
         remote/submit_notebook.sh training_set.ipynb dr3_corrected.csv splus_noise_model.csv
     remote/fetch_notebook.sh ID
 
-It took 12 min (2^19 + 2 x 2^14 Bagpipes models and the coverage test) with a 6.2 GB memory peak. With the script
+`SFH_MODELS` in the parameter cell lists the models to build. A model whose three set files exist in the job is
+skipped (`REBUILD_SETS = False`), so a model's stored sets travel only to be kept. The run that made the
+double-power-law sets (`*_dblplaw.parquet`, commit 623cd5c) added `training_set.parquet synthetic_validation.parquet
+synthetic_test.parquet` to the inputs above, and the delayed-tau sets were kept.
+
+The delayed-tau run took 12 min (2^19 + 2 x 2^14 Bagpipes models and the coverage test) with a 6.2 GB memory peak. With the script
 defaults (8 cores, 16000 MB, 4 h) the notebook uses `N_JOBS=7` workers (one core is left for the main process).
 It writes `training_set.parquet` (125 MB), `synthetic_validation.parquet` and
 `synthetic_test.parquet` (6 MB each), `splus_noise_model.csv` and the two figures, and `fetch_notebook.sh` brings

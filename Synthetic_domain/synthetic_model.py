@@ -35,8 +35,6 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # =============================================================================
 # 1. Prior (fixed before looking at the data): see sfh_models.py
 # =============================================================================
-DIMS = MODELS["delayed"].dims                     # delayed-tau alias, removed in Task 11
-components = MODELS["delayed"].components         # delayed-tau alias, removed in Task 11
 
 
 # =============================================================================
@@ -72,11 +70,6 @@ def pivot_wavelength(filter_file):
 PIVOT_WAVELENGTHS = np.zeros(len(FILTER_FILES))
 for band_index, filter_file in enumerate(FILTER_FILES):
     PIVOT_WAVELENGTHS[band_index] = pivot_wavelength(filter_file)
-
-# Label columns of the parquet sets and the fits: the drawn parameters, then the derived labels
-DRAWN_LABELS = MODELS["delayed"].drawn_labels           # delayed-tau alias, removed in Task 11
-DERIVED_LABELS = MODELS["delayed"].derived_labels       # delayed-tau alias, removed in Task 11
-TRAINING_LABELS = MODELS["delayed"].training_labels     # delayed-tau alias, removed in Task 11
 
 # Labels that scale with brightness: log value - 0.4 * (m_obs - m_model)
 MASS_DEPENDENT_LABELS = ["log_mass_formed", "log_mstar", "log_sfr"]
@@ -691,13 +684,6 @@ SPECTRUM_JOB = "spectrum"        # job kind of a spectral fit; also every job or
 PHOTOMETRY_JOB = "photometry"    # job kind of a photometric fit (spec amendment A)
 JOB_DEFAULT_SFH_MODEL = "delayed"   # SFH model of a job or save_fit call naming none (every job before the DPL model)
 EVIDENCE_ERROR_SAMPLES = 200        # posterior samples that recompute the ln Z error of a fit that stored none (count)
-# SFH model of every fit this code writes, stored in each fit file: fits made under an earlier model
-# (the 16-bin non-parametric SFH, whose files have no sfh_model) must never be read as current ones
-SFH_MODEL = MODELS["delayed"].name                      # delayed-tau alias, removed in Task 11
-
-# The photometric fit (spec amendment A) samples the training prior at the spectroscopic redshift and nothing
-# else: its brightness offset is marginalised analytically, and the simulator has no error multiplier
-PHOTOMETRIC_DIMS = MODELS["delayed"].photometric_dims   # delayed-tau alias, removed in Task 11
 
 
 def multinest_iteration_bounds(output_basename):
@@ -1345,8 +1331,6 @@ def summarise_posterior(posterior, columns):
 # =============================================================================
 N_CALIBRATION_MOCKS = 33         # mocks drawn from the prior to test the fitter (count)
 MIN_COVERAGE_95 = 0.85           # smallest acceptable share of truths inside the 95% interval (fraction)
-# Labels the calibration test checks; age, tau and Z in log, because the prior spans several decades of each
-CALIBRATION_LABELS = MODELS["delayed"].calibration_labels   # delayed-tau alias, removed in Task 11
 CALIBRATION_LEVELS = (0.68, 0.95)                   # central-interval probabilities reported (fractions)
 CALIBRATION_ID_PREFIX = "calib_"                    # job ids are calib_000, calib_001, ...
 CROSS_CALIBRATION_ID_PREFIX = "cross_calib_"   # cross-fit ids: cross_calib_007 is mock calib_007 fitted with the other model
@@ -1428,7 +1412,7 @@ def draw_calibration_mocks(n_mocks, templates, rng):
             redshift (dimensionless)); rng: numpy Generator.
     Returns: (jobs, truths): jobs is a list of dicts as fit_and_save takes (job_id calib_000, calib_001, ...);
              truths maps each job_id to its true labels (Series, as posterior_labels columns: the
-             TRAINING_LABELS, veldisp, noise_scale and model_r).
+             spectral model's training_labels, veldisp, noise_scale and model_r).
     """
     cubes = draw_calibration_cubes(n_mocks, rng)
     jobs = []

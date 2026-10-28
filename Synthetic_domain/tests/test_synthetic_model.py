@@ -26,8 +26,8 @@ LOW_REDSHIFT = 0.002             # Bagpipes needs z > 0 to build a star formatio
 # =============================================================================
 def test_prior_draws_stay_inside_bounds_and_age_below_universe_age():
     rng = np.random.default_rng(0)
-    for u in rng.random((500, len(sm.DIMS))):
-        _, drawn = sm.components(u)
+    for u in rng.random((500, len(sm.MODELS["delayed"].dims))):
+        _, drawn = sm.MODELS["delayed"].components(u)
         assert sm.Z_RANGE[0] <= drawn["redshift"] <= sm.Z_RANGE[1]
         assert sm.AGE_MIN <= drawn["age"] <= sm.maximum_age(drawn["redshift"]) + 1e-12
         assert sm.TAU_RANGE[0] <= drawn["tau"] <= sm.TAU_RANGE[1]
@@ -40,11 +40,11 @@ def test_prior_draws_stay_inside_bounds_and_age_below_universe_age():
 
 def test_age_at_the_top_of_the_cube_never_exceeds_the_universe_age():
     """Edge of the prior: z = 0.7 and the largest age draw, drawn or fixed redshift."""
-    cube = np.full(len(sm.DIMS), 1.0)
+    cube = np.full(len(sm.MODELS["delayed"].dims), 1.0)
     for fixed_redshift in (None, sm.Z_RANGE[1]):
-        _, drawn = sm.components(cube, fixed_redshift=fixed_redshift)
+        _, drawn = sm.MODELS["delayed"].components(cube, fixed_redshift=fixed_redshift)
         assert drawn["age"] <= sm.maximum_age(sm.Z_RANGE[1])
-    _, drawn = sm.components(cube, fixed_redshift=0.3)
+    _, drawn = sm.MODELS["delayed"].components(cube, fixed_redshift=0.3)
     assert drawn["age"] <= sm.maximum_age(0.3)
 
 
@@ -57,8 +57,8 @@ def test_maximum_age_is_the_universe_age_minus_the_margin_for_scalars_and_arrays
 
 
 def test_uniform_cube_gives_log_uniform_tau_and_metallicity():
-    cube = np.full(len(sm.DIMS), 0.5)
-    _, drawn = sm.components(cube)
+    cube = np.full(len(sm.MODELS["delayed"].dims), 0.5)
+    _, drawn = sm.MODELS["delayed"].components(cube)
     assert np.isclose(np.log10(drawn["tau"]), np.mean(np.log10(sm.TAU_RANGE)))
     assert np.isclose(np.log10(drawn["metallicity"]), np.mean(np.log10(sm.METALLICITY_RANGE)))
     log_age_range = [np.log10(sm.AGE_MIN), np.log10(sm.maximum_age(drawn["redshift"]))]
@@ -68,10 +68,10 @@ def test_uniform_cube_gives_log_uniform_tau_and_metallicity():
 def test_latin_hypercube_is_stratified_in_log_tau():
     """Each of n equal slices of log tau holds exactly one of n Latin hypercube draws."""
     n_draws = 50
-    cube = qmc.LatinHypercube(len(sm.DIMS), seed=4).random(n_draws)
+    cube = qmc.LatinHypercube(len(sm.MODELS["delayed"].dims), seed=4).random(n_draws)
     log_taus = np.zeros(n_draws)
     for row_index, u in enumerate(cube):
-        _, drawn = sm.components(u)
+        _, drawn = sm.MODELS["delayed"].components(u)
         log_taus[row_index] = np.log10(drawn["tau"])
     log_tau_range = np.log10(sm.TAU_RANGE)
     slices = np.floor((log_taus - log_tau_range[0]) / np.diff(log_tau_range) * n_draws).astype(int)
@@ -79,10 +79,10 @@ def test_latin_hypercube_is_stratified_in_log_tau():
 
 
 def test_components_hold_one_delayed_component_and_the_dust_and_nebular_entries():
-    u = np.random.default_rng(5).random(len(sm.DIMS))
-    bagpipes_components, drawn = sm.components(u)
+    u = np.random.default_rng(5).random(len(sm.MODELS["delayed"].dims))
+    bagpipes_components, drawn = sm.MODELS["delayed"].components(u)
 
-    assert list(drawn) == sm.DRAWN_LABELS
+    assert list(drawn) == sm.MODELS["delayed"].drawn_labels
     delayed = bagpipes_components["delayed"]
     assert delayed == {"age": drawn["age"], "tau": drawn["tau"], "massformed": sm.LOG_MASS_FORMED,
                        "metallicity": drawn["metallicity"]}
@@ -95,8 +95,8 @@ def test_components_hold_one_delayed_component_and_the_dust_and_nebular_entries(
 
 
 def test_fixed_redshift_overrides_the_drawn_redshift():
-    u = np.full(len(sm.DIMS), 0.5)
-    bagpipes_components, drawn = sm.components(u, fixed_redshift=0.123)
+    u = np.full(len(sm.MODELS["delayed"].dims), 0.5)
+    bagpipes_components, drawn = sm.MODELS["delayed"].components(u, fixed_redshift=0.123)
 
     assert bagpipes_components["redshift"] == 0.123
     assert drawn["redshift"] == 0.123
@@ -609,7 +609,7 @@ def test_make_mock_spectrum_returns_truth_labels():
     """The mock spectrum is finite and its truth carries every training label, finite."""
     job, truth = mock_job("mock_test", np.random.default_rng(9))
     assert np.isfinite(job["spectrum"]["flux"]).all()
-    for column in (*sm.TRAINING_LABELS, "veldisp", "noise_scale", "model_r"):
+    for column in (*sm.MODELS[sm.SPECTRAL_MODEL].training_labels, "veldisp", "noise_scale", "model_r"):
         assert np.isfinite(truth[column]), column
     assert truth["noise_scale"] == 1.0    # the mock noise is the template's own
 
@@ -622,7 +622,7 @@ def test_fit_and_save_smoke_run(tmp_path):
     assert summary["status"] == "fitted", summary["error"]
     posterior, metadata = sm.load_fit(str(tmp_path / "smoke.h5"))
     assert len(posterior) > 0
-    for column in (*sm.TRAINING_LABELS, "model_r", "veldisp", "noise_scale"):
+    for column in (*sm.MODELS[sm.SPECTRAL_MODEL].training_labels, "model_r", "veldisp", "noise_scale"):
         assert column in posterior.columns, column
     assert metadata["converged"] in (True, False)
     assert metadata["max_iterations"] == 100
@@ -695,13 +695,14 @@ def test_spectral_dims_stay_the_delayed_photometric_dims_plus_the_nuisances():
 
 
 def test_posterior_labels_of_midpoint_cubes_give_every_training_label():
-    """Three midpoint samples: one row each, every TRAINING_LABELS column finite and as the prior maps it."""
+    """Three midpoint samples: one row each, every training-label column finite and as the prior maps it."""
     cubes = np.full((3, len(sm.SPECTRAL_DIMS)), 0.5)
     posterior = sm.posterior_labels(cubes, 0.1)
 
+    training_labels = sm.MODELS[sm.SPECTRAL_MODEL].training_labels
     assert len(posterior) == 3
-    assert list(posterior.columns[:len(sm.TRAINING_LABELS)]) == sm.TRAINING_LABELS
-    for column in (*sm.TRAINING_LABELS, "veldisp", "noise_scale", "model_r"):
+    assert list(posterior.columns[:len(training_labels)]) == training_labels
+    for column in (*training_labels, "veldisp", "noise_scale", "model_r"):
         assert np.isfinite(posterior[column]).all(), column
     _, drawn, _ = sm.spectral_components(cubes[0], 0.1)
     for label in ("redshift", "age", "tau", "metallicity", "av_ism", "tau_bc", "logU", "log_mass_formed"):
@@ -1127,7 +1128,7 @@ def test_fit_and_save_photometry_smoke_run(tmp_path):
     assert summary["status"] == "fitted", summary["error"]
     posterior, metadata = sm.load_fit(str(tmp_path / "phot_smoke.h5"))
     assert metadata["kind"] == "photometry"
-    for column in (*sm.TRAINING_LABELS, "magnitude_offset"):
+    for column in (*sm.MODELS["delayed"].training_labels, "magnitude_offset"):
         assert column in posterior.columns, column
         assert np.isfinite(posterior[column]).all(), column
     assert metadata["sfh_model"] == "delayed"
@@ -1243,8 +1244,9 @@ def test_calibration_cubes_are_deterministic_and_fill_the_spectral_cube():
 
 
 def test_calibration_labels_are_the_log_parameters_and_the_stellar_mass():
-    assert sm.CALIBRATION_LABELS == ["log_age", "log_tau", "log_metallicity", "log_mstar"]
-    assert len(sm.SPECTRAL_DIMS) == 8 and len(sm.PHOTOMETRIC_DIMS) == 6
+    calibration_labels = sm.MODELS[sm.SPECTRAL_MODEL].calibration_labels
+    assert calibration_labels == ["log_age", "log_tau", "log_metallicity", "log_mstar"]
+    assert len(sm.SPECTRAL_DIMS) == 8 and len(sm.MODELS["delayed"].photometric_dims) == 6
 
 
 def test_calibration_coverage_runs_on_the_calibration_labels():
@@ -1253,9 +1255,10 @@ def test_calibration_coverage_runs_on_the_calibration_labels():
     posterior = sm.posterior_labels(cubes, 0.1)
     truth = posterior.iloc[1]
 
-    table = sm.calibration_coverage({"calib_000": posterior}, {"calib_000": truth}, sm.CALIBRATION_LABELS)
+    calibration_labels = sm.MODELS[sm.SPECTRAL_MODEL].calibration_labels
+    table = sm.calibration_coverage({"calib_000": posterior}, {"calib_000": truth}, calibration_labels)
 
-    assert len(table) == len(sm.CALIBRATION_LABELS) * len(sm.CALIBRATION_LEVELS)
+    assert len(table) == len(calibration_labels) * len(sm.CALIBRATION_LEVELS)
     assert (table["n_jobs"] == 1).all()
     assert table["coverage"].notna().all()
 
@@ -1579,7 +1582,7 @@ def test_supersede_moves_old_mocks_their_jobs_and_the_run_logs(tmp_path):
 
 def test_supersede_keeps_current_mocks_their_jobs_and_logs(tmp_path):
     """A second run after the new mocks and fits exist moves nothing."""
-    write_mock_file(tmp_path / sm.CALIBRATION_MOCK_FILE, sm.TRAINING_LABELS)
+    write_mock_file(tmp_path / sm.CALIBRATION_MOCK_FILE, sm.MODELS["delayed"].training_labels)
     jobs = tmp_path / "jobs"
     jobs.mkdir()
     (jobs / "calib_000.npz").write_bytes(b"new mock job")

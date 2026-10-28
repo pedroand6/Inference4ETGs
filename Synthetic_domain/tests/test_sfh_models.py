@@ -72,19 +72,11 @@ def test_delayed_path_regenerates_the_labels_of_the_stored_validation_set():
                                rtol=REGRESSION_RTOL, atol=REGRESSION_ATOL)
 
 
-def test_synthetic_model_reexports_the_shared_prior_and_the_delayed_aliases():
+def test_synthetic_model_reexports_the_shared_prior_and_the_models():
     assert sm.Z_RANGE == sfh.Z_RANGE and sm.COSMOLOGY is sfh.COSMOLOGY
     assert sm.maximum_age is sfh.maximum_age and sm.delayed_tau_labels is sfh.delayed_tau_labels
     assert sm.GYR_TO_YEARS == sfh.GYR_TO_YEARS == 1e9
-    delayed = sm.MODELS["delayed"]
-    assert sm.DIMS == delayed.dims
-    assert sm.PHOTOMETRIC_DIMS == delayed.photometric_dims
-    assert sm.DRAWN_LABELS == delayed.drawn_labels
-    assert sm.DERIVED_LABELS == delayed.derived_labels
-    assert sm.TRAINING_LABELS == delayed.training_labels
-    assert sm.CALIBRATION_LABELS == delayed.calibration_labels
-    assert sm.SFH_MODEL == "delayed"
-    assert sm.components is sfh.delayed_components
+    assert sm.MODELS is sfh.MODELS
 
 
 def test_sfh_models_does_not_import_synthetic_model():
@@ -374,3 +366,12 @@ def test_model_file_adds_the_dblplaw_suffix():
     assert sfh.model_file("photometric_fits", "dblplaw") == "photometric_fits_dblplaw"
     assert sfh.model_file("ml_runs/mlp", "dblplaw") == "ml_runs/mlp_dblplaw"
     assert sfh.model_file("ml_sfh_catalogue.parquet", "dblplaw") == "ml_sfh_catalogue_dblplaw.parquet"
+
+
+def test_synthetic_model_has_no_delayed_only_globals():
+    """Task 11: every model-dependent name comes from sfh_models.MODELS, never from a delayed-tau alias."""
+    import synthetic_model as sm
+    removed = ["DIMS", "PHOTOMETRIC_DIMS", "DRAWN_LABELS", "DERIVED_LABELS", "TRAINING_LABELS",
+               "CALIBRATION_LABELS", "SFH_MODEL", "components"]
+    for name in removed:
+        assert not hasattr(sm, name), name
