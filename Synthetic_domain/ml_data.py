@@ -3,14 +3,17 @@ Network inputs and targets for the SFH posterior estimator (Phase 3).
 
 Model tables (training set, held-out sets, real galaxies) become:
 - inputs: 11 colours (band - r) with errors and detection flags, plus r, its error, z_obs and sigma_z;
-- targets: the 9 delayed-tau parameters a flow models (log age, log tau, log metallicity, dust, nebular,
-  masses, redshift); every other label is derived from them when decoding.
-Every physical definition (prior, analytic labels, noise, brightness) comes from synthetic_model.
+- targets: the parameters a flow models for one SFH model (sfh_models.MODELS: 9 for delayed-tau, 10 for the
+  double power law): the SFH shape, metallicity, dust, nebular emission, masses and redshift; every other
+  label is derived from them when decoding.
+Every physical definition (prior, labels, noise, brightness) comes from sfh_models and synthetic_model.
 """
 
+import joblib
 import numpy as np
 import pandas as pd
 
+import sfh_models
 import synthetic_model as sm
 
 
@@ -29,12 +32,9 @@ N_BAND_CHANNELS = 4                              # [m_b - m_r, sigma_b, detected
 
 P_SPECTROSCOPIC = 0.5                            # share of simulated galaxies with an exact redshift
 
-# Flow targets. Age, tau, metallicity and tau_bc are log-uniform in the prior, so the flow models their logs.
-# log_sfr is not a target: a fifth of the prior sits on its floor, a point mass a flow cannot learn.
-# The redshift stays last (decoded first, since the oldest allowed age depends on it).
-TARGET_NAMES = ["log_age", "log_tau", "log_metallicity", "av_ism", "log_tau_bc", "logU",
-                "log_mass_formed", "log_mstar", "redshift"]
-N_TARGETS = len(TARGET_NAMES)                    # 9
+# Flow targets that are the log of a drawn label but not among the model's derived labels (each model's
+# log_labels give the others, e.g. log_age is the log of age)
+EXTRA_LOG_TARGETS = {"log_tau_bc": "tau_bc"}
 
 
 # =============================================================================
@@ -87,69 +87,158 @@ def colour_inputs(magnitudes, errors, z_obs, sigma_z):
 # =============================================================================
 # 3. Targets and decoding
 # =============================================================================
-def encode_targets(table):
-    """The N_TARGETS flow targets of each row.
+def target_names(sfh_model):
+    """The flow targets of an SFH model, in the order the flow models them.
 
-    Inputs: table with redshift, age and tau [Gyr], metallicity [Z/Z_sun], av_ism [mag], tau_bc, logU,
-            log_mass_formed and log_mstar [log M_sun] (the sm.TRAINING_LABELS names).
-    Returns: array (n, N_TARGETS) in TARGET_NAMES order: log10 of age, tau, metallicity and tau_bc;
-             the other targets as they are.
+    Why these: parameters drawn log-uniform in the prior enter as their logs. log_sfr is not a target,
+    because a fifth of the delayed-tau prior sits on its floor, a point mass a flow cannot learn. The
+    redshift is last, because the decoder needs it first: the oldest allowed age or turnover lookback
+    depends on it.
+    Inputs: sfh_model: "delayed" or "dblplaw" (a key of sfh_models.MODELS).
+    Returns: list of target names, a new list on every call.
+    Raises: KeyError for an unknown model.
     """
-    targets = {
-        "log_age": np.log10(table["age"].to_numpy(dtype=float)),
-        "log_tau": np.log10(table["tau"].to_numpy(dtype=float)),
-        "log_metallicity": np.log10(table["metallicity"].to_numpy(dtype=float)),
-        "av_ism": table["av_ism"].to_numpy(dtype=float),
-        "log_tau_bc": np.log10(table["tau_bc"].to_numpy(dtype=float)),
-        "logU": table["logU"].to_numpy(dtype=float),
-        "log_mass_formed": table["log_mass_formed"].to_numpy(dtype=float),
-        "log_mstar": table["log_mstar"].to_numpy(dtype=float),
-        "redshift": table["redshift"].to_numpy(dtype=float),
-    }
+    return list(sfh_models.MODELS[sfh_model].target_names)
+
+
+def encode_targets(table, sfh_model):
+    """The flow targets of each row.
+
+    Inputs: table with the model's drawn labels (sfh_models.MODELS[sfh_model].drawn_labels: the redshift,
+            the SFH parameters [Gyr or dimensionless], metallicity [Z/Z_sun], av_ism [mag], tau_bc, logU and
+            log_mass_formed [log M_sun]) and log_mstar [log M_sun]; sfh_model: "delayed" or "dblplaw".
+    Returns: array (n, len(target_names(sfh_model))) in target_names order. The log-uniform drawn
+             parameters (the model's log_labels, and tau_bc) enter as log10; the other targets enter
+             unchanged.
+    """
+    log_sources = dict(sfh_models.MODELS[sfh_model].log_labels)
+    log_sources.update(EXTRA_LOG_TARGETS)
     columns = []
-    for name in TARGET_NAMES:
-        columns.append(targets[name])
+    for name in target_names(sfh_model):
+        if name in log_sources:
+            columns.append(np.log10(table[log_sources[name]].to_numpy(dtype=float)))
+        else:
+            columns.append(table[name].to_numpy(dtype=float))
     return np.column_stack(columns)
 
 
-def decode_samples(theta):
-    """Every training label of flow samples, with the same analytic definitions as the training labels.
+def delayed_sfh_parameters(targets, redshift):
+    """Delayed-tau SFH parameters of flow samples, inside the prior at each sample's redshift.
 
-    Each sample is decoded at its own redshift. The flow's tails can leave the prior, so the redshift is
-    clipped to sm.Z_RANGE, then age to [sm.AGE_MIN, sm.maximum_age(redshift)] and tau and metallicity to
-    their prior ranges; values inside the prior pass unchanged, so encoded truths decode exactly.
-    Inputs: theta: array (n, N_TARGETS) in TARGET_NAMES order (posterior samples or encoded truths).
-    Returns: DataFrame with the sm.TRAINING_LABELS columns, in that order: redshift, age and tau [Gyr],
-             metallicity [Z/Z_sun], av_ism [mag], tau_bc, logU, log_mass_formed, their logs, log_mstar
-             [log M_sun], and log_sfr, log_ssfr, mw_age and f_young/f_mid/f_old from sm.delayed_tau_labels.
+    Inputs: targets: dict target name -> array (n,), with log_age and log_tau [log Gyr];
+            redshift: array (n,), already inside sfh_models.Z_RANGE.
+    Returns: dict with age clipped to [AGE_MIN, maximum_age(redshift)] and tau clipped to TAU_RANGE [Gyr].
+             Values inside the prior pass unchanged.
     """
-    theta = np.asarray(theta, dtype=float)
-    redshift = np.clip(theta[:, TARGET_NAMES.index("redshift")], *sm.Z_RANGE)
+    age = np.clip(10 ** targets["log_age"], sfh_models.AGE_MIN, sfh_models.maximum_age(redshift))
+    tau = np.clip(10 ** targets["log_tau"], *sfh_models.TAU_RANGE)
+    return {"age": age, "tau": tau}
 
-    # 1. The SFH parameters, inside the prior at each sample's redshift
-    age = np.clip(10 ** theta[:, TARGET_NAMES.index("log_age")], sm.AGE_MIN, sm.maximum_age(redshift))
-    tau = np.clip(10 ** theta[:, TARGET_NAMES.index("log_tau")], *sm.TAU_RANGE)
-    metallicity = np.clip(10 ** theta[:, TARGET_NAMES.index("log_metallicity")], *sm.METALLICITY_RANGE)
-    log_mass_formed = theta[:, TARGET_NAMES.index("log_mass_formed")]
-    log_mstar = theta[:, TARGET_NAMES.index("log_mstar")]
+
+def dblplaw_sfh_parameters(targets, redshift):
+    """Double-power-law SFH parameters of flow samples, inside the prior at each sample's redshift.
+
+    Why tau is recomputed: Bagpipes' tau is the turnover time of the double power law, counted from the Big
+    Bang (the SFR maximum only when alpha = beta; in general the maximum is at
+    t = tau (beta/alpha)**(1/(alpha+beta))). turnover_lookback is the lookback time to tau, so
+    tau = age of the Universe - turnover_lookback (as in sfh_models.dblplaw_components). The flow models
+    turnover_lookback, and tau follows from it.
+    Inputs: targets: dict target name -> array (n,), with log_turnover_lookback [log Gyr], log_alpha and
+            log_beta;
+            redshift: array (n,), already inside sfh_models.Z_RANGE.
+    Returns: dict with
+             - turnover_lookback [Gyr], clipped to [TURNOVER_LOOKBACK_MIN, maximum_age(redshift)];
+             - tau [Gyr since the Big Bang];
+             - alpha clipped to ALPHA_RANGE and beta clipped to BETA_RANGE (dimensionless).
+             Values inside the prior pass unchanged.
+    """
+    turnover_lookback = np.clip(10 ** targets["log_turnover_lookback"], sfh_models.TURNOVER_LOOKBACK_MIN,
+                                sfh_models.maximum_age(redshift))
+    tau = sfh_models.COSMOLOGY.age(redshift).value - turnover_lookback
+    alpha = np.clip(10 ** targets["log_alpha"], *sfh_models.ALPHA_RANGE)
+    beta = np.clip(10 ** targets["log_beta"], *sfh_models.BETA_RANGE)
+    return {"turnover_lookback": turnover_lookback, "tau": tau, "alpha": alpha, "beta": beta}
+
+
+# The SFH parameters of each model, decoded from its flow targets
+SFH_PARAMETER_DECODERS = {"delayed": delayed_sfh_parameters, "dblplaw": dblplaw_sfh_parameters}
+
+
+def decode_samples(theta, sfh_model, n_jobs=1):
+    """Every training label of flow samples, with the same definitions as the training labels.
+
+    Each sample is decoded at its own redshift. The flow's tails can leave the prior, so:
+    - the redshift is clipped to Z_RANGE;
+    - the SFH parameters are clipped to their prior at that redshift (SFH_PARAMETER_DECODERS);
+    - the metallicity is clipped to METALLICITY_RANGE.
+    Values inside the prior pass unchanged, so encoded truths decode exactly.
+    Why n_jobs: the double-power-law labels are summed over Bagpipes' age grid, about 0.06 ms per sample,
+    so tens of millions of posterior samples take an hour or more in one thread. With n_jobs > 1 the rows
+    are split into n_jobs blocks, decoded in threads and concatenated in order. Threads, not processes:
+    numpy releases the GIL inside the grid sums, and threads share one copy of Bagpipes, which matters in a
+    7 GB GPU job.
+    Each row is decoded on its own, so the result equals that of n_jobs = 1 to rounding.
+    Inputs: theta: array (n, len(target_names(sfh_model))) in target_names order (posterior samples or
+            encoded truths); sfh_model: "delayed" or "dblplaw"; n_jobs: threads (1 decodes in this thread).
+    Returns: DataFrame with the model's training_labels columns, in that order, one row per row of theta:
+             - the drawn labels and their logs;
+             - log_mstar [log M_sun];
+             - from the model's analytic_labels: mw_age [Gyr ago], f_young, f_mid and f_old,
+               log_sfr [log M_sun/yr] and log_ssfr [log yr^-1].
+    Raises: ValueError when theta does not have one column per target of the model, or n_jobs < 1.
+    """
+    names = target_names(sfh_model)
+    theta = np.asarray(theta, dtype=float)
+    if theta.ndim != 2 or theta.shape[1] != len(names):
+        raise ValueError(f"theta of shape {theta.shape} does not hold the {len(names)} targets of the "
+                         f"{sfh_model!r} model")
+    if n_jobs < 1:
+        raise ValueError(f"n_jobs = {n_jobs}: decode with 1 or more threads")
+    if n_jobs == 1 or len(theta) < 2:
+        return decode_rows(theta, sfh_model)
+
+    tasks = []
+    for block in np.array_split(theta, min(n_jobs, len(theta))):
+        tasks.append(joblib.delayed(decode_rows)(block, sfh_model))
+    decoded_blocks = joblib.Parallel(n_jobs=n_jobs, prefer="threads")(tasks)
+    return pd.concat(decoded_blocks, ignore_index=True)
+
+
+def decode_rows(theta, sfh_model):
+    """The decode of decode_samples, in this process and without its checks.
+
+    Inputs: theta: array (n, len(target_names(sfh_model))) in target_names order; sfh_model: "delayed" or
+            "dblplaw".
+    Returns: DataFrame with the model's training_labels columns (see decode_samples).
+    """
+    model = sfh_models.MODELS[sfh_model]
+    names = target_names(sfh_model)
+    targets = {}
+    for target_index, name in enumerate(names):
+        targets[name] = theta[:, target_index]
+    redshift = np.clip(targets["redshift"], *sfh_models.Z_RANGE)
+
+    # 1. The drawn labels, inside the prior at each sample's redshift
+    drawn = {"redshift": redshift}
+    drawn.update(SFH_PARAMETER_DECODERS[sfh_model](targets, redshift))
+    drawn["metallicity"] = np.clip(10 ** targets["log_metallicity"], *sfh_models.METALLICITY_RANGE)
+    drawn["av_ism"] = targets["av_ism"]
+    drawn["tau_bc"] = 10 ** targets["log_tau_bc"]
+    drawn["logU"] = targets["logU"]
+    drawn["log_mass_formed"] = targets["log_mass_formed"]
 
     # 2. Labels derived from them, as sm.summary_labels defines them
-    labels = {
-        "redshift": redshift,
-        "age": age,
-        "tau": tau,
-        "metallicity": metallicity,
-        "av_ism": theta[:, TARGET_NAMES.index("av_ism")],
-        "tau_bc": 10 ** theta[:, TARGET_NAMES.index("log_tau_bc")],
-        "logU": theta[:, TARGET_NAMES.index("logU")],
-        "log_mass_formed": log_mass_formed,
-        "log_age": np.log10(age),
-        "log_tau": np.log10(tau),
-        "log_metallicity": np.log10(metallicity),
-        "log_mstar": log_mstar,
-    }
-    labels.update(sm.delayed_tau_labels(age, tau, log_mass_formed, log_mstar))
-    return pd.DataFrame(labels, columns=sm.TRAINING_LABELS)
+    labels = dict(drawn)
+    for log_label, drawn_label in model.log_labels.items():
+        labels[log_label] = np.log10(drawn[drawn_label])
+    labels["log_mstar"] = targets["log_mstar"]
+    labels.update(model.analytic_labels(drawn, targets["log_mstar"]))
+    return pd.DataFrame(labels, columns=model.training_labels)
+
+
+# delayed-tau aliases for ml_networks.DEFAULT_CONFIG, removed in Task 8
+TARGET_NAMES = target_names("delayed")
+N_TARGETS = len(TARGET_NAMES)
 
 
 # =============================================================================
@@ -167,13 +256,16 @@ def draw_observed_redshift(true_redshift, rng):
     return z_obs, sigma_z
 
 
-def simulate_observations(table, catalogue_r, catalogue_z, noise_table, rng):
+def simulate_observations(table, catalogue_r, catalogue_z, noise_table, rng, sfh_model):
     """One fresh noisy realisation of every noise-free model: brightness, S-PLUS noise and redshift.
 
-    Inputs: table: noise-free models (training_set.parquet columns); catalogue_r [mag], catalogue_z: DR3 r_auto
-            and zml (brightness donors); noise_table: splus_noise_model.csv; rng: numpy Generator.
-    Returns: dict(flat, banded, valid, targets) — inputs as colour_inputs gives them and the targets
-             (n, N_TARGETS), with the mass-like labels rescaled to the drawn brightness.
+    Inputs: table: noise-free models of sfh_model (its training-set columns);
+            catalogue_r [mag], catalogue_z: DR3 r_auto and zml (the brightness donors);
+            noise_table: splus_noise_model.csv; rng: numpy Generator; sfh_model: "delayed" or "dblplaw".
+    Returns: dict(flat, banded, valid, targets):
+             - flat, banded and valid: the inputs as colour_inputs gives them;
+             - targets: array (n, len(target_names(sfh_model))), with the mass-like labels rescaled to the
+               drawn brightness.
              valid is False where r is undetected or no DR3 galaxy lies at the model's redshift.
     """
     true_redshift = table["redshift"].to_numpy(dtype=float)
@@ -193,17 +285,18 @@ def simulate_observations(table, catalogue_r, catalogue_z, noise_table, rng):
 
     observations = colour_inputs(noisy, errors, z_obs, sigma_z)
     observations["valid"] = observations["valid"] & np.isfinite(offsets)
-    observations["targets"] = encode_targets(labels)
+    observations["targets"] = encode_targets(labels, sfh_model)
     return observations
 
-
-def validation_observations(held_out, mode, rng):
+def validation_observations(held_out, mode, rng, sfh_model):
     """Inputs and targets of a held-out set whose noise is already fixed (synthetic_validation/test).
 
-    Inputs: held_out: DataFrame with noisy BANDS magnitudes, e_<band> errors, magnitude_offset and labels
-            (mass labels already rescaled); mode: "spectroscopic" (sigma_z = 0) or "photometric"
-            (sigma_z = sm.SIGMA_Z * (1 + z), z_obs drawn with rng); rng: numpy Generator (seeded by the caller).
-    Returns: dict(flat, banded, valid, targets).
+    Inputs: held_out: DataFrame of sfh_model with noisy BANDS magnitudes, e_<band> errors, magnitude_offset
+            and labels (mass labels already rescaled);
+            mode: "spectroscopic" (sigma_z = 0) or "photometric" (sigma_z = sm.SIGMA_Z * (1 + z), with z_obs
+            drawn from rng);
+            rng: numpy Generator (seeded by the caller); sfh_model: "delayed" or "dblplaw".
+    Returns: dict(flat, banded, valid, targets), with targets (n, len(target_names(sfh_model))).
     """
     true_redshift = held_out["redshift"].to_numpy(dtype=float)
     if mode == "spectroscopic":
@@ -225,9 +318,8 @@ def validation_observations(held_out, mode, rng):
     labels["log_mass_formed"] = sm.LOG_MASS_FORMED - sm.DEX_PER_MAGNITUDE * held_out["magnitude_offset"]
     observations = colour_inputs(magnitudes, errors, z_obs, sigma_z)
     observations["valid"] = observations["valid"] & np.isfinite(held_out["magnitude_offset"].to_numpy())
-    observations["targets"] = encode_targets(labels)
+    observations["targets"] = encode_targets(labels, sfh_model)
     return observations
-
 
 # =============================================================================
 # 5. Standardisation

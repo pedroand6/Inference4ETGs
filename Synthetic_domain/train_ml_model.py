@@ -93,7 +93,7 @@ def main():
 
     # 2. Standardisation statistics from one simulated epoch (seeded)
     first_epoch = to_tensors(ml_data.simulate_observations(training, catalogue_r, catalogue_z, noise_table,
-                                                           np.random.default_rng(arguments.seed)))
+                                                           np.random.default_rng(arguments.seed), "delayed"))
     flat_mask, banded_mask = ml_data.input_masks(first_epoch["flat"].numpy(), first_epoch["banded"].numpy())
     standardisers = {
         "flat": ml_data.Standardiser.fit(first_epoch["flat"].numpy(), flat_mask),
@@ -105,13 +105,15 @@ def main():
     # 3. Fixed validation copies: spectroscopic and photometric redshifts
     validation_sets = []
     for mode, seed in VALIDATION_SEEDS.items():
-        observations = ml_data.validation_observations(validation, mode, np.random.default_rng(seed))
+        observations = ml_data.validation_observations(validation, mode, np.random.default_rng(seed),
+                                                       "delayed")
         validation_sets.append(standardise(to_tensors(observations), standardisers))
 
     def make_epoch(epoch_index):
         """Fresh noisy realisation for this epoch (seeded by run seed and epoch)."""
         rng = np.random.default_rng([arguments.seed, epoch_index])
-        observations = ml_data.simulate_observations(training, catalogue_r, catalogue_z, noise_table, rng)
+        observations = ml_data.simulate_observations(training, catalogue_r, catalogue_z, noise_table, rng,
+                                                     "delayed")
         return standardise(to_tensors(observations), standardisers)
 
     # 4. Train and save
