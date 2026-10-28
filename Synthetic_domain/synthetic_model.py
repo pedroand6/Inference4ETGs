@@ -1478,7 +1478,8 @@ def draw_photometric_cubes(n_mocks, sfh_model, seed):
     """Unit-cube points of photometric calibration mocks: a Latin hypercube over the model's photometric dims.
 
     Why a Latin hypercube: as for the training sets, so that 33 mocks still cover every parameter range evenly.
-    Inputs: n_mocks: number of points (count); sfh_model: "delayed" or "dblplaw"; seed: Latin hypercube seed (integer or numpy Generator).
+    Inputs: n_mocks: number of points (count); sfh_model: "delayed" or "dblplaw";
+            seed: Latin hypercube seed (integer or numpy Generator).
     Returns: array (n_mocks, len(MODELS[sfh_model].photometric_dims)), values in [0, 1) (dimensionless).
     """
     sampler = qmc.LatinHypercube(len(MODELS[sfh_model].photometric_dims), seed=seed)
@@ -1544,9 +1545,9 @@ def draw_photometric_calibration_mocks(n_mocks, sfh_model, donor_redshifts, dono
     """Photometric calibration mocks from a model's prior, each at the redshift and brightness of a real galaxy.
 
     Why a donor galaxy: the mock then has a real redshift and aperture brightness, and so realistic S-PLUS errors.
-    The unit-cube points (draw_photometric_cubes) and the donors+noise come from two independent streams spawned
-    from numpy.random.SeedSequence(seed), donors first in the second. Why two streams: with one seed for both, the
-    donors and noise reuse the Latin hypercube's own uniforms, so the mocks are not independent draws.
+    The unit-cube points (draw_photometric_cubes) and the donors+noise come from two independent streams
+    spawned from numpy.random.SeedSequence(seed), donors first in the second. Why two streams: with one seed
+    for both, the donors and noise reuse the Latin hypercube's own uniforms, so the mocks are not independent.
     Inputs: n_mocks: number of mocks (count); sfh_model: "delayed" or "dblplaw"; donor_redshifts: spectroscopic
             redshifts of the candidate donors (dimensionless); donor_r: their aperture r magnitudes [mag] (a donor
             with a non-finite r, or r at or above UNDETECTED_MAGNITUDE, is never chosen); noise_table: output of

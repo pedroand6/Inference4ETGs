@@ -1400,7 +1400,8 @@ def test_calibration_mock_donors_are_independent_of_the_latin_hypercube(monkeypa
 
     def recorded_noiseless_mocks(cubes, redshifts, sfh_model):
         captured["cubes"], captured["redshifts"] = cubes, redshifts
-        truths = [pd.Series({**dict.fromkeys(sm.MASS_DEPENDENT_LABELS, 10.0), "model_r": 18.0}) for _ in cubes]
+        truth = {**dict.fromkeys(sm.MASS_DEPENDENT_LABELS, 10.0), "model_r": 18.0}
+        truths = [pd.Series(truth) for _ in cubes]
         return np.full((len(cubes), len(sm.BANDS)), 18.0), truths
 
     monkeypatch.setattr(sm, "noiseless_photometric_mocks", recorded_noiseless_mocks)
