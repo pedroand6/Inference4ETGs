@@ -16,103 +16,26 @@ import h5py
 import joblib
 import numpy as np
 import pandas as pd
-from astropy.cosmology import FlatLambdaCDM
 from scipy.integrate import simpson
-from scipy.special import gammainc, gammaincc
 from scipy.stats import chi2 as chi_squared
 
 import bagpipes as pipes
+# The shared prior and the SFH models live in sfh_models.py. They are re-exported here, so sm.Z_RANGE,
+# sm.maximum_age, sm.delayed_tau_labels and the rest keep working
+from sfh_models import (AGE_MIN, AV_ISM_RANGE, BIRTH_CLOUD_AGE, COSMOLOGY, DUST_SLOPE, GYR_TO_YEARS,
+                        HISTORY_LABELS, LABEL_EDGES, LOG_MASS_FORMED, LOG_TAU_BC_RANGE, LOGU_RANGE,
+                        METALLICITY_RANGE, MODELS, SFR_FLOOR, SFR_TIMESCALE, SHARED_LABELS, TAU_RANGE,
+                        TAU_TO_AV, UNIVERSE_AGE_MARGIN, Z_RANGE, delayed_mass_fraction_younger_than,
+                        delayed_mass_weighted_age, delayed_tau_labels, maximum_age, model_file, uniform)
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 
 # =============================================================================
-# 1. Prior (fixed before looking at the data)
+# 1. Prior (fixed before looking at the data): see sfh_models.py
 # =============================================================================
-COSMOLOGY = FlatLambdaCDM(H0=70.0, Om0=0.3)
-UNIVERSE_AGE_MARGIN = 0.1        # [Gyr] age upper bound = Universe age at z minus this
-LABEL_EDGES = [0.1, 1.0]         # [Gyr] f_young < 0.1 < f_mid < 1.0 < f_old
-SFR_TIMESCALE = 0.1              # [Gyr] log_sfr is the mean SFR over this lookback time, as Bagpipes' sfr
-
-# SFH: one Bagpipes "delayed" component, SFR(t) ~ t exp(-t / tau) since star formation began,
-# with a single metallicity. Ages and tau are drawn log-uniform, because they span several decades.
-Z_RANGE = (0.002, 0.7)                               # redshift
-AGE_MIN = 0.05                                       # [Gyr] youngest age (time since star formation began)
-TAU_RANGE = (0.01, 20.0)                             # [Gyr] e-folding time
-METALLICITY_RANGE = (0.005, 2.5)                     # [Z/Z_sun] the bc03_miles grid range
-AV_ISM_RANGE = (0.01, 2.0)                           # [mag]
-LOG_TAU_BC_RANGE = (np.log10(0.5), np.log10(4.0))    # birth-cloud optical depth
-LOGU_RANGE = (-4.0, -1.0)                            # nebular ionisation parameter
-DUST_SLOPE = 0.7                                     # CF00 attenuation-law exponent
-BIRTH_CLOUD_AGE = 0.01                               # [Gyr]
-LOG_MASS_FORMED = 10.0                               # [log M_sun]
-TAU_TO_AV = 1.086                                    # A_V = 1.086 * tau_V
-SFR_FLOOR = 1e-14                # [yr^-1] sSFR floor for SFHs with no recent star formation
-
-# "log_age_fraction" places the age inside [log AGE_MIN, log t_max(z)], so one cube works at every z
-DIMS = ["z", "log_age_fraction", "log_tau", "log_metallicity", "av_ism", "log_tau_bc", "logU"]
-
-
-def uniform(draw, low, high):
-    """Map a unit-interval draw onto [low, high).
-
-    Inputs: draw in [0, 1) (dimensionless); low, high: bounds in the units of the parameter.
-    Returns: parameter value in [low, high), in the same units as low and high.
-    """
-    return low + (high - low) * draw
-
-
-def maximum_age(redshift):
-    """Oldest allowed age [Gyr]: the age of the Universe at the redshift minus UNIVERSE_AGE_MARGIN.
-
-    Why the margin: Bagpipes flags a model forming stars before the Big Bang as unphysical (NaN magnitudes).
-    Inputs: redshift: dimensionless z, scalar or array.
-    Returns: maximum age [Gyr], a float for a scalar redshift or an array of the same shape.
-    """
-    return COSMOLOGY.age(redshift).value - UNIVERSE_AGE_MARGIN
-
-
-def components(u, fixed_redshift=None):
-    """Bagpipes components and drawn parameters for one unit-cube vector u (order of DIMS).
-
-    Inputs: u: unit-cube vector (dimensionless, in [0, 1)) ordered as DIMS;
-            fixed_redshift: if given, replaces the redshift drawn from u (spectral fits); dimensionless z.
-    Returns: (bagpipes_components, drawn). drawn holds the DRAWN_LABELS: redshift (dimensionless), age and
-             tau [Gyr], metallicity [Z/Z_sun], av_ism [mag], tau_bc and logU (dimensionless),
-             log_mass_formed [log M_sun].
-    """
-    params = dict(zip(DIMS, u))
-
-    # 1. Redshift, which sets the oldest allowed age
-    if fixed_redshift is None:
-        redshift = uniform(params["z"], *Z_RANGE)
-    else:
-        redshift = fixed_redshift
-    oldest_age = maximum_age(redshift)
-
-    # 2. Star formation history and metallicity
-    age = 10 ** uniform(params["log_age_fraction"], np.log10(AGE_MIN), np.log10(oldest_age))
-    # Rounding in 10**log10 can push the top draw a hair above the bound
-    age = min(age, oldest_age)
-    tau = 10 ** uniform(params["log_tau"], *np.log10(TAU_RANGE))
-    metallicity = 10 ** uniform(params["log_metallicity"], *np.log10(METALLICITY_RANGE))
-
-    # 3. Dust and nebular emission
-    av_ism = uniform(params["av_ism"], *AV_ISM_RANGE)
-    tau_birth_cloud = 10 ** uniform(params["log_tau_bc"], *LOG_TAU_BC_RANGE)
-    av_birth_cloud = TAU_TO_AV * tau_birth_cloud
-    log_u = uniform(params["logU"], *LOGU_RANGE)
-
-    bagpipes_components = {
-        "redshift": redshift,
-        "t_bc": BIRTH_CLOUD_AGE,
-        "dust": {"type": "CF00", "Av": av_ism, "eta": 1 + av_birth_cloud / av_ism, "n": DUST_SLOPE},
-        "nebular": {"logU": log_u},
-        "delayed": {"age": age, "tau": tau, "massformed": LOG_MASS_FORMED, "metallicity": metallicity},
-    }
-    drawn = {"redshift": redshift, "age": age, "tau": tau, "metallicity": metallicity, "av_ism": av_ism,
-             "tau_bc": tau_birth_cloud, "logU": log_u, "log_mass_formed": LOG_MASS_FORMED}
-    return bagpipes_components, drawn
+DIMS = MODELS["delayed"].dims                     # delayed-tau alias, removed in Task 11
+components = MODELS["delayed"].components         # delayed-tau alias, removed in Task 11
 
 
 # =============================================================================
@@ -150,10 +73,9 @@ for band_index, filter_file in enumerate(FILTER_FILES):
     PIVOT_WAVELENGTHS[band_index] = pivot_wavelength(filter_file)
 
 # Label columns of the parquet sets and the fits: the drawn parameters, then the derived labels
-DRAWN_LABELS = ["redshift", "age", "tau", "metallicity", "av_ism", "tau_bc", "logU", "log_mass_formed"]
-DERIVED_LABELS = ["log_age", "log_tau", "log_metallicity", "log_mstar", "log_sfr", "log_ssfr",
-                  "mw_age", "f_young", "f_mid", "f_old"]
-TRAINING_LABELS = DRAWN_LABELS + DERIVED_LABELS
+DRAWN_LABELS = MODELS["delayed"].drawn_labels           # delayed-tau alias, removed in Task 11
+DERIVED_LABELS = MODELS["delayed"].derived_labels       # delayed-tau alias, removed in Task 11
+TRAINING_LABELS = MODELS["delayed"].training_labels     # delayed-tau alias, removed in Task 11
 
 # Labels that scale with brightness: log value - 0.4 * (m_obs - m_model)
 MASS_DEPENDENT_LABELS = ["log_mass_formed", "log_mstar", "log_sfr"]
@@ -174,63 +96,6 @@ def rescale_mass_labels(table, magnitude_offset):
     for label in MASS_DEPENDENT_LABELS:
         shifted[label] = table[label].to_numpy(dtype=float) - DEX_PER_MAGNITUDE * offset
     return shifted
-
-
-def delayed_mass_fraction_younger_than(age, tau, lookback):
-    """Share of the formed mass with lookback time below `lookback` for SFR(t) ~ t exp(-t / tau).
-
-    t runs from the start of star formation, `age` ago. With P and Q the regularised lower and upper
-    incomplete gamma functions, the mass formed up to t is proportional to P(2, t / tau).
-    Why the Q form: Q(2, (A - L) / tau) - Q(2, A / tau) avoids the cancellation of 1 - P / P when tau << A.
-    Inputs: age A, tau, lookback L [Gyr], scalars or arrays that broadcast together.
-    Returns: fraction in [0, 1] (dimensionless), an array of the broadcast shape; 1 where L >= A.
-    """
-    age, tau, lookback = np.broadcast_arrays(np.asarray(age, dtype=float), np.asarray(tau, dtype=float),
-                                             np.asarray(lookback, dtype=float))
-    formed_before_now = gammainc(2, age / tau)
-    older_start = np.clip(age - lookback, 0, None) / tau
-    fraction = (gammaincc(2, older_start) - gammaincc(2, age / tau)) / formed_before_now
-    return np.where(lookback >= age, 1.0, np.clip(fraction, 0.0, 1.0))
-
-
-def delayed_mass_weighted_age(age, tau):
-    """Formed-mass-weighted lookback age of SFR(t) ~ t exp(-t / tau): A - 2 tau P(3, A / tau) / P(2, A / tau).
-
-    Limits: A - 2 tau when tau << A, and A / 3 when tau >> A.
-    Inputs: age A and tau [Gyr], scalars or arrays that broadcast together.
-    Returns: mass-weighted age [Gyr ago], an array of the broadcast shape.
-    """
-    age = np.asarray(age, dtype=float)
-    tau = np.asarray(tau, dtype=float)
-    return age - 2 * tau * gammainc(3, age / tau) / gammainc(2, age / tau)
-
-
-def delayed_tau_labels(age, tau, log_mass_formed, log_mstar):
-    """Analytic labels of a delayed-tau SFH, shared by the training sets and the ML decoding.
-
-    log_sfr is the mean SFR over the last SFR_TIMESCALE, floored at SFR_FLOOR * M_star: about a fifth
-    of the prior has no star formation that recent, and log(0) would be -inf.
-    Inputs: age, tau [Gyr]; log_mass_formed, log_mstar [log M_sun]; arrays of one shape (or scalars).
-    Returns: dict of arrays: mw_age [Gyr ago], f_young, f_mid, f_old (dimensionless, sum to 1; split at
-             LABEL_EDGES), log_sfr [log M_sun/yr] and log_ssfr [log yr^-1].
-    """
-    log_mass_formed = np.asarray(log_mass_formed, dtype=float)
-    log_mstar = np.asarray(log_mstar, dtype=float)
-    younger_than_young_edge = delayed_mass_fraction_younger_than(age, tau, LABEL_EDGES[0])
-    younger_than_old_edge = delayed_mass_fraction_younger_than(age, tau, LABEL_EDGES[1])
-    recent_fraction = delayed_mass_fraction_younger_than(age, tau, SFR_TIMESCALE)
-
-    recent_sfr = 10**log_mass_formed * recent_fraction / (SFR_TIMESCALE * GYR_TO_YEARS)
-    sfr_floor = SFR_FLOOR * 10**log_mstar
-    log_sfr = np.log10(np.maximum(recent_sfr, sfr_floor))
-    return {
-        "mw_age": delayed_mass_weighted_age(age, tau),
-        "f_young": younger_than_young_edge,
-        "f_mid": younger_than_old_edge - younger_than_young_edge,
-        "f_old": 1 - younger_than_old_edge,
-        "log_sfr": log_sfr,
-        "log_ssfr": log_sfr - log_mstar,
-    }
 
 
 def summary_labels(bagpipes_sfh, drawn):
@@ -559,7 +424,6 @@ def coverage_test(observed_magnitudes, observed_errors, detected, observed_z, ob
 # 5. Spectra, spectral likelihood and split
 # =============================================================================
 R_V = 3.1                                # [dimensionless] CCM89 R_V = A_V / E(B-V), as in extinctions.py
-GYR_TO_YEARS = 1e9                       # [yr/Gyr]
 
 # S-PLUS wavelengths [Angstrom] at which the CCM89 law is evaluated, as in extinctions.py
 EXTINCTION_WAVELENGTHS = np.array([3536, 3770, 3940, 4094, 4292, 4751, 5133, 6258, 6614, 7690, 8611, 8831],
@@ -815,14 +679,11 @@ SPECTRUM_JOB = "spectrum"        # job kind of a spectral fit; also every job or
 PHOTOMETRY_JOB = "photometry"    # job kind of a photometric fit (spec amendment A)
 # SFH model of every fit this code writes, stored in each fit file: fits made under an earlier model
 # (the 16-bin non-parametric SFH, whose files have no sfh_model) must never be read as current ones
-SFH_MODEL = "delayed"
+SFH_MODEL = MODELS["delayed"].name                      # delayed-tau alias, removed in Task 11
 
 # The photometric fit (spec amendment A) samples the training prior at the spectroscopic redshift and nothing
 # else: its brightness offset is marginalised analytically, and the simulator has no error multiplier
-PHOTOMETRIC_DIMS = []
-for dimension in DIMS:
-    if dimension != "z":
-        PHOTOMETRIC_DIMS.append(dimension)
+PHOTOMETRIC_DIMS = MODELS["delayed"].photometric_dims   # delayed-tau alias, removed in Task 11
 
 
 def multinest_iteration_bounds(output_basename):
@@ -1372,7 +1233,7 @@ def summarise_posterior(posterior, columns):
 N_CALIBRATION_MOCKS = 33         # mocks drawn from the prior to test the fitter (count)
 MIN_COVERAGE_95 = 0.85           # smallest acceptable share of truths inside the 95% interval (fraction)
 # Labels the calibration test checks; age, tau and Z in log, because the prior spans several decades of each
-CALIBRATION_LABELS = ["log_age", "log_tau", "log_metallicity", "log_mstar"]
+CALIBRATION_LABELS = MODELS["delayed"].calibration_labels   # delayed-tau alias, removed in Task 11
 CALIBRATION_LEVELS = (0.68, 0.95)                   # central-interval probabilities reported (fractions)
 CALIBRATION_ID_PREFIX = "calib_"                    # job ids are calib_000, calib_001, ...
 PERCENT = 100                    # percent per unit fraction

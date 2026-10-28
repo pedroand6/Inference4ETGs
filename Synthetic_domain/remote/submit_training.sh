@@ -36,8 +36,8 @@ trap 'rm -rf "$scratch_dir"' EXIT
 bundle_dir="$scratch_dir/bundle_contents"
 mkdir -p "$bundle_dir"
 
-cp "$SYNTHETIC_DIR/synthetic_model.py" "$SYNTHETIC_DIR/ml_data.py" "$SYNTHETIC_DIR/ml_networks.py" \
-   "$SYNTHETIC_DIR/train_ml_model.py" "$SYNTHETIC_DIR/training_set.parquet" \
+cp "$SYNTHETIC_DIR/synthetic_model.py" "$SYNTHETIC_DIR/sfh_models.py" "$SYNTHETIC_DIR/ml_data.py" \
+   "$SYNTHETIC_DIR/ml_networks.py" "$SYNTHETIC_DIR/train_ml_model.py" "$SYNTHETIC_DIR/training_set.parquet" \
    "$SYNTHETIC_DIR/synthetic_validation.parquet" "$SYNTHETIC_DIR/splus_noise_model.csv" "$bundle_dir/"
 cp -rL "$SYNTHETIC_DIR/splus-filters" "$bundle_dir/"
 cp "$REMOTE_DIR/grid_md5.txt" "$REMOTE_DIR/build_env.sh" "$REMOTE_DIR/job_common.sh" "$bundle_dir/"

@@ -55,7 +55,7 @@ trap 'rm -rf "$scratch_dir"' EXIT
 bundle_dir="$scratch_dir/bundle_contents"
 mkdir -p "$bundle_dir/$FITS_SUBDIR" "$bundle_dir/finished_fits"
 
-cp "$SYNTHETIC_DIR/synthetic_model.py" "$SYNTHETIC_DIR/run_spectral_fits.py" "$bundle_dir/"
+cp "$SYNTHETIC_DIR/synthetic_model.py" "$SYNTHETIC_DIR/sfh_models.py" "$SYNTHETIC_DIR/run_spectral_fits.py" "$bundle_dir/"
 cp -rL "$SYNTHETIC_DIR/splus-filters" "$bundle_dir/"
 cp -rL "$SYNTHETIC_DIR/$FITS_SUBDIR/jobs" "$bundle_dir/$FITS_SUBDIR/jobs"
 # Jobs listed in SKIP_LIST are deliberately left unfitted, so they are not sent

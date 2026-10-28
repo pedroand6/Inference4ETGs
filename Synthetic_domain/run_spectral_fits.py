@@ -14,7 +14,7 @@ spectral_fits/ and photometric_fits/ (pass --jobs-dir photometric_fits/jobs --ou
      LD_LIBRARY_PATH, for example: export LD_LIBRARY_PATH=$HOME/MultiNest/lib:$LD_LIBRARY_PATH
 
 2. Files to copy to the machine, keeping this layout (into one folder, from which you run the commands)
-   - synthetic_model.py, run_spectral_fits.py, slurm_fit.sh
+   - synthetic_model.py, sfh_models.py, run_spectral_fits.py, slurm_fit.sh
    - splus-filters/
    - spectral_fits/jobs/  (all the .npz files; photometric_fits/jobs/ for the photometric fits)
 
