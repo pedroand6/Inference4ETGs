@@ -69,12 +69,13 @@ def git_commit():
 
 
 def data_file(data_dir, name, sfh_model):
-    """Path of one of an SFH model's data sets: name with the model's suffix (sfh_models.model_file), in data_dir."""
+    """Path of an SFH model's data set in data_dir: name with the model's suffix (sfh_models.model_file)."""
     return os.path.join(data_dir, sfh_models.model_file(name, sfh_model))
 
 
 def run_directory(output_dir, embedding, sfh_model):
-    """Folder of a run: <output_dir>/<embedding> for delayed-tau (as ml_runs/mlp), with the model's suffix otherwise."""
+    """Folder of a run: <output_dir>/<embedding> for delayed-tau (as ml_runs/mlp), with the model's suffix
+    otherwise."""
     return sfh_models.model_file(os.path.join(output_dir, embedding), sfh_model)
 
 
@@ -130,7 +131,8 @@ def main(argv=None):
     # 3. Fixed validation copies: spectroscopic and photometric redshifts
     validation_sets = []
     for mode, seed in VALIDATION_SEEDS.items():
-        observations = ml_data.validation_observations(validation, mode, np.random.default_rng(seed), sfh_model)
+        observations = ml_data.validation_observations(validation, mode, np.random.default_rng(seed),
+                                                       sfh_model)
         validation_sets.append(standardise(to_tensors(observations), standardisers))
 
     def make_epoch(epoch_index):
@@ -143,8 +145,8 @@ def main(argv=None):
     # 4. Train and save
     config = ml_networks.model_config(sfh_model)
     config.update(embedding=arguments.embedding, epochs=arguments.epochs, seed=arguments.seed,
-                  training_commit=git_commit(), torch_version=torch.__version__, n_training_models=len(training),
-                  device=device)
+                  training_commit=git_commit(), torch_version=torch.__version__,
+                  n_training_models=len(training), device=device)
     estimator = ml_networks.build_estimator(config)
     start = time.time()
     history = ml_networks.train_estimator(estimator, make_epoch, validation_sets, config, device,

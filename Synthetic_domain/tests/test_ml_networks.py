@@ -45,7 +45,7 @@ def unit_standardisers(n_targets):
 
 
 def save_toy_run(directory, sfh_model="delayed"):
-    """Write an untrained toy run (2 targets named TOY_TARGET_NAMES, recorded under sfh_model) with save_run."""
+    """Write an untrained toy run (2 targets, TOY_TARGET_NAMES, recorded under sfh_model) with save_run."""
     config = small_config("mlp", sfh_model)
     history = [{"epoch": 0, "train_loss": 1.0, "validation_loss": 1.1}]
     ml_networks.save_run(str(directory), ml_networks.build_estimator(config), config, history,
@@ -100,7 +100,8 @@ def test_dblplaw_estimator_samples_its_ten_targets():
     config = ml_networks.model_config("dblplaw")
     config.update(summary_size=16, hidden_size=64, flow_transforms=2, flow_hidden=(32, 32))
     estimator = ml_networks.build_estimator(config)
-    samples = estimator.sample(torch.zeros(2, ml_data.N_INPUTS), torch.zeros(2, 12, ml_data.N_BAND_CHANNELS), 5)
+    samples = estimator.sample(torch.zeros(2, ml_data.N_INPUTS), torch.zeros(2, 12, ml_data.N_BAND_CHANNELS),
+                               5)
     assert samples.shape == (2, 5, 10)
 
 

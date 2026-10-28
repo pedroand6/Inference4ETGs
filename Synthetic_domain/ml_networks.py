@@ -280,8 +280,8 @@ def load_run(directory, sfh_model, device="cpu", target_names=None):
         stored = json.load(source)
     stored_model = stored.get("sfh_model", LEGACY_SFH_MODEL)
     if stored_model != sfh_model:
-        raise ValueError(f"run {directory} was trained for the {stored_model!r} SFH model, not {sfh_model!r}: "
-                         "load the run of that model (sfh_models.model_file)")
+        raise ValueError(f"run {directory} was trained for the {stored_model!r} SFH model, "
+                         f"not {sfh_model!r}: load the run of that model (sfh_models.model_file)")
     if stored.get("target_names") != list(target_names):
         raise ValueError(f"run was trained for targets {stored.get('target_names')}, "
                          f"not {list(target_names)}: retrain it, or move {directory} to ml_runs/superseded/")

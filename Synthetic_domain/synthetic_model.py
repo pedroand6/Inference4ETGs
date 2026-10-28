@@ -99,7 +99,8 @@ def summary_labels(bagpipes_sfh, drawn, sfh_model):
             drawn: dict from the model's components() with its drawn labels (extra keys are ignored);
             sfh_model: a name in MODELS ("delayed" or "dblplaw").
     Returns: dict ordered as MODELS[sfh_model].training_labels: the drawn values; the log labels (base-10 logs
-             of drawn values); log_mstar from Bagpipes; the HISTORY_LABELS from the analytic_labels, as floats.
+             of drawn values); log_mstar from Bagpipes; the HISTORY_LABELS from the analytic_labels, as
+             floats.
     """
     model_definition = MODELS[sfh_model]
     labels = {}
@@ -613,11 +614,13 @@ SPECTRAL_DIMS.append("noise_scale")
 
 
 def training_unit_vector(cube_by_name, sfh_model):
-    """Unit-cube vector in a model's dims order for a fit at fixed redshift, from the fit's own named coordinates.
+    """Unit-cube vector in a model's dims order for a fit at fixed redshift, from the fit's named coordinates.
 
-    Inputs: cube_by_name: dict of unit-cube values (dimensionless, in [0, 1)) holding every dimension of the model
-            but "z"; other names (the fit's nuisance parameters) are ignored; sfh_model: "delayed" or "dblplaw".
-    Returns: array of len(MODELS[sfh_model].dims) values (dimensionless); the "z" slot holds IGNORED_REDSHIFT_DRAW.
+    Inputs: cube_by_name: dict of unit-cube values (dimensionless, in [0, 1)) holding every dimension of the
+            model but "z"; other names (the fit's nuisance parameters) are ignored; sfh_model: "delayed" or
+            "dblplaw".
+    Returns: array of len(MODELS[sfh_model].dims) values (dimensionless); the "z" slot holds
+             IGNORED_REDSHIFT_DRAW.
     """
     dims = MODELS[sfh_model].dims
     unit_vector = np.zeros(len(dims))
@@ -633,14 +636,14 @@ def training_unit_vector(cube_by_name, sfh_model):
 def spectral_components(cube, redshift):
     """Bagpipes components, drawn parameters and noise scale for one spectral-fit unit-cube point.
 
-    The SFH, metallicity, dust and nebular part is the delayed-tau training prior (MODELS[SPECTRAL_MODEL]) at the
-    fixed spectroscopic redshift, which also sets the oldest allowed age; veldisp and noise_scale are the
+    The SFH, metallicity, dust and nebular part is the delayed-tau training prior (MODELS[SPECTRAL_MODEL]) at
+    the fixed spectroscopic redshift, which also sets the oldest allowed age; veldisp and noise_scale are the
     spectral nuisance parameters.
     Inputs: cube: unit-cube values (dimensionless, in [0, 1)) ordered as SPECTRAL_DIMS;
             redshift: spectroscopic redshift (dimensionless).
     Returns: (bagpipes_components, drawn, noise_scale). The components are the delayed-tau model's plus
-             veldisp [km/s]; drawn holds the model's drawn labels plus veldisp [km/s]; noise_scale is the error
-             multiplier (dimensionless, 1 to 5).
+             veldisp [km/s]; drawn holds the model's drawn labels plus veldisp [km/s]; noise_scale is the
+             error multiplier (dimensionless, 1 to 5).
     """
     cube_by_name = dict(zip(SPECTRAL_DIMS, cube))
     unit_vector = training_unit_vector(cube_by_name, SPECTRAL_MODEL)
@@ -682,8 +685,8 @@ MAX_ITERATIONS = 50000           # MultiNest iteration limit of a production fit
 OFFSET_DRAW_SEED = 0             # seed of the per-sample magnitude offsets of a photometric fit's labels
 SPECTRUM_JOB = "spectrum"        # job kind of a spectral fit; also every job or fit file stored without a kind
 PHOTOMETRY_JOB = "photometry"    # job kind of a photometric fit (spec amendment A)
-JOB_DEFAULT_SFH_MODEL = "delayed"   # SFH model of a job or save_fit call naming none (every job before the DPL model)
-EVIDENCE_ERROR_SAMPLES = 200        # posterior samples that recompute the ln Z error of a fit that stored none (count)
+JOB_DEFAULT_SFH_MODEL = "delayed"   # SFH model of a job or save_fit call naming none (every job before DPL)
+EVIDENCE_ERROR_SAMPLES = 200        # posterior samples that recompute the ln Z error of an older fit (count)
 
 
 def multinest_iteration_bounds(output_basename):
@@ -742,8 +745,8 @@ def fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_poi
             n_live_points: live points (count).
     Returns: dict with samples (unit-cube points, shape (n_samples, len(SPECTRAL_DIMS))), log_evidence
              (dimensionless ln Z), log_evidence_error (MultiNest's uncertainty of ln Z, sqrt(H / n_live)),
-             n_iterations (count, from multinest_iterations), converged (bool: the run certainly stopped before
-             max_iterations, judged by the upper bound of the count) and run_time [s].
+             n_iterations (count, from multinest_iterations), converged (bool: the run certainly stopped
+             before max_iterations, judged by the upper bound of the count) and run_time [s].
     """
     # 1. Bagpipes model built once; each likelihood call updates it in place, which is much faster
     midpoint_cube = np.full(len(SPECTRAL_DIMS), MIDPOINT_DRAW)
@@ -818,7 +821,7 @@ def run_multinest(log_likelihood, n_dims, output_basename, max_iterations, n_liv
 
 
 def posterior_labels(unit_cube_samples, redshift):
-    """Labels of each spectral-fit posterior sample, from a Bagpipes model that also computes S-PLUS photometry.
+    """Labels of each spectral-fit posterior sample, from a Bagpipes model that also gives S-PLUS photometry.
 
     Keeps at most MAX_POSTERIOR_SAMPLES evenly spaced samples, because building labels is the slow part.
     model_r is the model r magnitude for 10^10 M_sun formed, used later to rescale mass-like labels.
@@ -843,7 +846,7 @@ def posterior_labels(unit_cube_samples, redshift):
 
 
 def thinned_samples(unit_cube_samples, max_samples=MAX_POSTERIOR_SAMPLES):
-    """At most max_samples evenly spaced posterior samples, because computing anything per sample is the slow part.
+    """At most max_samples evenly spaced posterior samples: computing anything per sample is the slow part.
 
     Inputs: unit_cube_samples: unit-cube points (dimensionless), shape (n_samples, n_dims);
             max_samples: largest number of samples kept (count).
@@ -868,12 +871,13 @@ def updated_photometry_model(model, bagpipes_components):
 def sample_label_row(model, bagpipes_components, drawn, sfh_model):
     """Labels of one posterior sample, computed from its photometry model as for a training-set model.
 
-    Inputs: model: photometry model_galaxy already at bagpipes_components; bagpipes_components: dict as from the
-            model's components(), the point the model is at (not read: the labels come from drawn and the model);
-            drawn: dict from components() with the model's drawn labels, plus any extra parameters of the fit
-            (veldisp [km/s], noise_scale); sfh_model: "delayed" or "dblplaw".
-    Returns: dict: the model's training labels in order (summary_labels), then the extra drawn parameters, then
-             model_r [mag], the model r magnitude for 10^10 M_sun formed. Mass-like labels are for that mass.
+    Inputs: model: photometry model_galaxy already at bagpipes_components; bagpipes_components: dict as from
+            the model's components(), the point the model is at (not read: the labels come from drawn and the
+            model); drawn: dict from components() with the model's drawn labels, plus any extra parameters of
+            the fit (veldisp [km/s], noise_scale); sfh_model: "delayed" or "dblplaw".
+    Returns: dict: the model's training labels in order (summary_labels), then the extra drawn parameters,
+             then model_r [mag], the model r magnitude for 10^10 M_sun formed. Mass-like labels are for that
+             mass.
     """
     row = summary_labels(model.sfh, drawn, sfh_model)
     for key, value in drawn.items():
@@ -891,8 +895,8 @@ def photometric_components(cube, redshift, sfh_model):
 
     Inputs: cube: unit-cube values (dimensionless, in [0, 1)) ordered as MODELS[sfh_model].photometric_dims;
             redshift: spectroscopic redshift (dimensionless); sfh_model: "delayed" or "dblplaw".
-    Returns: (bagpipes_components, drawn), exactly as MODELS[sfh_model].components(..., fixed_redshift=redshift)
-             gives them.
+    Returns: (bagpipes_components, drawn), exactly as MODELS[sfh_model].components(...,
+             fixed_redshift=redshift) gives them.
     """
     cube_by_name = dict(zip(MODELS[sfh_model].photometric_dims, cube))
     unit_vector = training_unit_vector(cube_by_name, sfh_model)
@@ -977,7 +981,7 @@ def photometric_point_log_likelihood(model, cube, redshift, sfh_model, magnitude
 
 def fit_photometry(magnitudes, errors, redshift, sfh_model, output_basename, max_iterations,
                    n_live_points=N_LIVE_POINTS):
-    """MultiNest fit of one galaxy's 12-band photometry under one SFH model's training prior at a fixed redshift.
+    """MultiNest fit of one galaxy's 12-band photometry under an SFH model's training prior at fixed redshift.
 
     It fits the ML's own target: the model's training prior (its photometric_dims) and the likelihood of the
     simulator that made the training data (offset_marginal_log_likelihood), over the detected bands only.
@@ -985,7 +989,8 @@ def fit_photometry(magnitudes, errors, redshift, sfh_model, output_basename, max
             it is not detected (99 or NaN magnitude, or error >= MAX_DETECTED_ERROR);
             redshift: spectroscopic redshift (dimensionless); sfh_model: "delayed" or "dblplaw";
             output_basename, max_iterations and n_live_points: as in fit_spectrum.
-    Returns: dict as fit_spectrum returns, with samples of shape (n_samples, len(MODELS[sfh_model].photometric_dims)).
+    Returns: dict as fit_spectrum returns, with samples of shape (n_samples,
+             len(MODELS[sfh_model].photometric_dims)).
     Raises: ValueError when fewer than MIN_DETECTED_BANDS bands are detected.
     """
     # 1. Bands that enter the likelihood
@@ -1019,11 +1024,12 @@ def photometric_posterior_labels(unit_cube_samples, redshift, magnitudes, errors
     Each kept sample gets its own magnitude offset, drawn from the offset's Gaussian given that sample's
     model (offset_marginal_log_likelihood), and its mass-like labels move by it (rescale_mass_labels), as the
     training labels move with the brightness offset of each model.
-    Inputs: unit_cube_samples: unit-cube points (dimensionless), shape (n_samples, len(MODELS[sfh_model].photometric_dims));
-            redshift: spectroscopic redshift (dimensionless); magnitudes, errors: [mag] the fitted photometry,
-            as given to fit_photometry; rng: numpy Generator; sfh_model: "delayed" or "dblplaw".
-    Returns: DataFrame with one row per kept sample (at most MAX_POSTERIOR_SAMPLES): the model's training labels
-             (MASS_DEPENDENT_LABELS already rescaled), model_r [mag, for 10^10 M_sun formed] and
+    Inputs: unit_cube_samples: unit-cube points (dimensionless), shape (n_samples,
+            len(MODELS[sfh_model].photometric_dims)); redshift: spectroscopic redshift (dimensionless);
+            magnitudes, errors: [mag] the fitted photometry, as given to fit_photometry; rng: numpy Generator;
+            sfh_model: "delayed" or "dblplaw".
+    Returns: DataFrame with one row per kept sample (at most MAX_POSTERIOR_SAMPLES): the model's training
+             labels (MASS_DEPENDENT_LABELS already rescaled), model_r [mag, for 10^10 M_sun formed] and
              magnitude_offset [mag, observed minus model].
     """
     magnitudes = np.asarray(magnitudes, dtype=float)
@@ -1056,8 +1062,9 @@ def evidence_error(log_likelihoods, log_evidence, n_live_points):
 
     H = E_posterior[ln L] - ln Z is the information gained from prior to posterior [nats]; MultiNest reports
     sqrt(H / n_live) as the error of its ln Z.
-    Inputs: log_likelihoods: ln L of equal-weight posterior samples (dimensionless), with the fit's own likelihood;
-            log_evidence: the fit's ln Z (dimensionless); n_live_points: live points of the fit (count).
+    Inputs: log_likelihoods: ln L of equal-weight posterior samples (dimensionless), with the fit's own
+            likelihood; log_evidence: the fit's ln Z (dimensionless); n_live_points: live points of the fit
+            (count).
     Returns: the ln Z uncertainty (dimensionless float); 0 when the samples give H <= 0 (no information).
     """
     information = np.mean(np.asarray(log_likelihoods, dtype=float)) - log_evidence
@@ -1068,9 +1075,10 @@ def photometric_log_likelihoods(unit_cube_samples, redshift, magnitudes, errors,
                                 max_samples=EVIDENCE_ERROR_SAMPLES):
     """The photometric fit's log-likelihood at its posterior samples, as fit_photometry computed it.
 
-    Inputs: unit_cube_samples: unit-cube points (dimensionless), shape (n_samples, len(MODELS[sfh_model].photometric_dims));
-            redshift: spectroscopic redshift (dimensionless); magnitudes, errors: [mag] the fitted photometry;
-            sfh_model: the fit's model; max_samples: at most this many evenly spaced samples are used (count).
+    Inputs: unit_cube_samples: unit-cube points (dimensionless), shape (n_samples,
+            len(MODELS[sfh_model].photometric_dims)); redshift: spectroscopic redshift (dimensionless);
+            magnitudes, errors: [mag] the fitted photometry; sfh_model: the fit's model; max_samples: at most
+            this many evenly spaced samples are used (count).
     Returns: array of log-likelihoods (dimensionless), one per used sample.
     """
     magnitudes = np.asarray(magnitudes, dtype=float)
@@ -1096,9 +1104,9 @@ def load_unit_cube_samples(path):
 def fit_evidence(fit_file, job):
     """ln Z of a photometric fit and its uncertainty: the stored one, or sqrt(H / n_live) recomputed.
 
-    Why recompute: fits saved before the DPL model stored no evidence error, and their MultiNest folders stayed
-    in the PC job; the recomputed value is MultiNest's own estimate, from the stored posterior samples. A fit
-    without n_live_points ran with N_LIVE_POINTS (submit_fits.sh never sets --n-live).
+    Why recompute: fits saved before the DPL model stored no evidence error, and their MultiNest folders
+    stayed in the PC job; the recomputed value is MultiNest's own estimate, from the stored posterior samples.
+    A fit without n_live_points ran with N_LIVE_POINTS (submit_fits.sh never sets --n-live).
     Inputs: fit_file: path of a photometric fit (str); job: its photometry job (magnitudes and errors [mag],
             the photometry the fit used).
     Returns: (log_evidence, log_evidence_error), dimensionless floats.
@@ -1112,10 +1120,11 @@ def fit_evidence(fit_file, job):
     if "log_evidence_error" in metadata:
         return float(metadata["log_evidence"]), float(metadata["log_evidence_error"])
     samples = load_unit_cube_samples(fit_file)
-    log_likelihoods = photometric_log_likelihoods(samples, metadata["redshift"], job["magnitudes"], job["errors"],
-                                                  metadata["sfh_model"])
+    log_likelihoods = photometric_log_likelihoods(samples, metadata["redshift"], job["magnitudes"],
+                                                  job["errors"], metadata["sfh_model"])
     n_live_points = metadata.get("n_live_points", N_LIVE_POINTS)
-    return float(metadata["log_evidence"]), evidence_error(log_likelihoods, metadata["log_evidence"], n_live_points)
+    log_evidence_error = evidence_error(log_likelihoods, metadata["log_evidence"], n_live_points)
+    return float(metadata["log_evidence"]), log_evidence_error
 
 
 def make_mock_spectrum(cube, redshift, template_spectrum, rng):
@@ -1162,9 +1171,9 @@ def save_fit(path, posterior, unit_cube_samples, metadata):
             unit_cube_samples: unit-cube points (dimensionless, shape (n_samples, n_dims), n_dims that of the
             fit: len(SPECTRAL_DIMS) or the model's photometric_dims);
             metadata: dict of scalars (converged, run_time [s], n_iterations, max_iterations, n_live_points,
-            log_evidence, log_evidence_error, redshift, kind, sfh_model and, for a cross-fit, truth_model; files
-            written before kinds existed have no kind and are spectral). Without sfh_model, the fit is stored as
-            JOB_DEFAULT_SFH_MODEL. The caller's dict is not changed.
+            log_evidence, log_evidence_error, redshift, kind, sfh_model and, for a cross-fit, truth_model;
+            files written before kinds existed have no kind and are spectral). Without sfh_model, the fit is
+            stored as JOB_DEFAULT_SFH_MODEL. The caller's dict is not changed.
     Returns: None. An existing file at path is replaced.
     """
     stored_metadata = dict(metadata)
@@ -1203,9 +1212,9 @@ def load_fit(path):
 def fit_is_current(metadata, sfh_model):
     """Whether a stored fit belongs to the current production run of a fits folder's SFH model.
 
-    Fits that fail this (16-bin fits without sfh_model, fits of the other model, pilot runs with a smaller limit)
-    are moved to superseded/ by supersede_outdated_fits (spectroscopic_reference.ipynb, section 4), never read
-    as results. The folder's model comes from FIT_FOLDER_MODELS.
+    Fits that fail this (16-bin fits without sfh_model, fits of the other model, pilot runs with a smaller
+    limit) are moved to superseded/ by supersede_outdated_fits (spectroscopic_reference.ipynb, section 4),
+    never read as results. The folder's model comes from FIT_FOLDER_MODELS.
     Inputs: metadata: dict as load_fit returns it; sfh_model: the folder's model, "delayed" or "dblplaw".
     Returns: bool: True only when metadata["sfh_model"] == sfh_model and max_iterations >= MAX_ITERATIONS.
     """
@@ -1242,7 +1251,8 @@ def fit_spectrum_job(job, multinest_basename, max_iterations, n_live_points):
     Raises: ValueError for a job of a model other than SPECTRAL_MODEL (spectral fits are delayed-tau only).
     """
     if job_model(job) != SPECTRAL_MODEL:
-        raise ValueError(f"spectral fits are {SPECTRAL_MODEL} only, not {job_model(job)} (DPL spec, decision 1)")
+        raise ValueError(f"spectral fits are {SPECTRAL_MODEL} only, not {job_model(job)} "
+                         "(DPL spec, decision 1)")
     fit = fit_spectrum(job["spectrum"], job["redshift"], multinest_basename, max_iterations, n_live_points)
     posterior = posterior_labels(fit["samples"], job["redshift"])
     return fit, posterior
@@ -1261,8 +1271,8 @@ def fit_photometry_job(job, multinest_basename, max_iterations, n_live_points):
                          max_iterations, n_live_points)
     # A fixed seed, so labelling the same samples again gives the same offsets
     rng = np.random.default_rng(OFFSET_DRAW_SEED)
-    posterior = photometric_posterior_labels(fit["samples"], job["redshift"], job["magnitudes"], job["errors"],
-                                             rng, sfh_model)
+    posterior = photometric_posterior_labels(fit["samples"], job["redshift"], job["magnitudes"],
+                                             job["errors"], rng, sfh_model)
     return fit, posterior
 
 
@@ -1276,14 +1286,14 @@ def fit_and_save(job, output_directory, max_iterations, n_live_points=N_LIVE_POI
     Skips jobs whose readable file of the same kind and SFH model already exists, so a batch can be re-run
     with more galaxies. An unreadable file does not count as finished: the job is fitted again and the file
     replaced. A readable file of the other kind is never replaced (job ids are specobjids, shared by the
-    spectral and photometric fits of one galaxy), and neither is a fit of another SFH model (an earlier model's
-    result, the only copy, to be moved to superseded/): the job fails instead. A failed fit comes back with
-    status "failed" and the error text instead of an exception.
+    spectral and photometric fits of one galaxy), and neither is a fit of another SFH model (an earlier
+    model's result, the only copy, to be moved to superseded/): the job fails instead. A failed fit comes back
+    with status "failed" and the error text instead of an exception.
     Inputs: job: dict with job_id (str), redshift (dimensionless), kind (SPECTRUM_JOB when absent), sfh_model
-            (JOB_DEFAULT_SFH_MODEL when absent) and, for a cross-fit, truth_model; a spectrum job holds spectrum
-            (dict as from prepare_spectrum), a photometry job magnitudes and errors ([mag], 12 in BANDS order);
-            output_directory: folder for the .h5 file and the MultiNest files (str); max_iterations: MultiNest
-            iteration limit (count); n_live_points: live points (count).
+            (JOB_DEFAULT_SFH_MODEL when absent) and, for a cross-fit, truth_model; a spectrum job holds
+            spectrum (dict as from prepare_spectrum), a photometry job magnitudes and errors ([mag], 12 in
+            BANDS order); output_directory: folder for the .h5 file and the MultiNest files (str);
+            max_iterations: MultiNest iteration limit (count); n_live_points: live points (count).
     Returns: dict with job_id, status ("fitted", "skipped" or "failed"), converged (bool or None),
              run_time [s] (or None), n_iterations (count or None) and error (str or None).
     """
@@ -1327,8 +1337,8 @@ def fit_and_save(job, output_directory, max_iterations, n_live_points=N_LIVE_POI
         metadata = {"converged": fit["converged"], "run_time": fit["run_time"],
                     "n_iterations": fit["n_iterations"], "max_iterations": max_iterations,
                     "n_live_points": n_live_points, "log_evidence": fit["log_evidence"],
-                    "log_evidence_error": fit["log_evidence_error"], "redshift": job["redshift"], "kind": kind,
-                    "sfh_model": sfh_model}
+                    "log_evidence_error": fit["log_evidence_error"], "redshift": job["redshift"],
+                    "kind": kind, "sfh_model": sfh_model}
         if "truth_model" in job:
             metadata["truth_model"] = job["truth_model"]
         save_fit(output_path, posterior, fit["samples"], metadata)
@@ -1361,7 +1371,8 @@ N_CALIBRATION_MOCKS = 33         # mocks drawn from the prior to test the fitter
 MIN_COVERAGE_95 = 0.85           # smallest acceptable share of truths inside the 95% interval (fraction)
 CALIBRATION_LEVELS = (0.68, 0.95)                   # central-interval probabilities reported (fractions)
 CALIBRATION_ID_PREFIX = "calib_"                    # job ids are calib_000, calib_001, ...
-CROSS_CALIBRATION_ID_PREFIX = "cross_calib_"   # cross-fit ids: cross_calib_007 is mock calib_007 fitted with the other model
+# Cross-fit ids: cross_calib_007 is mock calib_007 fitted with the other model
+CROSS_CALIBRATION_ID_PREFIX = "cross_calib_"
 # Reference-CSV columns of each model's photometric fits: <prefix><label>_p16, <prefix>log_evidence, ...
 PHOTOMETRIC_PREFIXES = {"delayed": "phot_", "dblplaw": "phot_dblplaw_"}
 PHOTOMETRIC_EXTRA_LABELS = ["mw_age", "log_sfr"]   # summarised besides the calibration and the shared labels
@@ -1372,15 +1383,17 @@ def export_job(job, jobs_directory):
     """Write one fit job to <jobs_directory>/<job_id>.npz, a portable file for run_spectral_fits.py.
 
     Inputs: job: dict with job_id (str), redshift (dimensionless), kind (SPECTRUM_JOB when absent), sfh_model
-            (JOB_DEFAULT_SFH_MODEL when absent) and, for a cross-fit, truth_model; a spectrum job holds spectrum
-            (dict with wavelength [Angstrom, observed], flux and ivar), a photometry job magnitudes and errors
-            ([mag], 12 in BANDS order); jobs_directory: folder for the file (str), created if missing.
+            (JOB_DEFAULT_SFH_MODEL when absent) and, for a cross-fit, truth_model; a spectrum job holds
+            spectrum (dict with wavelength [Angstrom, observed], flux and ivar), a photometry job magnitudes
+            and errors ([mag], 12 in BANDS order); jobs_directory: folder for the file (str), created if
+            missing.
     Returns: path of the written file (str).
     """
     os.makedirs(jobs_directory, exist_ok=True)
     path = os.path.join(jobs_directory, f"{job['job_id']}.npz")
     kind = job_kind(job)
-    arrays = {"job_id": str(job["job_id"]), "redshift": job["redshift"], "kind": kind, "sfh_model": job_model(job)}
+    arrays = {"job_id": str(job["job_id"]), "redshift": job["redshift"], "kind": kind,
+              "sfh_model": job_model(job)}
     if "truth_model" in job:
         arrays["truth_model"] = job["truth_model"]
     if kind == PHOTOMETRY_JOB:
@@ -1399,9 +1412,10 @@ def load_job(path):
 
     Inputs: path: file path (str).
     Returns: job dict in the format fit_and_save takes: job_id (str), kind, sfh_model, redshift (dimensionless
-             float), truth_model when the file has one, and either spectrum (wavelength, flux, ivar) or magnitudes
-             and errors [mag]. A file without a kind (exported before the photometric fits existed) is a spectrum
-             job; a file without sfh_model (exported before the DPL model) is a JOB_DEFAULT_SFH_MODEL job.
+             float), truth_model when the file has one, and either spectrum (wavelength, flux, ivar) or
+             magnitudes and errors [mag]. A file without a kind (exported before the photometric fits existed)
+             is a spectrum job; a file without sfh_model (exported before the DPL model) is a
+             JOB_DEFAULT_SFH_MODEL job.
     """
     with np.load(path) as source:
         kind = SPECTRUM_JOB
@@ -1489,7 +1503,8 @@ def calibration_coverage(posteriors, truths, labels, levels=CALIBRATION_LEVELS):
 def draw_photometric_cubes(n_mocks, sfh_model, seed):
     """Unit-cube points of photometric calibration mocks: a Latin hypercube over the model's photometric dims.
 
-    Why a Latin hypercube: as for the training sets, so that 33 mocks still cover every parameter range evenly.
+    Why a Latin hypercube: as for the training sets, so that 33 mocks still cover every parameter range
+    evenly.
     Inputs: n_mocks: number of points (count); sfh_model: "delayed" or "dblplaw";
             seed: Latin hypercube seed (integer or numpy Generator).
     Returns: array (n_mocks, len(MODELS[sfh_model].photometric_dims)), values in [0, 1) (dimensionless).
@@ -1504,8 +1519,8 @@ def noiseless_photometric_mocks(cubes, redshifts, sfh_model):
     Inputs: cubes: unit-cube points (dimensionless), shape (n_mocks, len(MODELS[sfh_model].photometric_dims));
             redshifts: one redshift per point (dimensionless); sfh_model: "delayed" or "dblplaw".
     Returns: (magnitudes [mag], shape (n_mocks, 12) in BANDS order, NaN where a flux is not positive;
-             truths: list of Series, one per point, as sample_label_row gives them: the model's training labels,
-             mass-like ones for 10^10 M_sun formed, and model_r [mag]).
+             truths: list of Series, one per point, as sample_label_row gives them: the model's training
+             labels, mass-like ones for 10^10 M_sun formed, and model_r [mag]).
     """
     magnitudes = np.zeros((len(cubes), len(BANDS)))
     truths = []
@@ -1518,21 +1533,21 @@ def noiseless_photometric_mocks(cubes, redshifts, sfh_model):
     return magnitudes, truths
 
 
-def photometric_mock_jobs(job_ids, noiseless_magnitudes, redshifts, magnitude_offsets, truths, noise_table, rng,
-                          sfh_model):
+def photometric_mock_jobs(job_ids, noiseless_magnitudes, redshifts, magnitude_offsets, truths, noise_table,
+                          rng, sfh_model):
     """Photometry jobs of mocks at given brightness, noised once as the training data, with their true labels.
 
     Each mock moves by its magnitude offset (observed minus model, the same in every band), then gets S-PLUS
     errors, flux noise and non-detections (add_splus_noise); its true mass-like labels move with the offset
-    (rescale_mass_labels). A mock left with fewer than MIN_DETECTED_BANDS detected bands cannot be fitted and is
-    left out.
+    (rescale_mass_labels). A mock left with fewer than MIN_DETECTED_BANDS detected bands cannot be fitted and
+    is left out.
     Inputs: job_ids: one id per mock (str); noiseless_magnitudes: [mag] (n_mocks, 12) in BANDS order, for
             10^10 M_sun formed; redshifts: one per mock (dimensionless); magnitude_offsets: [mag] one per mock
             (NaN gives a mock with no detection, so it is left out); truths: dict job_id -> Series of the true
             labels for 10^10 M_sun formed; noise_table: output of fit_noise_model; rng: numpy Generator (only
             add_splus_noise draws from it); sfh_model: the model the jobs are fitted with.
-    Returns: (jobs, rescaled_truths): jobs is a list of photometry job dicts as fit_and_save takes (job_id, kind,
-             sfh_model, magnitudes, errors [mag], redshift), in input order without the left-out mocks;
+    Returns: (jobs, rescaled_truths): jobs is a list of photometry job dicts as fit_and_save takes (job_id,
+             kind, sfh_model, magnitudes, errors [mag], redshift), in input order without the left-out mocks;
              rescaled_truths maps each kept job_id to its truth at the mock's brightness.
     """
     offsets = np.asarray(magnitude_offsets, dtype=float)
@@ -1554,18 +1569,20 @@ def photometric_mock_jobs(job_ids, noiseless_magnitudes, redshifts, magnitude_of
 
 
 def draw_photometric_calibration_mocks(n_mocks, sfh_model, donor_redshifts, donor_r, noise_table, seed):
-    """Photometric calibration mocks from a model's prior, each at the redshift and brightness of a real galaxy.
+    """Photometric calibration mocks from a model's prior, each at the redshift and brightness of a galaxy.
 
-    Why a donor galaxy: the mock then has a real redshift and aperture brightness, and so realistic S-PLUS errors.
-    The unit-cube points (draw_photometric_cubes) and the donors+noise come from two independent streams
-    spawned from numpy.random.SeedSequence(seed), donors first in the second. Why two streams: with one seed
-    for both, the donors and noise reuse the Latin hypercube's own uniforms, so the mocks are not independent.
-    Inputs: n_mocks: number of mocks (count); sfh_model: "delayed" or "dblplaw"; donor_redshifts: spectroscopic
-            redshifts of the candidate donors (dimensionless); donor_r: their aperture r magnitudes [mag] (a donor
-            with a non-finite r, or r at or above UNDETECTED_MAGNITUDE, is never chosen); noise_table: output of
-            fit_noise_model; seed: integer.
-    Returns: (jobs, truths) as photometric_mock_jobs returns them, with ids calib_000, calib_001, ... (a mock with
-             too few detected bands is left out, so an id can be missing); truths at the donor's brightness.
+    Why a donor galaxy: the mock then has a real redshift and aperture brightness, and so realistic S-PLUS
+    errors. The unit-cube points (draw_photometric_cubes) and the donors+noise come from two independent
+    streams spawned from numpy.random.SeedSequence(seed), donors first in the second. Why two streams: with
+    one seed for both, the donors and noise reuse the Latin hypercube's own uniforms, so the mocks are not
+    independent.
+    Inputs: n_mocks: number of mocks (count); sfh_model: "delayed" or "dblplaw"; donor_redshifts:
+            spectroscopic redshifts of the candidate donors (dimensionless); donor_r: their aperture r
+            magnitudes [mag] (a donor with a non-finite r, or r at or above UNDETECTED_MAGNITUDE, is never
+            chosen); noise_table: output of fit_noise_model; seed: integer.
+    Returns: (jobs, truths) as photometric_mock_jobs returns them, with ids calib_000, calib_001, ... (a mock
+             with too few detected bands is left out, so an id can be missing); truths at the donor's
+             brightness.
     Raises: ValueError when no donor is usable.
     """
     donor_redshifts = np.asarray(donor_redshifts, dtype=float)
@@ -1592,8 +1609,8 @@ def draw_photometric_calibration_mocks(n_mocks, sfh_model, donor_redshifts, dono
         job_id = f"{CALIBRATION_ID_PREFIX}{mock_index:03d}"
         job_ids.append(job_id)
         truths[job_id] = truth_list[mock_index]
-    return photometric_mock_jobs(job_ids, noiseless_magnitudes, redshifts, magnitude_offsets, truths, noise_table,
-                                 rng, sfh_model)
+    return photometric_mock_jobs(job_ids, noiseless_magnitudes, redshifts, magnitude_offsets, truths,
+                                 noise_table, rng, sfh_model)
 
 
 def cross_fit_id(mock_id):
@@ -1617,8 +1634,8 @@ def cross_fit_jobs(mock_jobs, mock_truths, fitted_model):
             sfh_model is delayed-tau); mock_truths: dict mock job_id -> Series of the true labels;
             fitted_model: the model to fit them with, not the mocks' own.
     Returns: (jobs, truths): one job per mock with job_id cross_fit_id(mock id), sfh_model = fitted_model and
-             truth_model = the mock's own model; truths maps the new ids to the mocks' truths. The input jobs are
-             not changed.
+             truth_model = the mock's own model; truths maps the new ids to the mocks' truths. The input jobs
+             are not changed.
     Raises: ValueError when a mock is already of fitted_model.
     """
     jobs = []
@@ -1626,7 +1643,8 @@ def cross_fit_jobs(mock_jobs, mock_truths, fitted_model):
     for mock_job in mock_jobs:
         truth_model = job_model(mock_job)
         if truth_model == fitted_model:
-            raise ValueError(f"{mock_job['job_id']} is a {truth_model} mock: a cross-fit uses the other model")
+            raise ValueError(f"{mock_job['job_id']} is a {truth_model} mock: "
+                             "a cross-fit uses the other model")
         job = dict(mock_job)
         job["job_id"] = cross_fit_id(mock_job["job_id"])
         job["sfh_model"] = fitted_model
@@ -1640,8 +1658,8 @@ def photometric_summary_labels(sfh_model):
     """Labels of a model's photometric fits that the reference CSV summarises.
 
     Inputs: sfh_model: "delayed" or "dblplaw".
-    Returns: list of label names, each once: the model's calibration labels, then PHOTOMETRIC_EXTRA_LABELS, then
-             the SHARED_LABELS not listed yet (the labels the model comparison uses).
+    Returns: list of label names, each once: the model's calibration labels, then PHOTOMETRIC_EXTRA_LABELS,
+             then the SHARED_LABELS not listed yet (the labels the model comparison uses).
     """
     labels = list(MODELS[sfh_model].calibration_labels)
     for label in [*PHOTOMETRIC_EXTRA_LABELS, *SHARED_LABELS]:
@@ -1656,11 +1674,12 @@ def photometric_summary_labels(sfh_model):
 SUPERSEDED_SUBDIRECTORY = "superseded"     # inside each fits folder: results of earlier, replaced runs
 SUPERSEDED_NAME_SUFFIX = "_16bin"          # added to a name already taken there (first-run fits, same id)
 CALIBRATION_MOCK_FILE = "calibration_mocks.joblib"   # (jobs, truths) of a fits folder's calibration mocks
-CROSS_FIT_MOCK_FILE = "cross_fit_mocks.joblib"   # (jobs, truths) of the cross-fits exported into a fits folder
+CROSS_FIT_MOCK_FILE = "cross_fit_mocks.joblib"   # (jobs, truths) of the cross-fits exported to a fits folder
 JOBS_SUBDIRECTORY = "jobs"                 # exported fit jobs, one .npz each
 RUN_LOG_NAMES = ("fit_log.csv", "fit_logs")   # logs of run_spectral_fits.py; their rows name the fits run
 # The SFH model of each fits folder: a fit of another model in it is superseded, never read
-FIT_FOLDER_MODELS = {"spectral_fits": "delayed", "photometric_fits": "delayed", "photometric_fits_dblplaw": "dblplaw"}
+FIT_FOLDER_MODELS = {"spectral_fits": "delayed", "photometric_fits": "delayed",
+                     "photometric_fits_dblplaw": "dblplaw"}
 
 
 def move_to_superseded(fits_directory, name):
@@ -1712,8 +1731,8 @@ def cross_fit_mocks_are_current(mock_file, sfh_model):
 
     Inputs: mock_file: path of a joblib file with (jobs, truths) as cross_fit_jobs returns them;
             sfh_model: the folder's model, "delayed" or "dblplaw".
-    Returns: bool: True when there is at least one job, every job is fitted with sfh_model, and every truth has
-             the calibration labels of its job's truth_model.
+    Returns: bool: True when there is at least one job, every job is fitted with sfh_model, and every truth
+             has the calibration labels of its job's truth_model.
     """
     jobs, truths = joblib.load(mock_file)
     if len(jobs) == 0:
@@ -1731,20 +1750,20 @@ def supersede_outdated_fits(fits_directory, sfh_model):
     """Move every result of an earlier model or run out of a fits folder, into its SUPERSEDED_SUBDIRECTORY.
 
     Why: run_spectral_fits.py counts any top-level .h5 as done, and new calibration mocks reuse the calib_<k>
-    ids, so an old file left in place would be skipped as finished or scored against a new truth. Each folder is
-    judged against its own SFH model (FIT_FOLDER_MODELS): a DPL fit stays in photometric_fits_dblplaw and leaves
-    photometric_fits, and the reverse.
+    ids, so an old file left in place would be skipped as finished or scored against a new truth. Each folder
+    is judged against its own SFH model (FIT_FOLDER_MODELS): a DPL fit stays in photometric_fits_dblplaw and
+    leaves photometric_fits, and the reverse.
     Moved, in this order:
       1. every readable .h5 fit that fails fit_is_current(metadata, sfh_model), with its MultiNest folder (the
          name without .h5); an unreadable .h5 stays, because fit_and_save fits that job again;
-      2. CALIBRATION_MOCK_FILE when its truths lack the model's calibration labels (16-bin mocks) or it holds none,
-         and CROSS_FIT_MOCK_FILE when cross_fit_mocks_are_current says it does not belong here;
-      3. while no mock file is left, the jobs/calib_*.npz files, which then belong to no current mock, and while
-         no cross-fit mock file is left, the jobs/cross_calib_*.npz files;
+      2. CALIBRATION_MOCK_FILE when its truths lack the model's calibration labels (16-bin mocks) or it holds
+         none, and CROSS_FIT_MOCK_FILE when cross_fit_mocks_are_current says it does not belong here;
+      3. while no mock file is left, the jobs/calib_*.npz files, which then belong to no current mock, and
+         while no cross-fit mock file is left, the jobs/cross_calib_*.npz files;
       4. when any fit moved, the run logs RUN_LOG_NAMES (notebook 2 reads failures from them, and
          fetch_fits.sh drops new rows of ids already logged).
-    Inputs: fits_directory: folder with the .h5 fits, jobs/ and the mock files (str); a missing folder is fine;
-            sfh_model: the folder's model, "delayed" or "dblplaw".
+    Inputs: fits_directory: folder with the .h5 fits, jobs/ and the mock files (str); a missing folder is
+            fine; sfh_model: the folder's model, "delayed" or "dblplaw".
     Returns: list of the moved names (str), relative to fits_directory; empty when everything is current.
     Raises: ValueError when the folder is one of FIT_FOLDER_MODELS and sfh_model is not its model.
     """

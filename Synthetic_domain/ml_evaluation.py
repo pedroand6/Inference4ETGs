@@ -28,7 +28,8 @@ SUMMARY_SUFFIXES = ("p16", "median", "p84")  # column suffixes of a posterior st
 GAUSSIAN_95_WIDTHS = 1.959964                # [1-sigma widths] half-width of the central 95% of a Gaussian
 VERDICT_COLUMNS = ["n_galaxies", "inside_95", "median_offset", "agrees"]   # agreement_verdict per label
 
-# Evidence scale on |ln B| (Jeffreys, as in Trotta 2008): below 1 inconclusive, 1 to 3 positive, above 3 strong
+# Evidence scale on |ln B| (Jeffreys, as in Trotta 2008): below 1 inconclusive, 1 to 3 positive,
+# above 3 strong
 INCONCLUSIVE_LOG_BAYES = 1.0                 # [nats] |ln B| below this is inconclusive
 STRONG_LOG_BAYES = 3.0                       # [nats] |ln B| above this is strong
 DELAYED_MODEL = "delayed"                    # favoured by ln B >= INCONCLUSIVE_LOG_BAYES
@@ -324,16 +325,16 @@ def model_difference_statistics(first_p16, first_median, first_p84, second_p16, 
 
     median_difference, scatter = bias_and_nmad(first_median[usable], second_median[usable])
     overlap = (first_p16[usable] <= second_p84[usable]) & (second_p16[usable] <= first_p84[usable])
-    return {"n_galaxies": n_galaxies, "median_difference": float(median_difference), "scatter": float(scatter),
-            "overlap_68": float(np.mean(overlap))}
+    return {"n_galaxies": n_galaxies, "median_difference": float(median_difference),
+            "scatter": float(scatter), "overlap_68": float(np.mean(overlap))}
 
 
 def model_comparison_rows(galaxies, labels, first_prefix, second_prefix):
     """model_difference_statistics of each label, for two estimates stored side by side in one table.
 
     Inputs: galaxies: DataFrame with {prefix}<label>_p16/_median/_p84 of both estimates, one row per galaxy;
-            labels: the labels to compare; first_prefix, second_prefix: their column prefixes (e.g. "phot_" and
-            "phot_dblplaw_"). The difference is first minus second.
+            labels: the labels to compare; first_prefix, second_prefix: their column prefixes
+            (e.g. "phot_" and "phot_dblplaw_"). The difference is first minus second.
     Returns: DataFrame with one row per label: label, n_galaxies, median_difference, scatter and overlap_68.
              A label whose columns are missing for either estimate gets n_galaxies 0 and NaN statistics.
     """
@@ -399,7 +400,7 @@ def nested_sampling_log_evidence_error(information, n_live_points):
 
 
 def log_bayes_factor_error(log_evidence_error_delayed, log_evidence_error_dblplaw):
-    """1-sigma uncertainty of ln B [nats]: the two fits are independent runs, so their errors add in quadrature."""
+    """1-sigma error of ln B [nats]: the fits are independent runs, so their errors add in quadrature."""
     error_delayed = np.asarray(log_evidence_error_delayed, dtype=float)
     error_dblplaw = np.asarray(log_evidence_error_dblplaw, dtype=float)
     return np.sqrt(error_delayed**2 + error_dblplaw**2)
@@ -500,8 +501,8 @@ def true_model_recovery(cross_fits):
     for name, in_group in groups.items():
         n_mocks = int(in_group.sum())
         if n_mocks == 0:
-            rows.append({"truth_model": name, "n_mocks": 0, "prefers_truth": np.nan, "strong_for_truth": np.nan,
-                         "inconclusive": np.nan, "strong_for_other": np.nan})
+            rows.append({"truth_model": name, "n_mocks": 0, "prefers_truth": np.nan,
+                         "strong_for_truth": np.nan, "inconclusive": np.nan, "strong_for_other": np.nan})
             continue
         group_signed = signed[in_group]
         rows.append({"truth_model": name, "n_mocks": n_mocks,

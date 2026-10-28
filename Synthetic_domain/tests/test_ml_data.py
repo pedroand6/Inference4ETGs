@@ -19,8 +19,8 @@ SFH_MODEL_NAMES = ["delayed", "dblplaw"]
 N_SIMULATED = 200                # prior draws per model in the simulated fixture
 DELAYED_TARGETS = ["log_age", "log_tau", "log_metallicity", "av_ism", "log_tau_bc", "logU",
                    "log_mass_formed", "log_mstar", "redshift"]
-DBLPLAW_TARGETS = ["log_turnover_lookback", "log_alpha", "log_beta", "log_metallicity", "av_ism", "log_tau_bc",
-                   "logU", "log_mass_formed", "log_mstar", "redshift"]
+DBLPLAW_TARGETS = ["log_turnover_lookback", "log_alpha", "log_beta", "log_metallicity", "av_ism",
+                   "log_tau_bc", "logU", "log_mass_formed", "log_mstar", "redshift"]
 # Target values inside both priors at z = 0.1, for the targets a test row does not set
 TYPICAL_TARGETS = {"log_age": 0.0, "log_tau": 0.0, "log_turnover_lookback": 0.0, "log_alpha": 0.0,
                    "log_beta": 0.0, "log_metallicity": 0.0, "av_ism": 0.5, "log_tau_bc": 0.0, "logU": -2.5,
@@ -144,7 +144,7 @@ def test_encode_targets_takes_logs_of_the_log_uniform_parameters(simulated_sets,
 
 @pytest.mark.parametrize("sfh_model", SFH_MODEL_NAMES)
 def test_decoded_labels_equal_the_summary_labels_of_simulated_models(simulated_sets, sfh_model):
-    """Encode then decode the simulated truths: every training label (sm.summary_labels made them) comes back."""
+    """Encode, then decode the simulated truths: every training label (from sm.summary_labels) comes back."""
     simulated = simulated_sets[sfh_model]
     decoded = ml_data.decode_samples(ml_data.encode_targets(simulated, sfh_model), sfh_model)
     training_labels = sfh_models.MODELS[sfh_model].training_labels
@@ -162,7 +162,8 @@ def test_parallel_decode_equals_the_serial_decode(simulated_sets, sfh_model):
     parallel = ml_data.decode_samples(theta, sfh_model, n_jobs=3)
     assert list(parallel.columns) == list(serial.columns)
     assert list(parallel.index) == list(serial.index)
-    assert np.allclose(parallel.to_numpy(), serial.to_numpy(), rtol=PARALLEL_TOLERANCE, atol=PARALLEL_TOLERANCE)
+    assert np.allclose(parallel.to_numpy(), serial.to_numpy(), rtol=PARALLEL_TOLERANCE,
+                       atol=PARALLEL_TOLERANCE)
     few_rows = ml_data.decode_samples(theta[:2], sfh_model, n_jobs=4)      # fewer rows than threads
     assert np.allclose(few_rows.to_numpy(), serial.iloc[:2].to_numpy(), rtol=PARALLEL_TOLERANCE,
                        atol=PARALLEL_TOLERANCE)
@@ -222,7 +223,8 @@ def test_decode_clips_tau_and_metallicity_to_their_ranges():
 
 
 def test_decode_clips_turnover_lookback_to_the_prior_at_the_sample_redshift():
-    log_too_old = np.log10(10.0)            # older than the oldest allowed turnover at z = 0.7 (7.07 Gyr ago), not at z = 0.1
+    # Older than the oldest allowed turnover at z = 0.7 (7.07 Gyr ago), not at z = 0.1
+    log_too_old = np.log10(10.0)
     theta = theta_rows([
         {"log_turnover_lookback": log_too_old, "redshift": 0.7},
         {"log_turnover_lookback": log_too_old, "redshift": 0.1},
@@ -233,7 +235,8 @@ def test_decode_clips_turnover_lookback_to_the_prior_at_the_sample_redshift():
     assert np.isclose(decoded["turnover_lookback"][0], sfh_models.maximum_age(0.7), rtol=1e-12)
     assert np.isclose(decoded["turnover_lookback"][1], 10.0, rtol=1e-12)
     assert decoded["turnover_lookback"][2] == sfh_models.TURNOVER_LOOKBACK_MIN
-    assert np.isclose(decoded["turnover_lookback"][3], sfh_models.maximum_age(sfh_models.Z_RANGE[1]), rtol=1e-12)
+    assert np.isclose(decoded["turnover_lookback"][3], sfh_models.maximum_age(sfh_models.Z_RANGE[1]),
+                      rtol=1e-12)
     # Bagpipes' tau is the turnover time since the Big Bang, so it follows the clipped turnover lookback
     universe_age = sfh_models.COSMOLOGY.age(decoded["redshift"].to_numpy()).value
     assert np.allclose(decoded["tau"], universe_age - decoded["turnover_lookback"], rtol=0, atol=1e-12)
@@ -271,7 +274,7 @@ def test_decode_extreme_delayed_samples_stay_finite():
 
 
 def test_decode_extreme_dblplaw_samples_stay_finite():
-    """The corners of the DPL prior: sharp (alpha = beta = 1000) and flat (0.01) histories, oldest and latest turnovers."""
+    """DPL prior corners: sharp (alpha = beta = 1000) and flat (0.01) SFHs, oldest and latest turnovers."""
     theta = theta_rows([
         {"log_turnover_lookback": 50.0, "log_alpha": 50.0, "log_beta": -50.0, "redshift": 0.7},
         {"log_turnover_lookback": -50.0, "log_alpha": -50.0, "log_beta": 50.0, "redshift": 0.002},
@@ -330,8 +333,10 @@ def test_validation_observations_modes(sfh_model):
     if not parquet_has_column(path, SET_COLUMNS[sfh_model]):
         pytest.skip(f"{path} not yet generated on the PC")
     held_out = pd.read_parquet(path).iloc[:200]
-    spectroscopic = ml_data.validation_observations(held_out, "spectroscopic", np.random.default_rng(32), sfh_model)
-    photometric = ml_data.validation_observations(held_out, "photometric", np.random.default_rng(32), sfh_model)
+    spectroscopic = ml_data.validation_observations(held_out, "spectroscopic", np.random.default_rng(32),
+                                                    sfh_model)
+    photometric = ml_data.validation_observations(held_out, "photometric", np.random.default_rng(32),
+                                                  sfh_model)
     assert np.all(spectroscopic["flat"][:, 36] == 0)
     assert np.all(photometric["flat"][:, 36] > 0)
     assert np.allclose(spectroscopic["flat"][:, 35], held_out["redshift"])

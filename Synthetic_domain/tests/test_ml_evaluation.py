@@ -194,8 +194,9 @@ def test_percentile_summary_gives_the_16th_50th_and_84th_percentiles():
 def test_compare_summaries_with_reference_extends_each_side_as_a_gaussian():
     """Estimate median 0 with p16 = -1 and p84 = +1 (+2 in the last row); reference sigma 1."""
     reference_median = np.array([0.0, 1.5, 2.5, 3.5])
-    result = ev.compare_summaries_with_reference(np.full(4, -1.0), np.zeros(4), np.array([1.0, 1.0, 1.0, 2.0]),
-                                                 reference_median - 1, reference_median, reference_median + 1)
+    result = ev.compare_summaries_with_reference(np.full(4, -1.0), np.zeros(4),
+                                                 np.array([1.0, 1.0, 1.0, 2.0]), reference_median - 1,
+                                                 reference_median, reference_median + 1)
     assert list(result["inside_68"]) == [True, False, False, False]
     # 95% upper bound: 1.96 for the first three rows, 3.92 for the wider upper side of the last
     assert list(result["inside_95"]) == [True, True, False, True]
@@ -213,7 +214,8 @@ def test_summary_comparison_rows_leave_out_galaxies_without_both_fits():
         "mw_age_median": [0.0, 5.0, 0.0],
         "mw_age_p84": [1.0, 6.0, 1.0],
     })
-    rows = ev.summary_comparison_rows(galaxies, ["mw_age", "log_ssfr"], "phot_dblplaw_")   # no log_ssfr columns
+    # There are no log_ssfr columns
+    rows = ev.summary_comparison_rows(galaxies, ["mw_age", "log_ssfr"], "phot_dblplaw_")
     assert [row["specobjid"] for row in rows] == ["a", "b"]
     assert bool(rows[0]["inside_95"]) and not bool(rows[1]["inside_95"])
     assert set(rows[0]) == {"label", "specobjid", "offset_in_widths", "inside_68", "inside_95"}
@@ -239,9 +241,9 @@ def test_model_difference_statistics_recover_a_known_offset_and_scatter():
     second_median = rng.normal(10, 1, 20000)
     first_median = second_median + 0.3 + rng.normal(0, 0.1, len(second_median))
     half_width = 0.05
-    statistics = ev.model_difference_statistics(first_median - half_width, first_median, first_median + half_width,
-                                                second_median - half_width, second_median,
-                                                second_median + half_width)
+    statistics = ev.model_difference_statistics(first_median - half_width, first_median,
+                                                first_median + half_width, second_median - half_width,
+                                                second_median, second_median + half_width)
     assert statistics["n_galaxies"] == 20000
     assert np.isclose(statistics["median_difference"], 0.3, atol=0.005)
     assert np.isclose(statistics["scatter"], 0.1, rtol=0.05)
@@ -356,7 +358,8 @@ def cross_fit_table(truth_models, log_bayes):
 
 
 def test_true_model_recovery_of_hand_made_mocks():
-    table = cross_fit_table(["delayed"] * 4 + ["dblplaw"] * 4, [5.0, 2.0, -0.5, -4.0, -6.0, -0.2, 1.5, np.nan])
+    table = cross_fit_table(["delayed"] * 4 + ["dblplaw"] * 4,
+                            [5.0, 2.0, -0.5, -4.0, -6.0, -0.2, 1.5, np.nan])
     recovery = ev.true_model_recovery(table).set_index("truth_model")
     assert list(recovery.index) == ["delayed", "dblplaw", ev.ALL_MOCKS_ROW]
     assert list(recovery["n_mocks"]) == [4, 3, 7]                            # the NaN mock is left out

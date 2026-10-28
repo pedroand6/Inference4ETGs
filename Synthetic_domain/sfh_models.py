@@ -63,7 +63,8 @@ def maximum_age(redshift):
 def dust_and_nebular(params):
     """Bagpipes dust, birth-cloud and nebular entries of one model, the same for every SFH model.
 
-    Inputs: params: dict of unit-cube values (dimensionless, in [0, 1)) holding "av_ism", "log_tau_bc" and "logU".
+    Inputs: params: dict of unit-cube values (dimensionless, in [0, 1)) holding "av_ism", "log_tau_bc" and
+            "logU".
     Returns: (bagpipes_parts, drawn). bagpipes_parts holds "t_bc" [Gyr], "dust" (CF00) and "nebular";
              drawn holds av_ism [mag], tau_bc and logU (dimensionless).
     """
@@ -94,7 +95,7 @@ DELAYED_DIMS = ["z", "log_age_fraction", "log_tau", "log_metallicity", "av_ism",
 
 
 def delayed_components(u, fixed_redshift=None):
-    """Bagpipes components and drawn parameters for one delayed-tau unit-cube vector u (order of DELAYED_DIMS).
+    """Bagpipes components and drawn parameters for one delayed-tau unit-cube vector u (DELAYED_DIMS order).
 
     Inputs: u: unit-cube vector (dimensionless, in [0, 1)) ordered as DELAYED_DIMS;
             fixed_redshift: if given, replaces the redshift drawn from u (fits); dimensionless z.
@@ -202,17 +203,17 @@ def delayed_analytic_labels(drawn_columns, log_mstar):
 # =============================================================================
 # 3. Double power law: SFR(t) ~ [(t / tau)**alpha + (t / tau)**-beta]**-1, t since the Big Bang
 # =============================================================================
-# One Bagpipes "dblplaw" component with a single metallicity. Star formation starts at the Big Bang, so there is
-# no age. tau is the turnover time since the Big Bang, alpha the falling slope after it and beta the rising slope
-# before it. The SFR maximum lies at tau only when alpha = beta; in general it lies at t = tau (beta / alpha)**(1 /
-# (alpha + beta)). turnover_lookback, the lookback time to tau, is drawn as the delayed-tau age, log-uniform in
-# lookback time; alpha and beta are log-uniform (Carnall et al. 2018).
+# One Bagpipes "dblplaw" component with a single metallicity. Star formation starts at the Big Bang, so there
+# is no age. tau is the turnover time since the Big Bang, alpha the falling slope after it and beta the rising
+# slope before it. The SFR maximum lies at tau only when alpha = beta; in general it lies at
+# t = tau (beta / alpha)**(1 / (alpha + beta)). turnover_lookback, the lookback time to tau, is drawn as the
+# delayed-tau age, log-uniform in lookback time; alpha and beta are log-uniform (Carnall et al. 2018).
 TURNOVER_LOOKBACK_MIN = 0.05     # [Gyr] most recent turnover, as AGE_MIN
 ALPHA_RANGE = (0.01, 1000.0)     # falling slope after the turnover (dimensionless)
 BETA_RANGE = (0.01, 1000.0)      # rising slope before the turnover (dimensionless)
 
-# "log_turnover_lookback_fraction" places the turnover inside [log TURNOVER_LOOKBACK_MIN, log t_max(z)], as the
-# delayed-tau age
+# "log_turnover_lookback_fraction" places the turnover inside [log TURNOVER_LOOKBACK_MIN, log t_max(z)], as
+# the delayed-tau age
 DBLPLAW_DIMS = ["z", "log_turnover_lookback_fraction", "log_alpha", "log_beta", "log_metallicity", "av_ism",
                 "log_tau_bc", "logU"]
 
@@ -226,13 +227,14 @@ DBLPLAW_CHUNK = 32               # samples per block of the grid sum: 32 x 1654 
 def dblplaw_components(u, fixed_redshift=None):
     """Bagpipes components and drawn parameters for one DPL unit-cube vector u (order of DBLPLAW_DIMS).
 
-    Why tau >= UNIVERSE_AGE_MARGIN: turnover_lookback is at most maximum_age(z), so the turnover always lies after
-    the Big Bang, and tau stays below Bagpipes' "unphysical" limit of 1.5 times the age of the Universe.
+    Why tau >= UNIVERSE_AGE_MARGIN: turnover_lookback is at most maximum_age(z), so the turnover always lies
+    after the Big Bang, and tau stays below Bagpipes' "unphysical" limit of 1.5 times the age of the Universe.
     Inputs: u: unit-cube vector (dimensionless, in [0, 1)) ordered as DBLPLAW_DIMS;
             fixed_redshift: if given, replaces the redshift drawn from u (fits); dimensionless z.
     Returns: (bagpipes_components, drawn). drawn holds the DPL drawn labels: redshift (dimensionless),
              turnover_lookback [Gyr ago], tau [Gyr since the Big Bang], alpha and beta (dimensionless),
-             metallicity [Z/Z_sun], av_ism [mag], tau_bc and logU (dimensionless), log_mass_formed [log M_sun].
+             metallicity [Z/Z_sun], av_ism [mag], tau_bc and logU (dimensionless),
+             log_mass_formed [log M_sun].
     """
     params = dict(zip(DBLPLAW_DIMS, u))
 
@@ -244,8 +246,8 @@ def dblplaw_components(u, fixed_redshift=None):
     oldest_turnover = maximum_age(redshift)
 
     # 2. Star formation history and metallicity
-    turnover_lookback = 10 ** uniform(params["log_turnover_lookback_fraction"], np.log10(TURNOVER_LOOKBACK_MIN),
-                                      np.log10(oldest_turnover))
+    turnover_lookback = 10 ** uniform(params["log_turnover_lookback_fraction"],
+                                      np.log10(TURNOVER_LOOKBACK_MIN), np.log10(oldest_turnover))
     # Rounding in 10**log10 can push the top draw a hair above the bound
     turnover_lookback = min(turnover_lookback, oldest_turnover)
     tau = COSMOLOGY.age(redshift).value - turnover_lookback
@@ -288,8 +290,8 @@ def bagpipes_age_grid():
 
 BAGPIPES_AGES, BAGPIPES_AGE_WIDTHS = bagpipes_age_grid()      # [Gyr]
 
-# The grid ages increase, so each label is a sum over one slice of the grid. Each index is the first grid age at
-# or above the edge, which matches Bagpipes' "ages < edge"
+# The grid ages increase, so each label is a sum over one slice of the grid. Each index is the first grid age
+# at or above the edge, which matches Bagpipes' "ages < edge"
 YOUNG_EDGE_INDEX = int(np.searchsorted(BAGPIPES_AGES, LABEL_EDGES[0]))     # f_young: grid ages below 0.1 Gyr
 OLD_EDGE_INDEX = int(np.searchsorted(BAGPIPES_AGES, LABEL_EDGES[1]))       # f_old: grid ages from 1 Gyr on
 # log_sfr: grid ages below SFR_TIMESCALE
@@ -373,7 +375,8 @@ def dblplaw_grid_sums(tau, alpha, beta, redshift):
 def dblplaw_labels(tau, alpha, beta, redshift, log_mass_formed, log_mstar):
     """Labels of a double-power-law SFH, shared by the training sets and the ML decoding.
 
-    mw_age and the mass fractions have no closed form: they are summed on Bagpipes' age grid (dblplaw_grid_sums).
+    mw_age and the mass fractions have no closed form: they are summed on Bagpipes' age grid
+    (dblplaw_grid_sums).
     log_sfr is the formed mass younger than SFR_TIMESCALE over SFR_TIMESCALE, floored at SFR_FLOOR * M_star,
     as for delayed-tau.
     Inputs: tau [Gyr since the Big Bang], alpha, beta, redshift (dimensionless), log_mass_formed and log_mstar
@@ -435,7 +438,7 @@ class SfhModel:
     analytic_labels: Callable    # analytic_labels(drawn_columns, log_mstar) -> dict with the HISTORY_LABELS
     target_names: list           # flow targets, redshift last
     calibration_labels: list     # labels of the calibration (coverage) test of the photometric fits
-    file_suffix: str             # "" for delayed-tau (today's file names), "_dblplaw" for the double power law
+    file_suffix: str             # "" for delayed-tau (today's file names), "_dblplaw" for double power law
 
     @property
     def training_labels(self):
@@ -471,15 +474,15 @@ DBLPLAW = SfhModel(
     name="dblplaw",
     dims=DBLPLAW_DIMS,
     components=dblplaw_components,
-    drawn_labels=["redshift", "turnover_lookback", "tau", "alpha", "beta", "metallicity", "av_ism", "tau_bc", "logU",
-                  "log_mass_formed"],
-    derived_labels=["log_turnover_lookback", "log_alpha", "log_beta", "log_metallicity", "log_mstar", "log_sfr",
-                    "log_ssfr", "mw_age", "f_young", "f_mid", "f_old"],
+    drawn_labels=["redshift", "turnover_lookback", "tau", "alpha", "beta", "metallicity", "av_ism", "tau_bc",
+                  "logU", "log_mass_formed"],
+    derived_labels=["log_turnover_lookback", "log_alpha", "log_beta", "log_metallicity", "log_mstar",
+                    "log_sfr", "log_ssfr", "mw_age", "f_young", "f_mid", "f_old"],
     log_labels={"log_turnover_lookback": "turnover_lookback", "log_alpha": "alpha", "log_beta": "beta",
                 "log_metallicity": "metallicity"},
     analytic_labels=dblplaw_analytic_labels,
-    target_names=["log_turnover_lookback", "log_alpha", "log_beta", "log_metallicity", "av_ism", "log_tau_bc", "logU",
-                  "log_mass_formed", "log_mstar", "redshift"],
+    target_names=["log_turnover_lookback", "log_alpha", "log_beta", "log_metallicity", "av_ism", "log_tau_bc",
+                  "logU", "log_mass_formed", "log_mstar", "redshift"],
     calibration_labels=["log_turnover_lookback", "log_alpha", "log_beta", "log_metallicity", "log_mstar"],
     file_suffix="_dblplaw",
 )
@@ -490,7 +493,8 @@ MODELS = {"delayed": DELAYED, "dblplaw": DBLPLAW}
 def model_file(name, sfh_model):
     """File or folder name of one SFH model's product: the delayed-tau name with the model's suffix.
 
-    Inputs: name: the delayed-tau file or folder name ("training_set.parquet", "photometric_fits", "ml_runs/mlp");
+    Inputs: name: the delayed-tau file or folder name ("training_set.parquet", "photometric_fits",
+            "ml_runs/mlp");
             sfh_model: a name in MODELS.
     Returns: the name with the suffix before a file's extension, or after a folder name
              ("training_set_dblplaw.parquet", "photometric_fits_dblplaw", "ml_runs/mlp_dblplaw");

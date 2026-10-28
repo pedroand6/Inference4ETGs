@@ -4,7 +4,8 @@
 #
 # The job's working folder is /work. inputs/ holds this file and bundle.tar.gz; whatever is written to out/
 # comes back to the laptop, also when the job is killed by its time limit. Each run is written straight to
-# out/ml_runs/<embedding>/ (with the model's suffix, e.g. mlp_dblplaw), so a run that finished before the limit is never lost.
+# out/ml_runs/<embedding>/ (with the model's suffix, e.g. mlp_dblplaw), so a run that finished before the
+# limit is never lost.
 #
 # Environment variables (set by submit_training.sh with hljob -e):
 #   EMBEDDINGS   embeddings to train, one after the other   [default "mlp"]
@@ -62,8 +63,8 @@ for embedding in $EMBEDDINGS; do
     echo "== 5. Training the '$embedding' embedding of the '$SFH_MODEL' SFH model"
     set_stage "train_${embedding}_${SFH_MODEL}" "$OUT_DIR/memory_samples.csv"
     training_exit_code=0
-    python train_ml_model.py --sfh-model "$SFH_MODEL" --embedding "$embedding" --output-dir "$OUT_DIR/ml_runs" \
-        --device "$DEVICE" \
+    python train_ml_model.py --sfh-model "$SFH_MODEL" --embedding "$embedding" \
+        --output-dir "$OUT_DIR/ml_runs" --device "$DEVICE" \
         >> "$OUT_DIR/train_${embedding}_${SFH_MODEL}.log" 2>&1 || training_exit_code=$?
     echo "'$embedding' finished with exit code $training_exit_code"
     if [[ "$training_exit_code" -ne 0 ]]; then

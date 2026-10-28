@@ -1,4 +1,7 @@
-"""Tests of the training CLI: paths per SFH model, and a smoke run on a tiny subset (CPU). Run from Synthetic_domain/."""
+"""Tests of the training CLI: paths per SFH model, and a smoke run on a tiny subset (CPU).
+
+Run from Synthetic_domain/.
+"""
 
 import json
 import os

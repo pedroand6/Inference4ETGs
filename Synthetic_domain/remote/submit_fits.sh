@@ -5,9 +5,10 @@
 # Fits already finished in Synthetic_domain/$FITS_SUBDIR/*.h5 travel in the bundle, so a second job
 # continues where the previous one stopped instead of repeating fits.
 #
-# FITS_SUBDIR picks the set of fits: spectral_fits (the spectral fits), photometric_fits (the delayed-tau photometric
-# fits of spec amendment A) or photometric_fits_dblplaw (the double-power-law photometric fits and the cross-fits of
-# the delayed-tau mocks). They share job ids (specobjids, calib_<k>), so their jobs and results never mix:
+# FITS_SUBDIR picks the set of fits: spectral_fits (the spectral fits), photometric_fits (the delayed-tau
+# photometric fits of spec amendment A) or photometric_fits_dblplaw (the double-power-law photometric fits and
+# the cross-fits of the delayed-tau mocks). They share job ids (specobjids, calib_<k>), so their jobs and
+# results never mix:
 #     FITS_SUBDIR=photometric_fits_dblplaw Synthetic_domain/remote/submit_fits.sh
 #
 # Settings are environment variables (defaults for the full run); extra arguments go to `hljob run` as they are
@@ -56,7 +57,8 @@ trap 'rm -rf "$scratch_dir"' EXIT
 bundle_dir="$scratch_dir/bundle_contents"
 mkdir -p "$bundle_dir/$FITS_SUBDIR" "$bundle_dir/finished_fits"
 
-cp "$SYNTHETIC_DIR/synthetic_model.py" "$SYNTHETIC_DIR/sfh_models.py" "$SYNTHETIC_DIR/run_spectral_fits.py" "$bundle_dir/"
+cp "$SYNTHETIC_DIR/synthetic_model.py" "$SYNTHETIC_DIR/sfh_models.py" "$SYNTHETIC_DIR/run_spectral_fits.py" \
+   "$bundle_dir/"
 cp -rL "$SYNTHETIC_DIR/splus-filters" "$bundle_dir/"
 cp -rL "$SYNTHETIC_DIR/$FITS_SUBDIR/jobs" "$bundle_dir/$FITS_SUBDIR/jobs"
 # Jobs listed in SKIP_LIST are deliberately left unfitted, so they are not sent

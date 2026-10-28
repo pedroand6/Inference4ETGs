@@ -1,7 +1,7 @@
 #!/bin/bash
 # Example Slurm job array for the spectral fits: one MultiNest fit per array task, on one core.
-# Submit from the folder that holds run_spectral_fits.py, synthetic_model.py, sfh_models.py, splus-filters/ and
-# spectral_fits/jobs/ (see the docstring of run_spectral_fits.py), with:   sbatch slurm_fit.sh
+# Submit from the folder that holds run_spectral_fits.py, synthetic_model.py, sfh_models.py, splus-filters/
+# and spectral_fits/jobs/ (see the docstring of run_spectral_fits.py), with:   sbatch slurm_fit.sh
 #
 # What to edit:
 #   --array     0-<N-1>%<P>: N is the number of .npz files in spectral_fits/jobs/ (201 for 33 mocks and 168

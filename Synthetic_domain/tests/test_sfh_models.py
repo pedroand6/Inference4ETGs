@@ -1,4 +1,7 @@
-"""Tests for sfh_models.py. Run from Synthetic_domain/: ../.venv/bin/python -m pytest tests/test_sfh_models.py -q"""
+"""Tests for sfh_models.py.
+
+Run from Synthetic_domain/: ../.venv/bin/python -m pytest tests/test_sfh_models.py -q
+"""
 
 import subprocess
 import sys
@@ -20,7 +23,7 @@ N_TRAINING_MODELS = 2**19
 N_HELD_OUT_MODELS = 2**14
 TRAINING_SEED = 0
 VALIDATION_SEED = 1
-N_REGRESSION_ROWS = 4            # first rows of each stored set that are simulated again (Bagpipes: ~0.3 s each)
+N_REGRESSION_ROWS = 4            # first rows of each stored set simulated again (Bagpipes: ~0.3 s each)
 REGRESSION_RTOL = 1e-10          # "exactly", up to floating-point rounding
 REGRESSION_ATOL = 1e-12
 
@@ -58,9 +61,10 @@ def test_delayed_path_regenerates_the_first_rows_of_the_stored_training_set():
                                rtol=REGRESSION_RTOL, atol=REGRESSION_ATOL)
 
 
-@pytest.mark.skipif(not parquet_has_column(VALIDATION_FILE, "age"), reason="no delayed-tau validation set here")
+@pytest.mark.skipif(not parquet_has_column(VALIDATION_FILE, "age"),
+                    reason="no delayed-tau validation set here")
 def test_delayed_path_regenerates_the_labels_of_the_stored_validation_set():
-    """The stored labels are rescaled to an observed brightness: undo that with the stored magnitude offset."""
+    """The stored labels are rescaled to an observed brightness: the stored magnitude offset undoes that."""
     simulated = sm.simulate_models(first_unit_vectors(VALIDATION_SEED, N_HELD_OUT_MODELS), "delayed")
     stored = pd.read_parquet(VALIDATION_FILE).head(N_REGRESSION_ROWS)
     offsets = stored["magnitude_offset"].to_numpy()
@@ -190,8 +194,8 @@ def test_dblplaw_components_hold_one_dblplaw_component_and_the_shared_dust():
     bagpipes_components, drawn = sfh.dblplaw_components(u)
 
     assert list(drawn) == sfh.DBLPLAW.drawn_labels
-    assert bagpipes_components["dblplaw"] == {"tau": drawn["tau"], "alpha": drawn["alpha"], "beta": drawn["beta"],
-                                              "massformed": sfh.LOG_MASS_FORMED,
+    assert bagpipes_components["dblplaw"] == {"tau": drawn["tau"], "alpha": drawn["alpha"],
+                                              "beta": drawn["beta"], "massformed": sfh.LOG_MASS_FORMED,
                                               "metallicity": drawn["metallicity"]}
     params = dict(zip(sfh.DBLPLAW_DIMS, u))
     shared_parts, _ = sfh.dust_and_nebular(params)
@@ -201,7 +205,8 @@ def test_dblplaw_components_hold_one_dblplaw_component_and_the_shared_dust():
 
 
 def test_dblplaw_fixed_redshift_overrides_the_drawn_redshift():
-    bagpipes_components, drawn = sfh.dblplaw_components(np.full(len(sfh.DBLPLAW_DIMS), 0.5), fixed_redshift=0.123)
+    bagpipes_components, drawn = sfh.dblplaw_components(np.full(len(sfh.DBLPLAW_DIMS), 0.5),
+                                                        fixed_redshift=0.123)
     assert bagpipes_components["redshift"] == 0.123 and drawn["redshift"] == 0.123
     assert np.isclose(drawn["tau"], sfh.COSMOLOGY.age(0.123).value - drawn["turnover_lookback"])
 
@@ -234,8 +239,9 @@ def test_bagpipes_grid_is_rebuilt_exactly():
     assert np.isclose(sfh.bagpipes_universe_age(0.1) * 1e9, history.age_of_universe, rtol=1e-12)
 
 
-# (alpha, beta, redshift, where the turnover tau lies): a sharp peak (alpha = beta = 1000, where the SFR maximum is
-# at tau), a flat SFH, early and recent turnovers, asymmetric slopes. "oldest" puts tau at UNIVERSE_AGE_MARGIN.
+# (alpha, beta, redshift, where the turnover tau lies): a sharp peak (alpha = beta = 1000, where the SFR
+# maximum is at tau), a flat SFH, early and recent turnovers, asymmetric slopes. "oldest" puts tau at
+# UNIVERSE_AGE_MARGIN.
 DBLPLAW_CASES = [
     (1000.0, 1000.0, LOW_REDSHIFT, "early"),
     (1000.0, 1000.0, LOW_REDSHIFT, "recent"),
@@ -323,7 +329,7 @@ def test_sharp_turnover_at_the_oldest_lookback_gives_finite_labels(redshift):
 
 
 def test_dblplaw_labels_do_not_depend_on_the_chunk_size(monkeypatch):
-    """Blocks of 3 samples stop at their own oldest Universe, so they use fewer grid ages than one block of 10.
+    """Blocks of 3 samples stop at their own oldest Universe, so use fewer grid ages than one block of 10.
 
     This also checks that the grid ages each block skips hold no mass.
     """
@@ -333,7 +339,8 @@ def test_dblplaw_labels_do_not_depend_on_the_chunk_size(monkeypatch):
     tau = sfh.COSMOLOGY.age(redshift).value - rng.uniform(0.1, 5.0, n_samples)
     alpha = 10 ** rng.uniform(-2, 3, n_samples)
     beta = 10 ** rng.uniform(-2, 3, n_samples)
-    one_block = sfh.dblplaw_labels(tau, alpha, beta, redshift, np.full(n_samples, 10.0), np.full(n_samples, 9.8))
+    one_block = sfh.dblplaw_labels(tau, alpha, beta, redshift, np.full(n_samples, 10.0),
+                                   np.full(n_samples, 9.8))
     monkeypatch.setattr(sfh, "DBLPLAW_CHUNK", 3)
     small_blocks = sfh.dblplaw_labels(tau, alpha, beta, redshift, np.full(n_samples, 10.0),
                                       np.full(n_samples, 9.8))

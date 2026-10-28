@@ -10,8 +10,8 @@
 #   WORKERS          parallel fits, one core each        [default 14]
 #   MAX_ITERATIONS   MultiNest iteration limit per fit   [default 50000]
 #   SYNC_SECONDS     seconds between copies of the results to out/   [default 600]
-#   FITS_SUBDIR      folder of the jobs and results: spectral_fits, photometric_fits or photometric_fits_dblplaw
-#                    [default spectral_fits]
+#   FITS_SUBDIR      folder of the jobs and results: spectral_fits, photometric_fits or
+#                    photometric_fits_dblplaw   [default spectral_fits]
 set -euo pipefail
 
 # 1. Settings
