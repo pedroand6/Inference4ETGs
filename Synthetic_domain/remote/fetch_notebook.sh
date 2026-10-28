@@ -31,6 +31,22 @@ if [[ -f "$downloaded_out/files_layout.txt" ]]; then
     destination_dir="$REPO_DIR"
 fi
 if [[ -d "$downloaded_out/files" ]]; then
+    # 3b. Calibration and cross-fit mocks are never replaced: the stored fits were made on the local mocks'
+    # truths, so a job that drew new mocks (its bundle lacked the fit folder) must not overwrite them
+    kept_mocks=0
+    while IFS= read -r -d '' fetched_file; do
+        local_file="$destination_dir/${fetched_file#"$downloaded_out/files/"}"
+        if [[ -f "$local_file" ]] && ! cmp -s "$fetched_file" "$local_file"; then
+            echo "WARNING: kept the local ${local_file#"$REPO_DIR/"}; the job's differing copy is not used" >&2
+            rm "$fetched_file"
+            kept_mocks=$((kept_mocks + 1))
+        fi
+    done < <(find "$downloaded_out/files" -type f \( -name calibration_mocks.joblib -o -name cross_fit_mocks.joblib \
+        -o -path "*/jobs/calib_*.npz" -o -path "*/jobs/cross_calib_*.npz" \) -print0)
+    if [[ $kept_mocks -gt 0 ]]; then
+        echo "WARNING: $kept_mocks mock file(s) differed from the local ones: check that the job's bundle held the" \
+            "fit folders" >&2
+    fi
     cp -rp "$downloaded_out/files/." "$destination_dir/"
     echo "Files put back in $destination_dir:"
     sed 's/^/  /' "$downloaded_out/written_files.txt"
