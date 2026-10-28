@@ -224,7 +224,8 @@ def agreement_verdict(comparison_rows, labels, min_inside_95=MIN_INSIDE_95,
 def percentile_summary(samples):
     """16th, 50th and 84th percentiles of each galaxy's samples (axis -1), as the reference CSV stores fits.
 
-    Inputs: samples (n, m) of one label. Returns: (p16, median, p84), arrays (n,) in the label's units.
+    Inputs: samples (n, m) of one label.
+    Returns: (p16, median, p84), arrays (n,) in the label's units.
     """
     low, high = central_interval(samples, ONE_SIGMA_LEVEL)
     return low, np.nanmedian(samples, axis=-1), high
