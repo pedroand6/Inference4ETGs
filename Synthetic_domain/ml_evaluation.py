@@ -1,7 +1,8 @@
 """
 Metrics for the SFH posterior estimator: calibration (coverage, ranks), accuracy (bias, NMAD),
 information per label (posterior/prior width) and agreement with the Bagpipes reference posteriors
-(spectral or photometric fits).
+(spectral or photometric fits). Also the comparison of the two SFH models (delayed-tau against the double
+power law) on their shared labels, and their Bayesian evidence.
 """
 
 import numpy as np
@@ -23,6 +24,18 @@ WINDOW_STEPS = 5                             # cell width = window / 5, so a gal
 MIN_INSIDE_95 = 0.80                         # fraction of galaxies
 MAX_ABS_MEDIAN_OFFSET = 1.0                  # [combined 1-sigma widths]
 ALL_LABELS_ROW = "all"                       # label of the verdict row that holds for every label at once
+SUMMARY_SUFFIXES = ("p16", "median", "p84")  # column suffixes of a posterior stored as percentiles
+GAUSSIAN_95_WIDTHS = 1.959964                # [1-sigma widths] half-width of the central 95% of a Gaussian
+VERDICT_COLUMNS = ["n_galaxies", "inside_95", "median_offset", "agrees"]   # agreement_verdict per label
+
+# Evidence scale on |ln B| (Jeffreys, as in Trotta 2008): below 1 inconclusive, 1 to 3 positive, above 3 strong
+INCONCLUSIVE_LOG_BAYES = 1.0                 # [nats] |ln B| below this is inconclusive
+STRONG_LOG_BAYES = 3.0                       # [nats] |ln B| above this is strong
+DELAYED_MODEL = "delayed"                    # favoured by ln B >= INCONCLUSIVE_LOG_BAYES
+DBLPLAW_MODEL = "dblplaw"                    # favoured by ln B <= -INCONCLUSIVE_LOG_BAYES
+NO_MODEL = "neither"                         # an inconclusive ln B favours no model
+TRUTH_SIGNS = {DELAYED_MODEL: 1.0, DBLPLAW_MODEL: -1.0}   # sign of ln B that favours each true model
+ALL_MOCKS_ROW = "all"                        # true_model_recovery row over every mock
 
 
 # =============================================================================
@@ -203,3 +216,295 @@ def agreement_verdict(comparison_rows, labels, min_inside_95=MIN_INSIDE_95,
     verdict_rows.append({"label": ALL_LABELS_ROW, "n_galaxies": np.nan, "inside_95": np.nan,
                          "median_offset": np.nan, "agrees": every_label_agrees})
     return pd.DataFrame(verdict_rows)
+
+
+# =============================================================================
+# 5. Model comparison: delayed-tau against the double power law
+# =============================================================================
+def percentile_summary(samples):
+    """16th, 50th and 84th percentiles of each galaxy's samples (axis -1), as the reference CSV stores fits.
+
+    Inputs: samples (n, m) of one label. Returns: (p16, median, p84), arrays (n,) in the label's units.
+    """
+    low, high = central_interval(samples, ONE_SIGMA_LEVEL)
+    return low, np.nanmedian(samples, axis=-1), high
+
+
+def compare_summaries_with_reference(p16, median, p84, reference_p16, reference_median, reference_p84):
+    """compare_with_spectral for an estimate known only by its 16th, 50th and 84th percentiles.
+
+    Why the Gaussian extension: a Bagpipes fit in the reference CSV keeps only these percentiles. Its 95%
+    interval is therefore taken as median - 1.96 (median - p16) to median + 1.96 (p84 - median): each side is
+    scaled from its own 1-sigma width.
+    Inputs: the estimate's and the reference's percentiles, arrays (n,) in the label's units.
+    Returns: dict with
+             - offset_in_widths: estimate minus reference median, in combined 1-sigma widths;
+             - inside_68 and inside_95: whether the reference median lies inside the estimate's interval.
+    """
+    p16 = np.asarray(p16, dtype=float)
+    median = np.asarray(median, dtype=float)
+    p84 = np.asarray(p84, dtype=float)
+    reference_median = np.asarray(reference_median, dtype=float)
+    sigma = (p84 - p16) / 2
+    reference_sigma = (np.asarray(reference_p84, dtype=float) - np.asarray(reference_p16, dtype=float)) / 2
+    combined = np.sqrt(sigma**2 + reference_sigma**2)
+    offset = (median - reference_median) / combined
+
+    low_95 = median - GAUSSIAN_95_WIDTHS * (median - p16)
+    high_95 = median + GAUSSIAN_95_WIDTHS * (p84 - median)
+    inside_68 = (reference_median >= p16) & (reference_median <= p84)
+    inside_95 = (reference_median >= low_95) & (reference_median <= high_95)
+    return {"offset_in_widths": offset, "inside_68": inside_68, "inside_95": inside_95}
+
+
+def summary_columns(prefix, label):
+    """The {prefix}<label>_p16 / _median / _p84 column names of one stored posterior."""
+    columns = []
+    for suffix in SUMMARY_SUFFIXES:
+        columns.append(f"{prefix}{label}_{suffix}")
+    return columns
+
+
+def summary_comparison_rows(galaxies, labels, estimate_prefix, reference_prefix=""):
+    """reference_comparison_rows for an estimate stored as percentiles (e.g. a photometric Bagpipes fit).
+
+    Inputs: galaxies: DataFrame with specobjid, the estimate's {estimate_prefix}<label>_p16/_median/_p84
+            columns and the reference's {reference_prefix}<label>_* columns (by default the spectral fit's);
+            labels: the labels to compare.
+    Returns: list of dicts with label, specobjid, offset_in_widths, inside_68 and inside_95, labels outer and
+             galaxies inner. A galaxy without both medians of a label is left out of that label. A label
+             whose columns are missing gives no rows.
+    """
+    rows = []
+    for label in labels:
+        estimate_columns = summary_columns(estimate_prefix, label)
+        reference_columns = summary_columns(reference_prefix, label)
+        if not set(estimate_columns + reference_columns) <= set(galaxies.columns):
+            continue
+        both = galaxies[estimate_columns[1]].notna() & galaxies[reference_columns[1]].notna()
+        compared = galaxies[both].reset_index(drop=True)
+        comparison = compare_summaries_with_reference(
+            compared[estimate_columns[0]].to_numpy(), compared[estimate_columns[1]].to_numpy(),
+            compared[estimate_columns[2]].to_numpy(), compared[reference_columns[0]].to_numpy(),
+            compared[reference_columns[1]].to_numpy(), compared[reference_columns[2]].to_numpy())
+        for galaxy_index in range(len(compared)):
+            rows.append({"label": label, "specobjid": compared.loc[galaxy_index, "specobjid"],
+                         "offset_in_widths": comparison["offset_in_widths"][galaxy_index],
+                         "inside_68": comparison["inside_68"][galaxy_index],
+                         "inside_95": comparison["inside_95"][galaxy_index]})
+    return rows
+
+
+def model_difference_statistics(first_p16, first_median, first_p84, second_p16, second_median, second_p84):
+    """How two estimates of one label differ over galaxies, first minus second.
+
+    Why NMAD for the scatter: a few catastrophic galaxies should not set it (as in bias_and_nmad).
+    Inputs: the 16th, 50th and 84th percentiles of each estimate, arrays (n,) in the label's units, paired by
+            galaxy. A galaxy missing any value is left out.
+    Returns: dict with
+             - n_galaxies (count);
+             - median_difference: median of first minus second medians, in label units;
+             - scatter: NMAD of that difference around its median, in label units;
+             - overlap_68: share of galaxies whose two 16-84% intervals overlap (touching counts).
+             The statistics are NaN without galaxies.
+    """
+    first_p16 = np.asarray(first_p16, dtype=float)
+    first_median = np.asarray(first_median, dtype=float)
+    first_p84 = np.asarray(first_p84, dtype=float)
+    second_p16 = np.asarray(second_p16, dtype=float)
+    second_median = np.asarray(second_median, dtype=float)
+    second_p84 = np.asarray(second_p84, dtype=float)
+    usable = (np.isfinite(first_p16) & np.isfinite(first_median) & np.isfinite(first_p84)
+              & np.isfinite(second_p16) & np.isfinite(second_median) & np.isfinite(second_p84))
+    n_galaxies = int(usable.sum())
+    if n_galaxies == 0:
+        return {"n_galaxies": 0, "median_difference": np.nan, "scatter": np.nan, "overlap_68": np.nan}
+
+    median_difference, scatter = bias_and_nmad(first_median[usable], second_median[usable])
+    overlap = (first_p16[usable] <= second_p84[usable]) & (second_p16[usable] <= first_p84[usable])
+    return {"n_galaxies": n_galaxies, "median_difference": float(median_difference), "scatter": float(scatter),
+            "overlap_68": float(np.mean(overlap))}
+
+
+def model_comparison_rows(galaxies, labels, first_prefix, second_prefix):
+    """model_difference_statistics of each label, for two estimates stored side by side in one table.
+
+    Inputs: galaxies: DataFrame with {prefix}<label>_p16/_median/_p84 of both estimates, one row per galaxy;
+            labels: the labels to compare; first_prefix, second_prefix: their column prefixes (e.g. "phot_" and
+            "phot_dblplaw_"). The difference is first minus second.
+    Returns: DataFrame with one row per label: label, n_galaxies, median_difference, scatter and overlap_68.
+             A label whose columns are missing for either estimate gets n_galaxies 0 and NaN statistics.
+    """
+    rows = []
+    for label in labels:
+        first_columns = summary_columns(first_prefix, label)
+        second_columns = summary_columns(second_prefix, label)
+        if not set(first_columns + second_columns) <= set(galaxies.columns):
+            rows.append({"label": label, "n_galaxies": 0, "median_difference": np.nan, "scatter": np.nan,
+                         "overlap_68": np.nan})
+            continue
+        statistics = model_difference_statistics(
+            galaxies[first_columns[0]], galaxies[first_columns[1]], galaxies[first_columns[2]],
+            galaxies[second_columns[0]], galaxies[second_columns[1]], galaxies[second_columns[2]])
+        rows.append({"label": label, **statistics})
+    return pd.DataFrame(rows, columns=["label", "n_galaxies", "median_difference", "scatter", "overlap_68"])
+
+
+def side_by_side_verdicts(verdicts):
+    """agreement_verdict tables of several estimators in one table: one row per label, one column group each.
+
+    Inputs: verdicts: dict name -> agreement_verdict DataFrame, in display order.
+    Returns: DataFrame indexed by label (first-seen order, ALL_LABELS_ROW last) with MultiIndex columns
+             (name, VERDICT_COLUMNS). A label an estimator's table lacks is NaN there.
+    """
+    label_order = []
+    has_all_row = False
+    for verdict in verdicts.values():
+        for label in verdict["label"]:
+            if label == ALL_LABELS_ROW:
+                has_all_row = True
+            elif label not in label_order:
+                label_order.append(label)
+    if has_all_row:
+        label_order.append(ALL_LABELS_ROW)
+
+    tables = {}
+    for name, verdict in verdicts.items():
+        tables[name] = verdict.set_index("label")[VERDICT_COLUMNS].reindex(label_order)
+    return pd.concat(tables, axis=1)
+
+
+# =============================================================================
+# 6. Bayesian evidence
+# =============================================================================
+def log_bayes_factor(log_evidence_delayed, log_evidence_dblplaw):
+    """ln B = ln Z(delayed-tau) - ln Z(double power law) of each galaxy; positive favours delayed-tau.
+
+    Inputs: the natural-log evidences of the two models' fits of the same data, arrays (n,) [nats].
+    Returns: array (n,) [nats]; NaN where either evidence is missing.
+    """
+    return np.asarray(log_evidence_delayed, dtype=float) - np.asarray(log_evidence_dblplaw, dtype=float)
+
+
+def nested_sampling_log_evidence_error(information, n_live_points):
+    """Statistical 1-sigma uncertainty of a nested-sampling ln Z: sqrt(H / n_live) (Skilling 2006).
+
+    Inputs: information: H, the Kullback-Leibler divergence from prior to posterior [nats];
+            n_live_points: live points of the run (count).
+    Returns: uncertainty of ln Z [nats].
+    """
+    return np.sqrt(np.asarray(information, dtype=float) / n_live_points)
+
+
+def log_bayes_factor_error(log_evidence_error_delayed, log_evidence_error_dblplaw):
+    """1-sigma uncertainty of ln B [nats]: the two fits are independent runs, so their errors add in quadrature."""
+    error_delayed = np.asarray(log_evidence_error_delayed, dtype=float)
+    error_dblplaw = np.asarray(log_evidence_error_dblplaw, dtype=float)
+    return np.sqrt(error_delayed**2 + error_dblplaw**2)
+
+
+def evidence_strength(log_bayes):
+    """Strength of each ln B on the |ln B| scale.
+
+    The categories are "inconclusive" (below INCONCLUSIVE_LOG_BAYES), "positive" (from it to
+    STRONG_LOG_BAYES, both inclusive) and "strong" (above STRONG_LOG_BAYES).
+    Inputs: log_bayes: array (n,) of ln B [nats].
+    Returns: object array (n,) of strengths; None where ln B is NaN.
+    """
+    log_bayes = np.asarray(log_bayes, dtype=float)
+    size = np.abs(log_bayes)
+    strengths = np.full(len(log_bayes), None, dtype=object)
+    strengths[size < INCONCLUSIVE_LOG_BAYES] = "inconclusive"
+    strengths[(size >= INCONCLUSIVE_LOG_BAYES) & (size <= STRONG_LOG_BAYES)] = "positive"
+    strengths[size > STRONG_LOG_BAYES] = "strong"
+    return strengths
+
+
+def favoured_model(log_bayes):
+    """The model each ln B favours.
+
+    Inputs: log_bayes: array (n,) of ln B [nats].
+    Returns: object array (n,):
+             - DELAYED_MODEL for ln B >= INCONCLUSIVE_LOG_BAYES;
+             - DBLPLAW_MODEL for ln B <= -INCONCLUSIVE_LOG_BAYES;
+             - NO_MODEL in between;
+             - None where ln B is NaN.
+    """
+    log_bayes = np.asarray(log_bayes, dtype=float)
+    models = np.full(len(log_bayes), None, dtype=object)
+    models[np.abs(log_bayes) < INCONCLUSIVE_LOG_BAYES] = NO_MODEL
+    models[log_bayes >= INCONCLUSIVE_LOG_BAYES] = DELAYED_MODEL
+    models[log_bayes <= -INCONCLUSIVE_LOG_BAYES] = DBLPLAW_MODEL
+    return models
+
+
+def evidence_category_fractions(log_bayes):
+    """Share of galaxies in each evidence category: inconclusive, then positive and strong for each model.
+
+    Inputs: log_bayes: array (n,) of ln B (positive favours delayed-tau). NaN entries are left out.
+    Returns: DataFrame with 5 rows (favoured_model, strength, n_galaxies, fraction), in this order:
+             (NO_MODEL, inconclusive), (DELAYED_MODEL, positive), (DELAYED_MODEL, strong),
+             (DBLPLAW_MODEL, positive), (DBLPLAW_MODEL, strong). Fractions are of the finite ln B and sum
+             to 1; they are NaN when no ln B is finite.
+    """
+    log_bayes = np.asarray(log_bayes, dtype=float)
+    finite = log_bayes[np.isfinite(log_bayes)]
+    strengths = evidence_strength(finite)
+    models = favoured_model(finite)
+    categories = [(NO_MODEL, "inconclusive"), (DELAYED_MODEL, "positive"), (DELAYED_MODEL, "strong"),
+                  (DBLPLAW_MODEL, "positive"), (DBLPLAW_MODEL, "strong")]
+    rows = []
+    for model, strength in categories:
+        n_galaxies = int(np.sum((models == model) & (strengths == strength)))
+        fraction = np.nan
+        if len(finite) > 0:
+            fraction = n_galaxies / len(finite)
+        rows.append({"favoured_model": model, "strength": strength, "n_galaxies": n_galaxies,
+                     "fraction": fraction})
+    return pd.DataFrame(rows)
+
+
+def true_model_recovery(cross_fits):
+    """How often the evidence prefers the true model of mock galaxies fitted with both models.
+
+    Inputs: cross_fits: DataFrame with one row per mock and the columns
+            - truth_model (DELAYED_MODEL or DBLPLAW_MODEL);
+            - log_evidence_delayed and log_evidence_dblplaw: ln Z of its fit with each model [nats]
+              (ml_model.ipynb renames phot_log_evidence and phot_dblplaw_log_evidence of
+              photometric_cross_fits.csv to these).
+            Rows with a missing evidence are left out.
+    Returns: DataFrame with one row per true model (DELAYED_MODEL, DBLPLAW_MODEL), then ALL_MOCKS_ROW.
+             Its columns are truth_model and n_mocks, then four fractions of the mocks:
+             - prefers_truth: ln B has the true model's sign;
+             - strong_for_truth: |ln B| > STRONG_LOG_BAYES in favour of the true model;
+             - inconclusive: |ln B| < INCONCLUSIVE_LOG_BAYES;
+             - strong_for_other: |ln B| > STRONG_LOG_BAYES in favour of the wrong model.
+             The fractions are NaN for a group without mocks.
+    """
+    log_bayes = log_bayes_factor(cross_fits["log_evidence_delayed"], cross_fits["log_evidence_dblplaw"])
+    truth = cross_fits["truth_model"].to_numpy(dtype=object)
+    usable = np.isfinite(log_bayes)
+
+    # ln B with the sign that favours the true model: positive = the evidence prefers the truth
+    signed = np.full(len(log_bayes), np.nan)
+    for model, sign in TRUTH_SIGNS.items():
+        is_model = truth == model
+        signed[is_model] = sign * log_bayes[is_model]
+
+    groups = {DELAYED_MODEL: usable & (truth == DELAYED_MODEL),
+              DBLPLAW_MODEL: usable & (truth == DBLPLAW_MODEL),
+              ALL_MOCKS_ROW: usable & np.isin(truth, list(TRUTH_SIGNS))}
+    rows = []
+    for name, in_group in groups.items():
+        n_mocks = int(in_group.sum())
+        if n_mocks == 0:
+            rows.append({"truth_model": name, "n_mocks": 0, "prefers_truth": np.nan, "strong_for_truth": np.nan,
+                         "inconclusive": np.nan, "strong_for_other": np.nan})
+            continue
+        group_signed = signed[in_group]
+        rows.append({"truth_model": name, "n_mocks": n_mocks,
+                     "prefers_truth": float(np.mean(group_signed > 0)),
+                     "strong_for_truth": float(np.mean(group_signed > STRONG_LOG_BAYES)),
+                     "inconclusive": float(np.mean(np.abs(group_signed) < INCONCLUSIVE_LOG_BAYES)),
+                     "strong_for_other": float(np.mean(group_signed < -STRONG_LOG_BAYES))})
+    return pd.DataFrame(rows)
