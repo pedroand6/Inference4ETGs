@@ -219,6 +219,21 @@ def test_summary_comparison_rows_leave_out_galaxies_without_both_fits():
     assert set(rows[0]) == {"label", "specobjid", "offset_in_widths", "inside_68", "inside_95"}
 
 
+def test_summary_comparison_rows_leave_out_galaxies_missing_any_percentile():
+    """Both medians are present, but b lacks the estimate's p16 and c the reference's p84."""
+    galaxies = pd.DataFrame({
+        "specobjid": ["a", "b", "c"],
+        "phot_dblplaw_mw_age_p16": [-1.0, np.nan, -1.0],
+        "phot_dblplaw_mw_age_median": [0.0, 0.0, 0.0],
+        "phot_dblplaw_mw_age_p84": [1.0, 1.0, 1.0],
+        "mw_age_p16": [-1.0, -1.0, -1.0],
+        "mw_age_median": [0.0, 0.0, 0.0],
+        "mw_age_p84": [1.0, 1.0, np.nan],
+    })
+    rows = ev.summary_comparison_rows(galaxies, ["mw_age"], "phot_dblplaw_")
+    assert [row["specobjid"] for row in rows] == ["a"]
+
+
 def test_model_difference_statistics_recover_a_known_offset_and_scatter():
     rng = np.random.default_rng(50)
     second_median = rng.normal(10, 1, 20000)

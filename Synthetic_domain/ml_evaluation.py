@@ -272,8 +272,9 @@ def summary_comparison_rows(galaxies, labels, estimate_prefix, reference_prefix=
             columns and the reference's {reference_prefix}<label>_* columns (by default the spectral fit's);
             labels: the labels to compare.
     Returns: list of dicts with label, specobjid, offset_in_widths, inside_68 and inside_95, labels outer and
-             galaxies inner. A galaxy without both medians of a label is left out of that label. A label
-             whose columns are missing gives no rows.
+             galaxies inner. A galaxy missing any of the six percentiles of a label (the estimate's or the
+             reference's p16, median or p84) is left out of that label. A label whose columns are missing
+             gives no rows.
     """
     rows = []
     for label in labels:
@@ -281,8 +282,8 @@ def summary_comparison_rows(galaxies, labels, estimate_prefix, reference_prefix=
         reference_columns = summary_columns(reference_prefix, label)
         if not set(estimate_columns + reference_columns) <= set(galaxies.columns):
             continue
-        both = galaxies[estimate_columns[1]].notna() & galaxies[reference_columns[1]].notna()
-        compared = galaxies[both].reset_index(drop=True)
+        complete = galaxies[estimate_columns + reference_columns].notna().all(axis=1)
+        compared = galaxies[complete].reset_index(drop=True)
         comparison = compare_summaries_with_reference(
             compared[estimate_columns[0]].to_numpy(), compared[estimate_columns[1]].to_numpy(),
             compared[estimate_columns[2]].to_numpy(), compared[reference_columns[0]].to_numpy(),
