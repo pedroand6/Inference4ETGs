@@ -236,11 +236,6 @@ def decode_rows(theta, sfh_model):
     return pd.DataFrame(labels, columns=model.training_labels)
 
 
-# delayed-tau aliases for ml_networks.DEFAULT_CONFIG, removed in Task 8
-TARGET_NAMES = target_names("delayed")
-N_TARGETS = len(TARGET_NAMES)
-
-
 # =============================================================================
 # 4. Simulated observations
 # =============================================================================

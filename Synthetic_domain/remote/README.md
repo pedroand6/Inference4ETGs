@@ -85,37 +85,48 @@ job ids not already in it, which is why the old log is superseded too.
 
 # Training the ML posterior estimator (GPU)
 
-One GPU job trains the MLP embedding with `train_ml_model.py`. The CNN lost clearly in the 16-bin comparison and is
-not trained for the delayed-tau model (the code still accepts `--embedding cnn`; list it in `EMBEDDINGS` to train
-both). The flow has 9 targets (`ml_data.TARGET_NAMES`); `config.json` records them, and `ml_networks.load_run`
-refuses a run trained for other targets, so the old 16-bin runs (moved to `ml_runs/superseded/`, as `mlp_16bin` and
-`cnn_16bin`) cannot be loaded.
+One GPU job trains the MLP embedding of one SFH model with `train_ml_model.py --sfh-model <model>`:
+- `SFH_MODEL=delayed`, the default, trains the delayed-τ flow (9 targets);
+- `SFH_MODEL=dblplaw` trains the double-power-law flow (10 targets).
+
+The CNN lost clearly in the 16-bin comparison and is not trained. The code still accepts `--embedding cnn`;
+list it in `EMBEDDINGS` to train both.
+
+`config.json` records each run's `sfh_model` and `target_names` (`ml_data.target_names`).
+`ml_networks.load_run(directory, sfh_model)` refuses:
+- a run of the other model;
+- a run trained for other targets, such as the old 16-bin runs in `ml_runs/superseded/` (`mlp_16bin`, `cnn_16bin`).
+
+A run saved without `sfh_model`, today's `ml_runs/mlp`, counts as delayed-τ.
 
 | File | Runs | Does |
 |---|---|---|
-| `submit_training.sh` | locally | packs the bundle (code, training and validation sets, noise model, a 3-column copy of the DR3 catalogue, MultiNest source), submits a detached GPU job, prints the job id |
-| `train_job.sh` | in the job | unpacks, runs `build_env.sh` with `INSTALL_TORCH=1` (PyTorch 2.5.1 CUDA 12.1 and zuko 1.2.0), trains each embedding in `EMBEDDINGS`, writes `out/ml_runs/<embedding>/` and `out/train_<embedding>.log` |
+| `submit_training.sh` | locally | packs the bundle (code, the model's training and validation sets, noise model, a 3-column copy of the DR3 catalogue, MultiNest source), submits a detached GPU job, prints the job id |
+| `train_job.sh` | in the job | unpacks, runs `build_env.sh` with `INSTALL_TORCH=1` (PyTorch 2.5.1 CUDA 12.1 and zuko 1.2.0), trains each embedding in `EMBEDDINGS` for `SFH_MODEL`, writes `out/ml_runs/<embedding>[_dblplaw]/` and `out/train_<embedding>_<model>.log` |
 
-The bundle packs the sets that `training_set.ipynb` writes (`training_set.parquet`, `synthetic_validation.parquet`),
-so run that notebook first (next section). Training on the 16-bin sets fails: the parquet has no delayed-tau
-columns.
+The bundle packs the model's sets that `training_set.ipynb` writes:
+- `training_set.parquet` and `synthetic_validation.parquet` for delayed-τ;
+- the same names with `_dblplaw` for the double power law.
+
+Run that notebook first (next section).
 
 ## Submit
 
-    Synthetic_domain/remote/submit_training.sh
+    Synthetic_domain/remote/submit_training.sh                     # delayed-τ
+    SFH_MODEL=dblplaw Synthetic_domain/remote/submit_training.sh   # double power law
 
-Defaults: GPU, 8 cores, 7000 MB, 08:00:00, `EMBEDDINGS=mlp`. Change them with environment variables, for
-example `TIME_LIMIT=04:00:00 submit_training.sh`; extra arguments go to `hljob run`. Only one job runs
-at a time, so the jobs queue. `BUNDLE_ONLY=<folder> submit_training.sh` writes the
-bundle there and submits nothing (to check what travels). New modules must be added by hand to the `cp` list of
-`submit_training.sh` (and to the one in `submit_fits.sh`); `submit_notebook.sh` packs every `./*.py` by itself.
+Defaults: GPU, 8 cores, 7000 MB, 08:00:00, `EMBEDDINGS=mlp`, `SFH_MODEL=delayed`.
+- Change them with environment variables, for example `TIME_LIMIT=04:00:00 submit_training.sh`; extra arguments go to `hljob run`.
+- Only one job runs at a time, so the jobs queue.
+- `BUNDLE_ONLY=<folder> submit_training.sh` writes the bundle there and submits nothing, to check what travels.
+- New modules must be added by hand to the `cp` list of `submit_training.sh` and to the one in `submit_fits.sh`. `submit_notebook.sh` packs every `./*.py` by itself.
 
 ## Follow
 
     hljob logs ID -f          # the job log, including the environment build
     hljob wait ID
 
-The training log of each embedding (one line per epoch) is `out/train_<embedding>.log`; it comes back with the fetch.
+The training log of each embedding (one line per epoch) is `out/train_<embedding>_<model>.log`. It comes back with the fetch.
 
 ## Fetch
 
@@ -123,14 +134,14 @@ The training log of each embedding (one line per epoch) is `out/train_<embedding
     mkdir -p Synthetic_domain/ml_runs
     cp -r /tmp/ml_job/out/ml_runs/* Synthetic_domain/ml_runs/
 
-The runs land in `Synthetic_domain/ml_runs/<embedding>/` as `model.pt`, `config.json` and `history.csv`. The weights
-(`model.pt`) are ignored by git; `config.json` and `history.csv` are committed. A run that finished before a timeout
-is already in `out/ml_runs/`, so it can be fetched after a timeout too.
+The runs land in `Synthetic_domain/ml_runs/<embedding>/` for delayed-τ and in `ml_runs/<embedding>_dblplaw/` for DPL. Each holds `model.pt`, `config.json` and `history.csv`.
+- The weights (`model.pt`) are ignored by git; `config.json` and `history.csv` are committed.
+- A run that finished before a timeout is already in `out/ml_runs/`, so it can be fetched after a timeout too.
 
 ## Test locally (CPU, a few minutes)
 
     cd Synthetic_domain
-    python train_ml_model.py --embedding mlp --output-dir /tmp/ml_test --epochs 2 \
+    python train_ml_model.py --sfh-model delayed --embedding mlp --output-dir /tmp/ml_test --epochs 2 \
         --max-train-rows 3000 --max-validation-rows 500 --device cpu
 
 # Running a notebook on the job server

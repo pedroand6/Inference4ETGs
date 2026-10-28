@@ -350,3 +350,9 @@ def test_standardiser_round_trip_and_masked_zero():
     assert np.all(transformed[~mask[:, 1], 1] == 0)
     restored = ml_data.Standardiser.from_dict(standardiser.to_dict())
     assert np.allclose(restored.inverse_transform(restored.transform(values)), values)
+
+
+def test_no_global_target_list_remains():
+    """The targets depend on the SFH model: callers ask target_names(sfh_model)."""
+    assert not hasattr(ml_data, "TARGET_NAMES")
+    assert not hasattr(ml_data, "N_TARGETS")

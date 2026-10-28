@@ -20,8 +20,6 @@ import ml_data
 # =============================================================================
 DEFAULT_CONFIG = {
     "embedding": "mlp",              # "mlp" or "cnn"; only the MLP is trained (the CNN lost in 16-bin runs)
-    "n_targets": ml_data.N_TARGETS,
-    "target_names": list(ml_data.TARGET_NAMES),   # stored with the run: a run for other targets cannot load
     "summary_size": 64,              # length of the embedding output
     "hidden_size": 256,              # width of the dense layers
     "mlp_layers": 3,
@@ -37,9 +35,26 @@ DEFAULT_CONFIG = {
     "patience": 15,                  # epochs without validation improvement before stopping
     "seed": 0,
 }
+LEGACY_SFH_MODEL = "delayed"         # SFH model of a run saved before runs recorded one (ml_runs/mlp)
 MODEL_FILE = "model.pt"
 CONFIG_FILE = "config.json"
 HISTORY_FILE = "history.csv"
+
+
+def model_config(sfh_model):
+    """DEFAULT_CONFIG for the flow of one SFH model, with its sfh_model, target_names and n_targets.
+
+    Why stored: config.json is all a later reader has, so a run must say which SFH model and targets it
+    learnt. load_run checks both.
+    Inputs: sfh_model: "delayed" or "dblplaw".
+    Returns: a new dict.
+    """
+    config = dict(DEFAULT_CONFIG)
+    names = ml_data.target_names(sfh_model)
+    config["sfh_model"] = sfh_model
+    config["target_names"] = names
+    config["n_targets"] = len(names)
+    return config
 
 
 # =============================================================================
@@ -212,15 +227,19 @@ def train_estimator(estimator, make_epoch, validation_sets, config, device, log=
 # 4. Checkpoints and sampling
 # =============================================================================
 def save_run(directory, estimator, config, history, standardisers):
-    """Write model.pt (weights), config.json (config, target names, standardisers) and history.csv.
+    """Write model.pt (weights), config.json (config, SFH model, target names, standardisers) and history.csv.
 
-    Inputs: directory: output folder (created if missing); estimator: PosteriorEstimator; config: its
-            configuration, whose target_names (default ml_data.TARGET_NAMES) name the n_targets flow
-            dimensions in order; history: list of per-epoch dicts;
-            standardisers: {name: ml_data.Standardiser}.
-    Raises: ValueError when target_names does not have n_targets entries.
+    Inputs: directory: output folder (created if missing); estimator: PosteriorEstimator;
+            config: its configuration (model_config output, updated as needed). sfh_model names the SFH
+            model, and target_names names the n_targets flow dimensions in order;
+            history: list of per-epoch dicts; standardisers: {name: ml_data.Standardiser}.
+    Raises: ValueError when config has no sfh_model or target_names, or when target_names does not have
+            n_targets entries.
     """
-    target_names = list(config.get("target_names", ml_data.TARGET_NAMES))
+    for key in ("sfh_model", "target_names"):
+        if key not in config:
+            raise ValueError(f"config has no {key!r}: build it with model_config(sfh_model)")
+    target_names = list(config["target_names"])
     if len(target_names) != config["n_targets"]:
         raise ValueError(f"target_names has {len(target_names)} entries but the flow has "
                          f"n_targets = {config['n_targets']}")
@@ -240,24 +259,33 @@ def save_run(directory, estimator, config, history, standardisers):
             output.write(f"{row['epoch']},{row['train_loss']},{row['validation_loss']},{row.get('learning_rate', '')}\n")
 
 
-def load_run(directory, device="cpu", target_names=None):
-    """Read a run written by save_run.
+def load_run(directory, sfh_model, device="cpu", target_names=None):
+    """Read a run written by save_run, refusing a run of another SFH model or of other targets.
 
-    Why the check: an old checkpoint (e.g. the 19 targets of the 16-bin model) would otherwise load and its
-    samples be decoded as the current targets without any error.
-    Inputs: directory: run folder; device: torch device; target_names: the targets the caller decodes,
-            default ml_data.TARGET_NAMES.
-    Returns: (estimator on device, config, standardisers dict).
-    Raises: ValueError("run was trained for targets ...") when the stored target_names (None for a run saved
-            before they were recorded) differ from target_names.
+    Why the checks: a run of the other SFH model, or an old checkpoint (e.g. the 19 targets of the 16-bin
+    model), would otherwise load. Its samples would then be decoded as the wrong targets without any error.
+    Inputs: directory: run folder; sfh_model: the SFH model the caller decodes ("delayed" or "dblplaw");
+            device: torch device; target_names: the targets the caller decodes, by default
+            ml_data.target_names(sfh_model).
+    Returns: (estimator on device, config, standardisers dict). config["sfh_model"] is always set:
+             LEGACY_SFH_MODEL for a run saved before models were recorded.
+    Raises: ValueError("run ... was trained for the ... SFH model ...") when the stored sfh_model (or
+            LEGACY_SFH_MODEL when there is none) differs from sfh_model.
+            ValueError("run was trained for targets ...") when the stored target_names (None for a run
+            saved before they were recorded) differ from target_names.
     """
     if target_names is None:
-        target_names = ml_data.TARGET_NAMES
+        target_names = ml_data.target_names(sfh_model)
     with open(os.path.join(directory, CONFIG_FILE)) as source:
         stored = json.load(source)
+    stored_model = stored.get("sfh_model", LEGACY_SFH_MODEL)
+    if stored_model != sfh_model:
+        raise ValueError(f"run {directory} was trained for the {stored_model!r} SFH model, not {sfh_model!r}: "
+                         "load the run of that model (sfh_models.model_file)")
     if stored.get("target_names") != list(target_names):
         raise ValueError(f"run was trained for targets {stored.get('target_names')}, "
                          f"not {list(target_names)}: retrain it, or move {directory} to ml_runs/superseded/")
+    stored["sfh_model"] = stored_model
     standardisers = {}
     for name, statistics in stored.pop("standardisers").items():
         standardisers[name] = ml_data.Standardiser.from_dict(statistics)

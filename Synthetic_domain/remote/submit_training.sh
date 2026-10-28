@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Runs LOCALLY: packs everything the training needs into one bundle and submits it to the job server (GPU) with
 # hljob. The job is detached, so this prints the job id and returns at once; follow it with the commands printed
-# at the end. The trained runs come back in out/ml_runs/<embedding>/.
+# at the end. The trained runs come back in out/ml_runs/<embedding>/ (delayed-tau) or out/ml_runs/<embedding>_dblplaw/.
 #
 # Settings are environment variables (defaults for the full run); extra arguments go to `hljob run` as they are.
 #   CORES            vCPUs of the job                                          [default 8]
 #   MEMORY_MB        memory limit in MB                                        [default 7000]
 #   TIME_LIMIT       wall-clock limit HH:MM:SS                                 [default 08:00:00]
 #   EMBEDDINGS       embeddings to train, one after the other                  [default "mlp"]
+#   SFH_MODEL        SFH model to train: delayed or dblplaw (sfh_models.MODELS)   [default delayed]
 #   ALLOW_CPU_TRAINING set to 1 to let the job train on the CPU if no GPU is usable    [default: the job fails]
 #   JOB_NAME         name shown in `hljob ls`                                  [default ml_training]
 #   MULTINEST_SOURCE the MultiNest source folder (build_env.sh builds it)      [default ~/Programs/MultiNest]
@@ -20,6 +21,13 @@ CORES="${CORES:-8}"
 MEMORY_MB="${MEMORY_MB:-7000}"
 TIME_LIMIT="${TIME_LIMIT:-08:00:00}"
 EMBEDDINGS="${EMBEDDINGS:-mlp}"
+SFH_MODEL="${SFH_MODEL:-delayed}"
+# The model's file suffix, as sfh_models.MODELS[SFH_MODEL].file_suffix: its sets are training_set<suffix>.parquet
+case "$SFH_MODEL" in
+    delayed) FILE_SUFFIX="" ;;
+    dblplaw) FILE_SUFFIX="_dblplaw" ;;
+    *) echo "ERROR: unknown SFH_MODEL '$SFH_MODEL' (use delayed or dblplaw)" >&2; exit 1 ;;
+esac
 ALLOW_CPU_TRAINING="${ALLOW_CPU_TRAINING:-0}"
 JOB_NAME="${JOB_NAME:-ml_training}"
 MULTINEST_SOURCE="${MULTINEST_SOURCE:-$HOME/Programs/MultiNest}"
@@ -37,8 +45,8 @@ bundle_dir="$scratch_dir/bundle_contents"
 mkdir -p "$bundle_dir"
 
 cp "$SYNTHETIC_DIR/synthetic_model.py" "$SYNTHETIC_DIR/sfh_models.py" "$SYNTHETIC_DIR/ml_data.py" \
-   "$SYNTHETIC_DIR/ml_networks.py" "$SYNTHETIC_DIR/train_ml_model.py" "$SYNTHETIC_DIR/training_set.parquet" \
-   "$SYNTHETIC_DIR/synthetic_validation.parquet" "$SYNTHETIC_DIR/splus_noise_model.csv" "$bundle_dir/"
+   "$SYNTHETIC_DIR/ml_networks.py" "$SYNTHETIC_DIR/train_ml_model.py" "$SYNTHETIC_DIR/training_set${FILE_SUFFIX}.parquet" \
+   "$SYNTHETIC_DIR/synthetic_validation${FILE_SUFFIX}.parquet" "$SYNTHETIC_DIR/splus_noise_model.csv" "$bundle_dir/"
 cp -rL "$SYNTHETIC_DIR/splus-filters" "$bundle_dir/"
 cp "$REMOTE_DIR/grid_md5.txt" "$REMOTE_DIR/build_env.sh" "$REMOTE_DIR/job_common.sh" "$bundle_dir/"
 
@@ -66,10 +74,10 @@ fi
 
 # 6. Submit (one GPU job that trains every embedding). Both files are uploaded to inputs/.
 job_id="$(hljob run --detach --gpu -n "$JOB_NAME" -c "$CORES" -m "$MEMORY_MB" -t "$TIME_LIMIT" \
-    -e EMBEDDINGS="$EMBEDDINGS" -e ALLOW_CPU_TRAINING="$ALLOW_CPU_TRAINING" "$@" \
+    -e EMBEDDINGS="$EMBEDDINGS" -e SFH_MODEL="$SFH_MODEL" -e ALLOW_CPU_TRAINING="$ALLOW_CPU_TRAINING" "$@" \
     -f "$scratch_dir/bundle.tar.gz" -f "$REMOTE_DIR/train_job.sh" -- bash inputs/train_job.sh)"
 
-echo "Submitted job $job_id (GPU, $CORES cores, $MEMORY_MB MB, $TIME_LIMIT, embeddings: $EMBEDDINGS)"
+echo "Submitted job $job_id (GPU, $CORES cores, $MEMORY_MB MB, $TIME_LIMIT, SFH model: $SFH_MODEL, embeddings: $EMBEDDINGS)"
 echo "  follow:  hljob logs $job_id -f        (or --tail 30)"
 echo "  wait:    hljob wait $job_id"
 echo "  fetch:   hljob fetch $job_id -o /tmp/ml_job   then copy /tmp/ml_job/out/ml_runs/* to Synthetic_domain/ml_runs/"
