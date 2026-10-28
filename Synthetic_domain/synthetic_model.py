@@ -609,24 +609,25 @@ def safe_spectral_log_likelihood(model_flux, data_flux, data_ivar, noise_scale):
         return LOG_ZERO
 
 
+# Spectral fits are delayed-tau only (DPL spec, decision 1): the DPL model is fitted to the photometry alone
+SPECTRAL_MODEL = "delayed"
+
 # Redshift is fixed to the spectroscopic value, so it leaves the list; veldisp and noise_scale join it
-SPECTRAL_DIMS = []
-for dimension in DIMS:
-    if dimension != "z":
-        SPECTRAL_DIMS.append(dimension)
+SPECTRAL_DIMS = list(MODELS[SPECTRAL_MODEL].photometric_dims)
 SPECTRAL_DIMS.append("veldisp")
 SPECTRAL_DIMS.append("noise_scale")
 
 
-def training_unit_vector(cube_by_name):
-    """Unit-cube vector in DIMS order for a fit at fixed redshift, from the fit's own named coordinates.
+def training_unit_vector(cube_by_name, sfh_model):
+    """Unit-cube vector in a model's dims order for a fit at fixed redshift, from the fit's own named coordinates.
 
-    Inputs: cube_by_name: dict of unit-cube values (dimensionless, in [0, 1)) holding every DIMS name but "z";
-            other names (the fit's nuisance parameters) are ignored.
-    Returns: array of len(DIMS) values (dimensionless); the "z" slot holds IGNORED_REDSHIFT_DRAW.
+    Inputs: cube_by_name: dict of unit-cube values (dimensionless, in [0, 1)) holding every dimension of the model
+            but "z"; other names (the fit's nuisance parameters) are ignored; sfh_model: "delayed" or "dblplaw".
+    Returns: array of len(MODELS[sfh_model].dims) values (dimensionless); the "z" slot holds IGNORED_REDSHIFT_DRAW.
     """
-    unit_vector = np.zeros(len(DIMS))
-    for dimension_index, dimension in enumerate(DIMS):
+    dims = MODELS[sfh_model].dims
+    unit_vector = np.zeros(len(dims))
+    for dimension_index, dimension in enumerate(dims):
         if dimension == "z":
             # components() ignores this value, because fixed_redshift replaces the drawn redshift
             unit_vector[dimension_index] = IGNORED_REDSHIFT_DRAW
@@ -638,18 +639,18 @@ def training_unit_vector(cube_by_name):
 def spectral_components(cube, redshift):
     """Bagpipes components, drawn parameters and noise scale for one spectral-fit unit-cube point.
 
-    The delayed-tau SFH, the single metallicity, dust and nebular part is the training prior (components) at
-    the fixed spectroscopic redshift, which also sets the oldest allowed age; veldisp and noise_scale are the
+    The SFH, metallicity, dust and nebular part is the delayed-tau training prior (MODELS[SPECTRAL_MODEL]) at the
+    fixed spectroscopic redshift, which also sets the oldest allowed age; veldisp and noise_scale are the
     spectral nuisance parameters.
     Inputs: cube: unit-cube values (dimensionless, in [0, 1)) ordered as SPECTRAL_DIMS;
             redshift: spectroscopic redshift (dimensionless).
-    Returns: (bagpipes_components, drawn, noise_scale). The components are as in components() plus
-             veldisp [km/s]; drawn is as in components() plus veldisp [km/s]; noise_scale is the error
+    Returns: (bagpipes_components, drawn, noise_scale). The components are the delayed-tau model's plus
+             veldisp [km/s]; drawn holds the model's drawn labels plus veldisp [km/s]; noise_scale is the error
              multiplier (dimensionless, 1 to 5).
     """
     cube_by_name = dict(zip(SPECTRAL_DIMS, cube))
-    unit_vector = training_unit_vector(cube_by_name)
-    bagpipes_components, drawn = components(unit_vector, fixed_redshift=redshift)
+    unit_vector = training_unit_vector(cube_by_name, SPECTRAL_MODEL)
+    bagpipes_components, drawn = MODELS[SPECTRAL_MODEL].components(unit_vector, fixed_redshift=redshift)
     veldisp = uniform(cube_by_name["veldisp"], *VELDISP_RANGE)
     bagpipes_components["veldisp"] = veldisp
     drawn["veldisp"] = veldisp
@@ -687,6 +688,8 @@ MAX_ITERATIONS = 50000           # MultiNest iteration limit of a production fit
 OFFSET_DRAW_SEED = 0             # seed of the per-sample magnitude offsets of a photometric fit's labels
 SPECTRUM_JOB = "spectrum"        # job kind of a spectral fit; also every job or fit file stored without a kind
 PHOTOMETRY_JOB = "photometry"    # job kind of a photometric fit (spec amendment A)
+JOB_DEFAULT_SFH_MODEL = "delayed"   # SFH model of a job or save_fit call naming none (every job before the DPL model)
+EVIDENCE_ERROR_SAMPLES = 200        # posterior samples that recompute the ln Z error of a fit that stored none (count)
 # SFH model of every fit this code writes, stored in each fit file: fits made under an earlier model
 # (the 16-bin non-parametric SFH, whose files have no sfh_model) must never be read as current ones
 SFH_MODEL = MODELS["delayed"].name                      # delayed-tau alias, removed in Task 11
@@ -751,8 +754,9 @@ def fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_poi
             MultiNest files (str); max_iterations: MultiNest iteration limit (count);
             n_live_points: live points (count).
     Returns: dict with samples (unit-cube points, shape (n_samples, len(SPECTRAL_DIMS))), log_evidence
-             (dimensionless ln Z), n_iterations (count, from multinest_iterations), converged (bool: the
-             run certainly stopped before max_iterations, judged by the upper bound of the count) and run_time [s].
+             (dimensionless ln Z), log_evidence_error (MultiNest's uncertainty of ln Z, sqrt(H / n_live)),
+             n_iterations (count, from multinest_iterations), converged (bool: the run certainly stopped before
+             max_iterations, judged by the upper bound of the count) and run_time [s].
     """
     # 1. Bagpipes model built once; each likelihood call updates it in place, which is much faster
     midpoint_cube = np.full(len(SPECTRAL_DIMS), MIDPOINT_DRAW)
@@ -784,8 +788,8 @@ def run_multinest(log_likelihood, n_dims, output_basename, max_iterations, n_liv
             (dimensionless); it must never raise; n_dims: number of unit-cube dimensions (count);
             output_basename: directory prefix for the MultiNest files (str, under 100 characters);
             max_iterations: MultiNest iteration limit (count); n_live_points: live points (count).
-    Returns: dict as fit_spectrum returns: samples (n_samples, n_dims), log_evidence, n_iterations, converged
-             and run_time [s].
+    Returns: dict as fit_spectrum returns: samples (n_samples, n_dims), log_evidence, log_evidence_error,
+             n_iterations, converged and run_time [s].
     """
     # pymultinest loads the MultiNest C library on import, so it needs LD_LIBRARY_PATH (set by the kernel)
     import pymultinest
@@ -818,6 +822,8 @@ def run_multinest(log_likelihood, n_dims, output_basename, max_iterations, n_liv
     return {
         "samples": result["samples"],
         "log_evidence": result["logZ"],
+        # MultiNest's "global log-evidence error", sqrt(H / n_live), read by pymultinest from stats.dat
+        "log_evidence_error": result["logZerr"],
         "n_iterations": n_iterations,
         "converged": max_possible_iterations < max_iterations,
         "run_time": run_time,
@@ -825,14 +831,14 @@ def run_multinest(log_likelihood, n_dims, output_basename, max_iterations, n_liv
 
 
 def posterior_labels(unit_cube_samples, redshift):
-    """Labels of each posterior sample, from a Bagpipes model that also computes S-PLUS photometry.
+    """Labels of each spectral-fit posterior sample, from a Bagpipes model that also computes S-PLUS photometry.
 
     Keeps at most MAX_POSTERIOR_SAMPLES evenly spaced samples, because building labels is the slow part.
     model_r is the model r magnitude for 10^10 M_sun formed, used later to rescale mass-like labels.
     Inputs: unit_cube_samples: unit-cube points (dimensionless, shape (n_samples, len(SPECTRAL_DIMS)));
             redshift: spectroscopic redshift (dimensionless).
-    Returns: DataFrame with one row per kept sample: the TRAINING_LABELS (mass-like ones for 10^10 M_sun
-             formed), then veldisp [km/s], noise_scale (dimensionless) and model_r [mag].
+    Returns: DataFrame with one row per kept sample: the delayed-tau training labels (mass-like ones for
+             10^10 M_sun formed), then veldisp [km/s], noise_scale (dimensionless) and model_r [mag].
     """
     # 1. Thin the samples evenly: neighbouring MultiNest samples are nearly identical
     kept_samples = thinned_samples(unit_cube_samples)
@@ -845,17 +851,18 @@ def posterior_labels(unit_cube_samples, redshift):
         model = updated_photometry_model(model, bagpipes_components)
         drawn_with_noise = dict(drawn)
         drawn_with_noise["noise_scale"] = noise_scale
-        rows.append(sample_label_row(model, bagpipes_components, drawn_with_noise))
+        rows.append(sample_label_row(model, bagpipes_components, drawn_with_noise, SPECTRAL_MODEL))
     return pd.DataFrame(rows)
 
 
-def thinned_samples(unit_cube_samples):
-    """At most MAX_POSTERIOR_SAMPLES evenly spaced posterior samples, because building labels is the slow part.
+def thinned_samples(unit_cube_samples, max_samples=MAX_POSTERIOR_SAMPLES):
+    """At most max_samples evenly spaced posterior samples, because computing anything per sample is the slow part.
 
-    Inputs: unit_cube_samples: unit-cube points (dimensionless), shape (n_samples, n_dims).
-    Returns: every step-th row (dimensionless), step chosen so that no more than MAX_POSTERIOR_SAMPLES remain.
+    Inputs: unit_cube_samples: unit-cube points (dimensionless), shape (n_samples, n_dims);
+            max_samples: largest number of samples kept (count).
+    Returns: every step-th row (dimensionless), step chosen so that no more than max_samples remain.
     """
-    step = max(1, int(np.ceil(len(unit_cube_samples) / MAX_POSTERIOR_SAMPLES)))
+    step = max(1, int(np.ceil(len(unit_cube_samples) / max_samples)))
     return unit_cube_samples[::step]
 
 
@@ -871,17 +878,17 @@ def updated_photometry_model(model, bagpipes_components):
     return model
 
 
-def sample_label_row(model, bagpipes_components, drawn):
+def sample_label_row(model, bagpipes_components, drawn, sfh_model):
     """Labels of one posterior sample, computed from its photometry model as for a training-set model.
 
-    Inputs: model: photometry model_galaxy already at bagpipes_components; bagpipes_components: dict as from
-            components(), the point the model is at (not read: the labels come from drawn and the model);
-            drawn: dict from components() with the DRAWN_LABELS, plus any extra parameters of the fit
-            (veldisp [km/s], noise_scale).
-    Returns: dict: the TRAINING_LABELS in order (summary_labels), then the extra drawn parameters, then
+    Inputs: model: photometry model_galaxy already at bagpipes_components; bagpipes_components: dict as from the
+            model's components(), the point the model is at (not read: the labels come from drawn and the model);
+            drawn: dict from components() with the model's drawn labels, plus any extra parameters of the fit
+            (veldisp [km/s], noise_scale); sfh_model: "delayed" or "dblplaw".
+    Returns: dict: the model's training labels in order (summary_labels), then the extra drawn parameters, then
              model_r [mag], the model r magnitude for 10^10 M_sun formed. Mass-like labels are for that mass.
     """
-    row = summary_labels(model.sfh, drawn, SFH_MODEL)
+    row = summary_labels(model.sfh, drawn, sfh_model)
     for key, value in drawn.items():
         if key not in row:
             row[key] = value
@@ -892,16 +899,17 @@ def sample_label_row(model, bagpipes_components, drawn):
 # -----------------------------------------------------------------------------
 # Photometric fit (spec amendment A): the ML's own input, fitted by Bagpipes with the simulator's likelihood
 # -----------------------------------------------------------------------------
-def photometric_components(cube, redshift):
-    """Bagpipes components and drawn parameters for one photometric-fit unit-cube point.
+def photometric_components(cube, redshift, sfh_model):
+    """Bagpipes components and drawn parameters for one photometric-fit unit-cube point of one SFH model.
 
-    Inputs: cube: unit-cube values (dimensionless, in [0, 1)) ordered as PHOTOMETRIC_DIMS;
-            redshift: spectroscopic redshift (dimensionless).
-    Returns: (bagpipes_components, drawn), exactly as components(..., fixed_redshift=redshift) gives them.
+    Inputs: cube: unit-cube values (dimensionless, in [0, 1)) ordered as MODELS[sfh_model].photometric_dims;
+            redshift: spectroscopic redshift (dimensionless); sfh_model: "delayed" or "dblplaw".
+    Returns: (bagpipes_components, drawn), exactly as MODELS[sfh_model].components(..., fixed_redshift=redshift)
+             gives them.
     """
-    cube_by_name = dict(zip(PHOTOMETRIC_DIMS, cube))
-    unit_vector = training_unit_vector(cube_by_name)
-    return components(unit_vector, fixed_redshift=redshift)
+    cube_by_name = dict(zip(MODELS[sfh_model].photometric_dims, cube))
+    unit_vector = training_unit_vector(cube_by_name, sfh_model)
+    return MODELS[sfh_model].components(unit_vector, fixed_redshift=redshift)
 
 
 def offset_marginal_log_likelihood(model_magnitudes, observed_magnitudes, errors, detected):
@@ -947,16 +955,17 @@ def safe_photometric_log_likelihood(model_magnitudes, observed_magnitudes, error
     return offset_marginal_log_likelihood(model_magnitudes, observed_magnitudes, errors, detected)[0]
 
 
-def fit_photometry(magnitudes, errors, redshift, output_basename, max_iterations, n_live_points=N_LIVE_POINTS):
-    """MultiNest fit of one galaxy's 12-band photometry under the training prior at a fixed redshift.
+def fit_photometry(magnitudes, errors, redshift, sfh_model, output_basename, max_iterations,
+                   n_live_points=N_LIVE_POINTS):
+    """MultiNest fit of one galaxy's 12-band photometry under one SFH model's training prior at a fixed redshift.
 
-    It fits the ML's own target: the training prior (PHOTOMETRIC_DIMS) and the likelihood of the simulator
-    that made the training data (offset_marginal_log_likelihood), over the detected bands only.
+    It fits the ML's own target: the model's training prior (its photometric_dims) and the likelihood of the
+    simulator that made the training data (offset_marginal_log_likelihood), over the detected bands only.
     Inputs: magnitudes, errors: [mag], 12 values in BANDS order; a band is left out when detected_bands says
             it is not detected (99 or NaN magnitude, or error >= MAX_DETECTED_ERROR);
-            redshift: spectroscopic redshift (dimensionless); output_basename, max_iterations and n_live_points:
-            as in fit_spectrum.
-    Returns: dict as fit_spectrum returns, with samples of shape (n_samples, len(PHOTOMETRIC_DIMS)).
+            redshift: spectroscopic redshift (dimensionless); sfh_model: "delayed" or "dblplaw";
+            output_basename, max_iterations and n_live_points: as in fit_spectrum.
+    Returns: dict as fit_spectrum returns, with samples of shape (n_samples, len(MODELS[sfh_model].photometric_dims)).
     Raises: ValueError when fewer than MIN_DETECTED_BANDS bands are detected.
     """
     # 1. Bands that enter the likelihood
@@ -967,18 +976,19 @@ def fit_photometry(magnitudes, errors, redshift, output_basename, max_iterations
         raise ValueError(f"{detected.sum()} detected bands, fewer than MIN_DETECTED_BANDS = {MIN_DETECTED_BANDS}")
 
     # 2. Bagpipes model built once with the S-PLUS filters; every point has the same component set
-    midpoint_cube = np.full(len(PHOTOMETRIC_DIMS), MIDPOINT_DRAW)
-    starting_components, _ = photometric_components(midpoint_cube, redshift)
+    n_dims = len(MODELS[sfh_model].photometric_dims)
+    midpoint_cube = np.full(n_dims, MIDPOINT_DRAW)
+    starting_components, _ = photometric_components(midpoint_cube, redshift, sfh_model)
     model = updated_photometry_model(None, starting_components)
 
     # 3. Likelihood of one unit-cube point
     def log_likelihood(cube):
         """Log-likelihood of the photometry for one unit-cube point.
 
-        Inputs: cube: unit-cube point (dimensionless, PHOTOMETRIC_DIMS order).
+        Inputs: cube: unit-cube point (dimensionless, in the model's photometric_dims order).
         Returns: log-likelihood (dimensionless), LOG_ZERO for an impossible model.
         """
-        bagpipes_components, _ = photometric_components(cube, redshift)
+        bagpipes_components, _ = photometric_components(cube, redshift, sfh_model)
         # PyMultiNest calls sys.exit if the likelihood raises: a model Bagpipes cannot compute is impossible
         try:
             model.update(bagpipes_components)
@@ -988,19 +998,19 @@ def fit_photometry(magnitudes, errors, redshift, output_basename, max_iterations
         return safe_photometric_log_likelihood(model_magnitudes, magnitudes, errors, detected)
 
     # 4. MultiNest over the unit cube
-    return run_multinest(log_likelihood, len(PHOTOMETRIC_DIMS), output_basename, max_iterations, n_live_points)
+    return run_multinest(log_likelihood, n_dims, output_basename, max_iterations, n_live_points)
 
 
-def photometric_posterior_labels(unit_cube_samples, redshift, magnitudes, errors, rng):
+def photometric_posterior_labels(unit_cube_samples, redshift, magnitudes, errors, rng, sfh_model):
     """Labels of each photometric-fit posterior sample, at the brightness of the observed galaxy.
 
     Each kept sample gets its own magnitude offset, drawn from the offset's Gaussian given that sample's
     model (offset_marginal_log_likelihood), and its mass-like labels move by it (rescale_mass_labels), as the
     training labels move with the brightness offset of each model.
-    Inputs: unit_cube_samples: unit-cube points (dimensionless), shape (n_samples, len(PHOTOMETRIC_DIMS));
+    Inputs: unit_cube_samples: unit-cube points (dimensionless), shape (n_samples, len(MODELS[sfh_model].photometric_dims));
             redshift: spectroscopic redshift (dimensionless); magnitudes, errors: [mag] the fitted photometry,
-            as given to fit_photometry; rng: numpy Generator.
-    Returns: DataFrame with one row per kept sample (at most MAX_POSTERIOR_SAMPLES): the TRAINING_LABELS
+            as given to fit_photometry; rng: numpy Generator; sfh_model: "delayed" or "dblplaw".
+    Returns: DataFrame with one row per kept sample (at most MAX_POSTERIOR_SAMPLES): the model's training labels
              (MASS_DEPENDENT_LABELS already rescaled), model_r [mag, for 10^10 M_sun formed] and
              magnitude_offset [mag, observed minus model].
     """
@@ -1013,9 +1023,9 @@ def photometric_posterior_labels(unit_cube_samples, redshift, magnitudes, errors
     model = None
     rows = []
     for cube in kept_samples:
-        bagpipes_components, drawn = photometric_components(cube, redshift)
+        bagpipes_components, drawn = photometric_components(cube, redshift, sfh_model)
         model = updated_photometry_model(model, bagpipes_components)
-        row = sample_label_row(model, bagpipes_components, drawn)
+        row = sample_label_row(model, bagpipes_components, drawn, sfh_model)
         model_magnitudes = ab_magnitudes(model.photometry)
         _, best_offset, offset_sigma = offset_marginal_log_likelihood(model_magnitudes, magnitudes, errors, detected)
         row["magnitude_offset"] = rng.normal(best_offset, offset_sigma)
@@ -1024,6 +1034,73 @@ def photometric_posterior_labels(unit_cube_samples, redshift, magnitudes, errors
     # 2. Mass-like labels at the observed brightness
     labels = pd.DataFrame(rows)
     return rescale_mass_labels(labels, labels["magnitude_offset"].to_numpy())
+
+
+# -----------------------------------------------------------------------------
+# Evidence uncertainty (DPL spec, part 4): stored by every new fit, recomputed for fits saved without it
+# -----------------------------------------------------------------------------
+def evidence_error(log_likelihoods, log_evidence, n_live_points):
+    """MultiNest's uncertainty of ln Z, sqrt(H / n_live), with the information H taken from posterior samples.
+
+    H = E_posterior[ln L] - ln Z is the information gained from prior to posterior [nats]; MultiNest reports
+    sqrt(H / n_live) as the error of its ln Z.
+    Inputs: log_likelihoods: ln L of equal-weight posterior samples (dimensionless), with the fit's own likelihood;
+            log_evidence: the fit's ln Z (dimensionless); n_live_points: live points of the fit (count).
+    Returns: the ln Z uncertainty (dimensionless float); 0 when the samples give H <= 0 (no information).
+    """
+    information = np.mean(np.asarray(log_likelihoods, dtype=float)) - log_evidence
+    return float(np.sqrt(max(information, 0.0) / n_live_points))
+
+
+def photometric_log_likelihoods(unit_cube_samples, redshift, magnitudes, errors, sfh_model,
+                                max_samples=EVIDENCE_ERROR_SAMPLES):
+    """The photometric fit's log-likelihood at its posterior samples, as fit_photometry computed it.
+
+    Inputs: unit_cube_samples: unit-cube points (dimensionless), shape (n_samples, len(MODELS[sfh_model].photometric_dims));
+            redshift: spectroscopic redshift (dimensionless); magnitudes, errors: [mag] the fitted photometry;
+            sfh_model: the fit's model; max_samples: at most this many evenly spaced samples are used (count).
+    Returns: array of log-likelihoods (dimensionless), one per used sample.
+    """
+    magnitudes = np.asarray(magnitudes, dtype=float)
+    errors = np.asarray(errors, dtype=float)
+    detected = detected_bands(magnitudes, errors)
+    model = None
+    log_likelihoods = []
+    for cube in thinned_samples(unit_cube_samples, max_samples):
+        bagpipes_components, _ = photometric_components(cube, redshift, sfh_model)
+        model = updated_photometry_model(model, bagpipes_components)
+        model_magnitudes = ab_magnitudes(model.photometry)
+        log_likelihoods.append(safe_photometric_log_likelihood(model_magnitudes, magnitudes, errors, detected))
+    return np.array(log_likelihoods)
+
+
+def load_unit_cube_samples(path):
+    """Unit-cube posterior samples of a file written by save_fit.
+
+    Inputs: path: file path (str). Returns: array (n_samples, n_dims), dimensionless.
+    """
+    with h5py.File(path, "r") as source:
+        return source["unit_cube_samples"][()]
+
+
+def fit_evidence(fit_file, job):
+    """ln Z of a photometric fit and its uncertainty: the stored one, or sqrt(H / n_live) recomputed.
+
+    Why recompute: fits saved before the DPL model stored no evidence error, and their MultiNest folders stayed
+    in the PC job; the recomputed value is MultiNest's own estimate, from the stored posterior samples. A fit
+    without n_live_points ran with N_LIVE_POINTS (submit_fits.sh never sets --n-live).
+    Inputs: fit_file: path of a photometric fit (str); job: its photometry job (magnitudes and errors [mag],
+            the photometry the fit used).
+    Returns: (log_evidence, log_evidence_error), dimensionless floats.
+    """
+    _, metadata = load_fit(fit_file)
+    if "log_evidence_error" in metadata:
+        return float(metadata["log_evidence"]), float(metadata["log_evidence_error"])
+    samples = load_unit_cube_samples(fit_file)
+    log_likelihoods = photometric_log_likelihoods(samples, metadata["redshift"], job["magnitudes"], job["errors"],
+                                                  metadata["sfh_model"])
+    n_live_points = metadata.get("n_live_points", N_LIVE_POINTS)
+    return float(metadata["log_evidence"]), evidence_error(log_likelihoods, metadata["log_evidence"], n_live_points)
 
 
 def make_mock_spectrum(cube, redshift, template_spectrum, rng):
@@ -1065,17 +1142,18 @@ def save_fit(path, posterior, unit_cube_samples, metadata):
 
     The file is written as path + ".tmp" and renamed to path only once complete, so an interrupted
     or failed write never leaves a partial file at path (which would count as a finished job). Every file
-    also records sfh_model = SFH_MODEL, so fits of an earlier SFH model can be told apart (fit_is_current).
+    records its sfh_model, so fits of an earlier or of the other SFH model can be told apart (fit_is_current).
     Inputs: path: output file path (str); posterior: DataFrame of labels, one column per label;
             unit_cube_samples: unit-cube points (dimensionless, shape (n_samples, n_dims), n_dims that of the
-            fit's kind: len(SPECTRAL_DIMS) or len(PHOTOMETRIC_DIMS));
-            metadata: dict of scalars (converged, run_time [s], n_iterations, max_iterations, log_evidence, redshift,
-            kind: SPECTRUM_JOB or PHOTOMETRY_JOB; files written before kinds existed have none and are spectral).
-            The caller's dict is not changed.
+            fit: len(SPECTRAL_DIMS) or the model's photometric_dims);
+            metadata: dict of scalars (converged, run_time [s], n_iterations, max_iterations, n_live_points,
+            log_evidence, log_evidence_error, redshift, kind, sfh_model and, for a cross-fit, truth_model; files
+            written before kinds existed have no kind and are spectral). Without sfh_model, the fit is stored as
+            JOB_DEFAULT_SFH_MODEL. The caller's dict is not changed.
     Returns: None. An existing file at path is replaced.
     """
     stored_metadata = dict(metadata)
-    stored_metadata["sfh_model"] = SFH_MODEL
+    stored_metadata["sfh_model"] = metadata.get("sfh_model", JOB_DEFAULT_SFH_MODEL)
     temporary_path = path + ".tmp"
     with h5py.File(temporary_path, "w") as output:
         output.create_dataset("unit_cube_samples", data=unit_cube_samples)
@@ -1093,7 +1171,8 @@ def load_fit(path):
     Inputs: path: file path (str).
     Returns: (posterior DataFrame with one column per label (in alphabetical order, as HDF5 stores them),
              metadata dict with the attributes save_fit wrote, sfh_model included; files written before the
-             delayed-tau model have none).
+             delayed-tau model have no sfh_model, and files written before the DPL model have no
+             log_evidence_error and no n_live_points).
     """
     with h5py.File(path, "r") as source:
         columns = {}
@@ -1106,15 +1185,16 @@ def load_fit(path):
     return pd.DataFrame(columns), metadata
 
 
-def fit_is_current(metadata):
-    """Whether a stored fit belongs to the current production run: SFH_MODEL and the full iteration limit.
+def fit_is_current(metadata, sfh_model):
+    """Whether a stored fit belongs to the current production run of a fits folder's SFH model.
 
-    Fits that fail this (16-bin fits without sfh_model, pilot runs with a smaller limit) are moved to
-    superseded/ by supersede_outdated_fits (spectroscopic_reference.ipynb, section 4), never read as results.
-    Inputs: metadata: dict as load_fit returns it.
-    Returns: bool: True only when sfh_model == SFH_MODEL and max_iterations >= MAX_ITERATIONS.
+    Fits that fail this (16-bin fits without sfh_model, fits of the other model, pilot runs with a smaller limit)
+    are moved to superseded/ by supersede_outdated_fits (spectroscopic_reference.ipynb, section 4), never read
+    as results. The folder's model comes from FIT_FOLDER_MODELS.
+    Inputs: metadata: dict as load_fit returns it; sfh_model: the folder's model, "delayed" or "dblplaw".
+    Returns: bool: True only when metadata["sfh_model"] == sfh_model and max_iterations >= MAX_ITERATIONS.
     """
-    same_model = metadata.get("sfh_model") == SFH_MODEL
+    same_model = metadata.get("sfh_model") == sfh_model
     full_run = metadata.get("max_iterations", 0) >= MAX_ITERATIONS
     return same_model and full_run
 
@@ -1128,30 +1208,46 @@ def job_kind(job):
     return job.get("kind", SPECTRUM_JOB)
 
 
+def job_model(job):
+    """SFH model a fit job is fitted with.
+
+    Inputs: job: job dict (as fit_and_save takes).
+    Returns: job["sfh_model"], or JOB_DEFAULT_SFH_MODEL ("delayed") for a job without one (every job exported
+             before the DPL model).
+    """
+    return job.get("sfh_model", JOB_DEFAULT_SFH_MODEL)
+
+
 def fit_spectrum_job(job, multinest_basename, max_iterations, n_live_points):
     """Fit a spectrum job and label its posterior samples.
 
     Inputs: job: dict with spectrum (as from prepare_spectrum) and redshift (dimensionless); multinest_basename:
             directory prefix for the MultiNest files (str); max_iterations, n_live_points: counts.
     Returns: (fit dict from fit_spectrum, posterior DataFrame from posterior_labels).
+    Raises: ValueError for a job of a model other than SPECTRAL_MODEL (spectral fits are delayed-tau only).
     """
+    if job_model(job) != SPECTRAL_MODEL:
+        raise ValueError(f"spectral fits are {SPECTRAL_MODEL} only, not {job_model(job)} (DPL spec, decision 1)")
     fit = fit_spectrum(job["spectrum"], job["redshift"], multinest_basename, max_iterations, n_live_points)
     posterior = posterior_labels(fit["samples"], job["redshift"])
     return fit, posterior
 
 
 def fit_photometry_job(job, multinest_basename, max_iterations, n_live_points):
-    """Fit a photometry job and label its posterior samples at the galaxy's brightness.
+    """Fit a photometry job with its SFH model and label its posterior samples at the galaxy's brightness.
 
-    Inputs: job: dict with magnitudes and errors ([mag], 12 in BANDS order) and redshift (dimensionless);
-            multinest_basename: directory prefix for the MultiNest files (str); max_iterations, n_live_points: counts.
+    Inputs: job: dict with magnitudes and errors ([mag], 12 in BANDS order), redshift (dimensionless) and
+            sfh_model (job_model); multinest_basename: directory prefix for the MultiNest files (str);
+            max_iterations, n_live_points: counts.
     Returns: (fit dict from fit_photometry, posterior DataFrame from photometric_posterior_labels).
     """
-    fit = fit_photometry(job["magnitudes"], job["errors"], job["redshift"], multinest_basename,
+    sfh_model = job_model(job)
+    fit = fit_photometry(job["magnitudes"], job["errors"], job["redshift"], sfh_model, multinest_basename,
                          max_iterations, n_live_points)
     # A fixed seed, so labelling the same samples again gives the same offsets
     rng = np.random.default_rng(OFFSET_DRAW_SEED)
-    posterior = photometric_posterior_labels(fit["samples"], job["redshift"], job["magnitudes"], job["errors"], rng)
+    posterior = photometric_posterior_labels(fit["samples"], job["redshift"], job["magnitudes"], job["errors"],
+                                             rng, sfh_model)
     return fit, posterior
 
 
@@ -1162,28 +1258,30 @@ JOB_FITTERS = {SPECTRUM_JOB: fit_spectrum_job, PHOTOMETRY_JOB: fit_photometry_jo
 def fit_and_save(job, output_directory, max_iterations, n_live_points=N_LIVE_POINTS):
     """Fit one job and save <output_directory>/<job_id>.h5. Never raises.
 
-    Skips jobs whose readable file of the same kind and SFH_MODEL already exists, so a batch can be re-run
+    Skips jobs whose readable file of the same kind and SFH model already exists, so a batch can be re-run
     with more galaxies. An unreadable file does not count as finished: the job is fitted again and the file
     replaced. A readable file of the other kind is never replaced (job ids are specobjids, shared by the
-    spectral and photometric fits of one galaxy), and neither is a fit of an earlier SFH model (the only copy
-    of that result, to be moved to superseded/): the job fails instead. A failed fit comes back with status
-    "failed" and the error text instead of an exception.
-    Inputs: job: dict with job_id (str), redshift (dimensionless) and kind (SPECTRUM_JOB when absent); a
-            spectrum job holds spectrum (dict as from prepare_spectrum), a photometry job magnitudes and
-            errors ([mag], 12 in BANDS order); output_directory: folder for the .h5 file and the MultiNest
-            files (str); max_iterations: MultiNest iteration limit (count); n_live_points: live points (count).
+    spectral and photometric fits of one galaxy), and neither is a fit of another SFH model (an earlier model's
+    result, the only copy, to be moved to superseded/): the job fails instead. A failed fit comes back with
+    status "failed" and the error text instead of an exception.
+    Inputs: job: dict with job_id (str), redshift (dimensionless), kind (SPECTRUM_JOB when absent), sfh_model
+            (JOB_DEFAULT_SFH_MODEL when absent) and, for a cross-fit, truth_model; a spectrum job holds spectrum
+            (dict as from prepare_spectrum), a photometry job magnitudes and errors ([mag], 12 in BANDS order);
+            output_directory: folder for the .h5 file and the MultiNest files (str); max_iterations: MultiNest
+            iteration limit (count); n_live_points: live points (count).
     Returns: dict with job_id, status ("fitted", "skipped" or "failed"), converged (bool or None),
              run_time [s] (or None), n_iterations (count or None) and error (str or None).
     """
     # 1. Output path and a summary that the steps below fill in
     output_path = os.path.join(output_directory, f"{job['job_id']}.h5")
     kind = job_kind(job)
+    sfh_model = job_model(job)
     summary = {"job_id": job["job_id"], "status": None, "converged": None,
                "run_time": None, "n_iterations": None, "error": None}
 
     # 2. Skip finished jobs; their run details come from the file. Any failure to read it (damaged,
     # truncated or missing fields) means the job is not finished, so it is fitted again below. A readable
-    # fit of an earlier SFH model is neither skipped (not a result of this model) nor overwritten (only copy)
+    # fit of another SFH model is neither skipped (not a result of this model) nor overwritten (only copy)
     stored_kind = None
     stored_model = None
     if os.path.exists(output_path):
@@ -1195,9 +1293,9 @@ def fit_and_save(job, output_directory, max_iterations, n_live_points=N_LIVE_POI
             stored_model = metadata.get("sfh_model")
         except Exception:
             pass
-    if stored_kind == kind and stored_model != SFH_MODEL:
-        summary.update(status="failed", error=f"{output_path} holds a fit of an earlier SFH model "
-                                              f"({stored_model}, not {SFH_MODEL}): move it to superseded/")
+    if stored_kind == kind and stored_model != sfh_model:
+        summary.update(status="failed", error=f"{output_path} holds a fit of another SFH model "
+                                              f"({stored_model}, not {sfh_model}): move it to superseded/")
         return summary
     if stored_kind == kind:
         summary.update(status="skipped", **stored_details)
@@ -1213,7 +1311,11 @@ def fit_and_save(job, output_directory, max_iterations, n_live_points=N_LIVE_POI
         fit, posterior = JOB_FITTERS[kind](job, multinest_basename, max_iterations, n_live_points)
         metadata = {"converged": fit["converged"], "run_time": fit["run_time"],
                     "n_iterations": fit["n_iterations"], "max_iterations": max_iterations,
-                    "log_evidence": fit["log_evidence"], "redshift": job["redshift"], "kind": kind}
+                    "n_live_points": n_live_points, "log_evidence": fit["log_evidence"],
+                    "log_evidence_error": fit["log_evidence_error"], "redshift": job["redshift"], "kind": kind,
+                    "sfh_model": sfh_model}
+        if "truth_model" in job:
+            metadata["truth_model"] = job["truth_model"]
         save_fit(output_path, posterior, fit["samples"], metadata)
         summary.update(status="fitted", converged=fit["converged"],
                        run_time=fit["run_time"], n_iterations=fit["n_iterations"])
@@ -1252,16 +1354,18 @@ PERCENT = 100                    # percent per unit fraction
 def export_job(job, jobs_directory):
     """Write one fit job to <jobs_directory>/<job_id>.npz, a portable file for run_spectral_fits.py.
 
-    Inputs: job: dict with job_id (str), redshift (dimensionless) and kind (SPECTRUM_JOB when absent); a
-            spectrum job holds spectrum (dict with wavelength [Angstrom, observed], flux and ivar), a photometry
-            job magnitudes and errors ([mag], 12 in BANDS order); jobs_directory: folder for the file (str),
-            created if missing.
+    Inputs: job: dict with job_id (str), redshift (dimensionless), kind (SPECTRUM_JOB when absent), sfh_model
+            (JOB_DEFAULT_SFH_MODEL when absent) and, for a cross-fit, truth_model; a spectrum job holds spectrum
+            (dict with wavelength [Angstrom, observed], flux and ivar), a photometry job magnitudes and errors
+            ([mag], 12 in BANDS order); jobs_directory: folder for the file (str), created if missing.
     Returns: path of the written file (str).
     """
     os.makedirs(jobs_directory, exist_ok=True)
     path = os.path.join(jobs_directory, f"{job['job_id']}.npz")
     kind = job_kind(job)
-    arrays = {"job_id": str(job["job_id"]), "redshift": job["redshift"], "kind": kind}
+    arrays = {"job_id": str(job["job_id"]), "redshift": job["redshift"], "kind": kind, "sfh_model": job_model(job)}
+    if "truth_model" in job:
+        arrays["truth_model"] = job["truth_model"]
     if kind == PHOTOMETRY_JOB:
         arrays["magnitudes"] = job["magnitudes"]
         arrays["errors"] = job["errors"]
@@ -1277,15 +1381,22 @@ def load_job(path):
     """Read a file written by export_job.
 
     Inputs: path: file path (str).
-    Returns: job dict in the format fit_and_save takes: job_id (str), kind, redshift (dimensionless float) and
-             either spectrum (wavelength, flux, ivar) or magnitudes and errors [mag]. A file without a kind
-             (exported before the photometric fits existed) is a spectrum job.
+    Returns: job dict in the format fit_and_save takes: job_id (str), kind, sfh_model, redshift (dimensionless
+             float), truth_model when the file has one, and either spectrum (wavelength, flux, ivar) or magnitudes
+             and errors [mag]. A file without a kind (exported before the photometric fits existed) is a spectrum
+             job; a file without sfh_model (exported before the DPL model) is a JOB_DEFAULT_SFH_MODEL job.
     """
     with np.load(path) as source:
         kind = SPECTRUM_JOB
         if "kind" in source.files:
             kind = str(source["kind"])
-        job = {"job_id": str(source["job_id"]), "kind": kind, "redshift": float(source["redshift"])}
+        sfh_model = JOB_DEFAULT_SFH_MODEL
+        if "sfh_model" in source.files:
+            sfh_model = str(source["sfh_model"])
+        job = {"job_id": str(source["job_id"]), "kind": kind, "sfh_model": sfh_model,
+               "redshift": float(source["redshift"])}
+        if "truth_model" in source.files:
+            job["truth_model"] = str(source["truth_model"])
         if kind == PHOTOMETRY_JOB:
             job["magnitudes"] = source["magnitudes"]
             job["errors"] = source["errors"]
@@ -1363,6 +1474,8 @@ SUPERSEDED_NAME_SUFFIX = "_16bin"          # added to a name already taken there
 CALIBRATION_MOCK_FILE = "calibration_mocks.joblib"   # (jobs, truths) of a fits folder's calibration mocks
 JOBS_SUBDIRECTORY = "jobs"                 # exported fit jobs, one .npz each
 RUN_LOG_NAMES = ("fit_log.csv", "fit_logs")   # logs of run_spectral_fits.py; their rows name the fits run
+# The SFH model of each fits folder: a fit of another model in it is superseded, never read
+FIT_FOLDER_MODELS = {"spectral_fits": "delayed", "photometric_fits": "delayed", "photometric_fits_dblplaw": "dblplaw"}
 
 
 def move_to_superseded(fits_directory, name):
@@ -1391,43 +1504,51 @@ def move_to_superseded(fits_directory, name):
     return destination
 
 
-def calibration_mocks_are_current(mock_file):
-    """Whether a stored calibration-mock file holds truths with the current calibration labels.
+def calibration_mocks_are_current(mock_file, sfh_model):
+    """Whether a stored calibration-mock file holds truths with the calibration labels of a folder's model.
 
     Inputs: mock_file: path of a joblib file with (jobs, truths), truths mapping job_id -> Series of the
-            true labels.
-    Returns: bool: True when there is at least one truth and every truth has every CALIBRATION_LABELS value
-             (16-bin truths lack log_age). A file without mocks is not current, so it is redrawn, not reused.
+            true labels; sfh_model: the folder's model, "delayed" or "dblplaw".
+    Returns: bool: True when there is at least one truth and every truth has every
+             MODELS[sfh_model].calibration_labels value (16-bin truths lack log_age, delayed-tau truths lack
+             log_turnover_lookback). A file without mocks is not current, so it is redrawn, not reused.
     """
     _, truths = joblib.load(mock_file)
     if len(truths) == 0:
         return False
     for truth in truths.values():
-        if not set(CALIBRATION_LABELS) <= set(truth.index):
+        if not set(MODELS[sfh_model].calibration_labels) <= set(truth.index):
             return False
     return True
 
 
-def supersede_outdated_fits(fits_directory):
+def supersede_outdated_fits(fits_directory, sfh_model):
     """Move every result of an earlier model or run out of a fits folder, into its SUPERSEDED_SUBDIRECTORY.
 
-    Why: run_spectral_fits.py counts any top-level .h5 as done, and the new calibration mocks reuse the
-    calib_<k> ids, so an old file left in place would be skipped as finished or scored against a new truth.
+    Why: run_spectral_fits.py counts any top-level .h5 as done, and new calibration mocks reuse the calib_<k>
+    ids, so an old file left in place would be skipped as finished or scored against a new truth. Each folder is
+    judged against its own SFH model (FIT_FOLDER_MODELS): a DPL fit stays in photometric_fits_dblplaw and leaves
+    photometric_fits, and the reverse.
     Moved, in this order:
-      1. every readable .h5 fit that fails fit_is_current, with its MultiNest folder (the name without .h5);
-         an unreadable .h5 stays, because fit_and_save fits that job again;
-      2. CALIBRATION_MOCK_FILE when its truths lack the CALIBRATION_LABELS (16-bin mocks) or it holds none;
+      1. every readable .h5 fit that fails fit_is_current(metadata, sfh_model), with its MultiNest folder (the
+         name without .h5); an unreadable .h5 stays, because fit_and_save fits that job again;
+      2. CALIBRATION_MOCK_FILE when its truths lack the model's calibration labels (16-bin mocks) or it holds none;
       3. while no mock file is left, the jobs/calib_*.npz files, which then belong to no current mock;
       4. when any fit moved, the run logs RUN_LOG_NAMES (notebook 2 reads failures from them, and
          fetch_fits.sh drops new rows of ids already logged).
-    Inputs: fits_directory: folder with the .h5 fits, jobs/ and the mock file (str); a missing folder is fine.
+    Inputs: fits_directory: folder with the .h5 fits, jobs/ and the mock file (str); a missing folder is fine;
+            sfh_model: the folder's model, "delayed" or "dblplaw".
     Returns: list of the moved names (str), relative to fits_directory; empty when everything is current.
+    Raises: ValueError when the folder is one of FIT_FOLDER_MODELS and sfh_model is not its model.
     """
+    folder_name = os.path.basename(os.path.normpath(fits_directory))
+    if folder_name in FIT_FOLDER_MODELS and FIT_FOLDER_MODELS[folder_name] != sfh_model:
+        raise ValueError(f"{fits_directory} holds {FIT_FOLDER_MODELS[folder_name]} fits, not {sfh_model}")
     if not os.path.isdir(fits_directory):
         return []
     moved = []
 
-    # 1. Fits of an earlier model or run, with their MultiNest folders
+    # 1. Fits of an earlier model or run, or of the other model, with their MultiNest folders
     for name in sorted(os.listdir(fits_directory)):
         if not name.endswith(".h5"):
             continue
@@ -1435,7 +1556,7 @@ def supersede_outdated_fits(fits_directory):
             _, metadata = load_fit(os.path.join(fits_directory, name))
         except (OSError, KeyError):
             continue
-        if fit_is_current(metadata):
+        if fit_is_current(metadata, sfh_model):
             continue
         for fit_name in (name, name[:-len(".h5")]):
             if move_to_superseded(fits_directory, fit_name) is not None:
@@ -1444,7 +1565,7 @@ def supersede_outdated_fits(fits_directory):
 
     # 2. Calibration mocks of an earlier model
     mock_file = os.path.join(fits_directory, CALIBRATION_MOCK_FILE)
-    if os.path.exists(mock_file) and not calibration_mocks_are_current(mock_file):
+    if os.path.exists(mock_file) and not calibration_mocks_are_current(mock_file, sfh_model):
         move_to_superseded(fits_directory, CALIBRATION_MOCK_FILE)
         moved.append(CALIBRATION_MOCK_FILE)
 

@@ -4,8 +4,10 @@ Each job is a file <jobs-dir>/<job_id>.npz written by the reference notebook (sm
 fit is <output-dir>/<job_id>.h5, so a run can be stopped and started again: finished jobs are skipped.
 A job is a spectral fit (kind "spectrum", the default) or a fit of the 12-band aperture photometry (kind
 "photometry", spec amendment A); sm.fit_and_save picks the fitter from the job file and stores the kind in
-the .h5 file. The two kinds share job ids (the specobjid), so they live in separate folders:
-spectral_fits/ and photometric_fits/ (pass --jobs-dir photometric_fits/jobs --output-dir photometric_fits).
+the .h5 file, with the job's SFH model (sfh_model, "delayed" when the job file has none) and, for a cross-fit,
+its true model (truth_model). The two kinds share job ids (the specobjid), so they live in separate folders:
+spectral_fits/, photometric_fits/ (delayed-tau) and photometric_fits_dblplaw/ (double power law); pass e.g.
+--jobs-dir photometric_fits_dblplaw/jobs --output-dir photometric_fits_dblplaw.
 
 1. Environment (the PC or cluster needs the same software as the notebook)
    - Python 3.10 with numpy, pandas, h5py, scipy, astropy, extinction, bagpipes and pymultinest.

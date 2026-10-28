@@ -180,7 +180,7 @@ old `.h5` files would be bundled by `submit_fits.sh` as finished fits (and repor
 `calibration_mocks.joblib` would overwrite the old one, its only copy:
 
     cd Synthetic_domain && LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python -c "import synthetic_model as sm; \
-        [print(d, len(sm.supersede_outdated_fits(d))) for d in ('spectral_fits', 'photometric_fits')]"
+        [print(d, len(sm.supersede_outdated_fits(d, m))) for d, m in sm.FIT_FOLDER_MODELS.items()]"
 
 The notebook runs three times, in this order (the full run order of the delayed-tau model is: notebook 1, notebook 2,
 spectral fits, MLP training, notebook 2, photometric fits, notebook 2, then `ml_model.ipynb`):

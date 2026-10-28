@@ -632,12 +632,23 @@ def test_fit_and_save_smoke_run(tmp_path):
 
 def test_fit_is_current_needs_the_delayed_model_and_the_production_iteration_limit():
     """Fits without sfh_model (16-bin era), of another model or with a smaller limit are not current."""
-    assert not sm.fit_is_current({"converged": True, "max_iterations": sm.MAX_ITERATIONS})
-    assert sm.fit_is_current({"sfh_model": "delayed", "max_iterations": sm.MAX_ITERATIONS})
-    assert not sm.fit_is_current({"sfh_model": "nonparametric", "max_iterations": sm.MAX_ITERATIONS})
-    assert not sm.fit_is_current({"sfh_model": "delayed", "max_iterations": sm.MAX_ITERATIONS - 1})
-    assert not sm.fit_is_current({"sfh_model": "delayed"})
-    assert sm.SFH_MODEL == "delayed"
+    assert not sm.fit_is_current({"converged": True, "max_iterations": sm.MAX_ITERATIONS}, "delayed")
+    assert sm.fit_is_current({"sfh_model": "delayed", "max_iterations": sm.MAX_ITERATIONS}, "delayed")
+    assert not sm.fit_is_current({"sfh_model": "nonparametric", "max_iterations": sm.MAX_ITERATIONS}, "delayed")
+    assert not sm.fit_is_current({"sfh_model": "delayed", "max_iterations": sm.MAX_ITERATIONS - 1}, "delayed")
+    assert not sm.fit_is_current({"sfh_model": "delayed"}, "delayed")
+    assert sm.MODELS["delayed"].name == "delayed"
+
+
+def test_fit_is_current_compares_the_fit_model_with_the_folder_model():
+    """A fit is current only in a folder of its own model; FIT_FOLDER_MODELS names each folder's model."""
+    full_run = sm.MAX_ITERATIONS
+    assert not sm.fit_is_current({"sfh_model": "delayed", "max_iterations": full_run}, "dblplaw")
+    assert sm.fit_is_current({"sfh_model": "dblplaw", "max_iterations": full_run}, "dblplaw")
+    assert not sm.fit_is_current({"sfh_model": "dblplaw", "max_iterations": full_run}, "delayed")
+    assert not sm.fit_is_current({"sfh_model": "dblplaw", "max_iterations": full_run - 1}, "dblplaw")
+    assert sm.FIT_FOLDER_MODELS == {"spectral_fits": "delayed", "photometric_fits": "delayed",
+                                    "photometric_fits_dblplaw": "dblplaw"}
 
 
 def test_save_and_load_fit_round_trip_the_sfh_model(tmp_path):
@@ -649,10 +660,38 @@ def test_save_and_load_fit_round_trip_the_sfh_model(tmp_path):
 
     loaded_posterior, loaded_metadata = sm.load_fit(path)
 
-    assert loaded_metadata["sfh_model"] == sm.SFH_MODEL
-    assert sm.fit_is_current(loaded_metadata)
+    assert loaded_metadata["sfh_model"] == sm.MODELS["delayed"].name
+    assert sm.fit_is_current(loaded_metadata, "delayed")
     assert list(loaded_posterior["log_age"]) == [0.1, 0.2]
     assert "sfh_model" not in metadata    # the caller's dict is left alone
+
+
+def test_save_fit_keeps_the_sfh_model_the_caller_gives(tmp_path):
+    """A DPL fit is stored as dblplaw, so fit_is_current keeps it only in a DPL folder."""
+    path = str(tmp_path / "dblplaw.h5")
+    posterior = pd.DataFrame({"log_turnover_lookback": [0.1, 0.2]})
+    metadata = {"converged": True, "run_time": 5.0, "n_iterations": 10, "max_iterations": sm.MAX_ITERATIONS,
+                "sfh_model": "dblplaw"}
+    sm.save_fit(path, posterior, np.zeros((2, len(sm.MODELS["dblplaw"].photometric_dims))), metadata)
+
+    _, loaded_metadata = sm.load_fit(path)
+
+    assert loaded_metadata["sfh_model"] == "dblplaw"
+    assert sm.fit_is_current(loaded_metadata, "dblplaw")
+    assert not sm.fit_is_current(loaded_metadata, "delayed")
+
+
+def test_a_job_without_sfh_model_is_delayed():
+    """Every job exported before the DPL model has no sfh_model: it is a delayed-tau job."""
+    assert sm.job_model({"job_id": "123"}) == "delayed"
+    assert sm.job_model({"job_id": "cross_calib_000", "sfh_model": "dblplaw"}) == "dblplaw"
+
+
+def test_spectral_dims_stay_the_delayed_photometric_dims_plus_the_nuisances():
+    """Spectral fits are delayed-tau only (DPL spec, decision 1); the DPL photometric fit has 7 dimensions."""
+    assert sm.SPECTRAL_MODEL == "delayed"
+    assert sm.SPECTRAL_DIMS == [*sm.MODELS["delayed"].photometric_dims, "veldisp", "noise_scale"]
+    assert len(sm.MODELS["dblplaw"].photometric_dims) == 7
 
 
 def test_posterior_labels_of_midpoint_cubes_give_every_training_label():
@@ -737,11 +776,11 @@ def multinest_available():
     return True
 
 
-def noiseless_photometry(cube, redshift):
-    """Model AB magnitudes [mag] of one PHOTOMETRIC_DIMS point, and the unscaled stellar mass [log M_sun]."""
+def noiseless_photometry(cube, redshift, sfh_model="delayed"):
+    """Model AB magnitudes [mag] of one photometric-fit point of sfh_model, and the unscaled stellar mass [log M_sun]."""
     import bagpipes as pipes
 
-    bagpipes_components, _ = sm.photometric_components(cube, redshift)
+    bagpipes_components, _ = sm.photometric_components(cube, redshift, sfh_model)
     model = pipes.model_galaxy(bagpipes_components, filt_list=sm.FILTER_FILES)
     return sm.ab_magnitudes(model.photometry), model.sfh.stellar_mass
 
@@ -799,47 +838,67 @@ def test_photometric_log_likelihood_guard_returns_log_zero():
 
 def test_photometric_components_are_the_training_prior_without_the_redshift():
     rng = np.random.default_rng(20)
-    cube = rng.random(len(sm.PHOTOMETRIC_DIMS))
-    full_unit_vector = np.insert(cube, sm.DIMS.index("z"), 0.9)   # any redshift draw: fixed_redshift replaces it
-    expected_components, expected_drawn = sm.components(full_unit_vector, fixed_redshift=0.12)
+    delayed = sm.MODELS["delayed"]
+    cube = rng.random(len(delayed.photometric_dims))
+    full_unit_vector = np.insert(cube, delayed.dims.index("z"), 0.9)   # any redshift draw: fixed_redshift replaces it
+    expected_components, expected_drawn = delayed.components(full_unit_vector, fixed_redshift=0.12)
 
-    bagpipes_components, drawn = sm.photometric_components(cube, 0.12)
+    bagpipes_components, drawn = sm.photometric_components(cube, 0.12, "delayed")
 
-    expected_dims = list(sm.DIMS)
+    expected_dims = list(delayed.dims)
     expected_dims.remove("z")
-    assert sm.PHOTOMETRIC_DIMS == expected_dims
+    assert delayed.photometric_dims == expected_dims
     assert bagpipes_components == expected_components
     assert drawn == expected_drawn
     assert "veldisp" not in bagpipes_components
 
 
+def test_dblplaw_photometric_components_are_its_training_prior_without_the_redshift():
+    """The DPL fit point maps to the DPL training prior at the fixed redshift, with dblplaw components only."""
+    dblplaw = sm.MODELS["dblplaw"]
+    cube = np.random.default_rng(46).random(len(dblplaw.photometric_dims))
+    full_unit_vector = np.insert(cube, dblplaw.dims.index("z"), 0.9)   # any redshift draw: fixed_redshift replaces it
+    expected_components, expected_drawn = dblplaw.components(full_unit_vector, fixed_redshift=0.12)
+
+    bagpipes_components, drawn = sm.photometric_components(cube, 0.12, "dblplaw")
+
+    expected_dims = list(dblplaw.dims)
+    expected_dims.remove("z")
+    assert dblplaw.photometric_dims == expected_dims
+    assert bagpipes_components == expected_components
+    assert drawn == expected_drawn
+    assert "dblplaw" in bagpipes_components
+    assert "delayed" not in bagpipes_components
+    assert "veldisp" not in bagpipes_components
+
+
 def test_photometric_posterior_labels_shift_the_masses_by_the_offset():
     """A galaxy 1.5 mag fainter than its model (tiny errors) gets log_mstar lower by 0.4 x 1.5 = 0.6 dex."""
-    cube = np.full(len(sm.PHOTOMETRIC_DIMS), 0.5)
+    cube = np.full(len(sm.MODELS["delayed"].photometric_dims), 0.5)
     model_magnitudes, unscaled_log_mass = noiseless_photometry(cube, 0.1)
     offset = 1.5
     errors = np.full(len(sm.BANDS), 1e-4)
 
     posterior = sm.photometric_posterior_labels(cube[np.newaxis, :], 0.1, model_magnitudes + offset, errors,
-                                                np.random.default_rng(21))
+                                                np.random.default_rng(21), "delayed")
 
     assert np.isclose(posterior["magnitude_offset"].iloc[0], offset, atol=1e-3)
     assert np.isclose(posterior["log_mstar"].iloc[0], unscaled_log_mass - 0.4 * offset, atol=1e-3)
     assert np.isclose(posterior["log_mass_formed"].iloc[0], sm.LOG_MASS_FORMED - 0.4 * offset, atol=1e-3)
-    for column in (*sm.TRAINING_LABELS, "model_r", "magnitude_offset"):
+    for column in (*sm.MODELS["delayed"].training_labels, "model_r", "magnitude_offset"):
         assert column in posterior.columns, column
 
 
 def test_photometric_posterior_labels_draw_the_offset_from_its_conditional():
     """Repeated copies of one point get offsets with the analytic mean and width (errors 0.1 mag, 12 bands)."""
     n_copies = 200
-    cube = np.full(len(sm.PHOTOMETRIC_DIMS), 0.5)
+    cube = np.full(len(sm.MODELS["delayed"].photometric_dims), 0.5)
     model_magnitudes, _ = noiseless_photometry(cube, 0.1)
     errors = np.full(len(sm.BANDS), 0.1)
     samples = np.tile(cube, (n_copies, 1))
 
     posterior = sm.photometric_posterior_labels(samples, 0.1, model_magnitudes + 1.0, errors,
-                                                np.random.default_rng(22))
+                                                np.random.default_rng(22), "delayed")
 
     offset_sigma = 0.1 / np.sqrt(len(sm.BANDS))
     assert len(posterior) == n_copies
@@ -852,24 +911,72 @@ def test_fit_photometry_needs_enough_detected_bands():
     magnitudes[:sm.MIN_DETECTED_BANDS - 1] = 20.0
     errors = np.full(len(sm.BANDS), 0.05)
     with pytest.raises(ValueError, match="detected bands"):
-        sm.fit_photometry(magnitudes, errors, 0.1, "unused/", max_iterations=10, n_live_points=25)
+        sm.fit_photometry(magnitudes, errors, 0.1, "delayed", "unused/", max_iterations=10, n_live_points=25)
 
 
 @pytest.mark.skipif(not multinest_available(), reason="pymultinest cannot import (LD_LIBRARY_PATH?)")
 def test_fit_photometry_smoke_run_on_a_noiseless_mock(tmp_path):
     """A short MultiNest run on noiseless model photometry returns unit-cube samples and run details."""
-    cube = np.random.default_rng(23).random(len(sm.PHOTOMETRIC_DIMS))
+    cube = np.random.default_rng(23).random(len(sm.MODELS["delayed"].photometric_dims))
     magnitudes, _ = noiseless_photometry(cube, 0.1)
     errors = np.full(len(sm.BANDS), 0.05)
     magnitudes[0] = 99.0                     # one undetected band: the fit runs on the other eleven
 
-    fit = sm.fit_photometry(magnitudes, errors, 0.1, str(tmp_path) + "/", max_iterations=200, n_live_points=25)
+    fit = sm.fit_photometry(magnitudes, errors, 0.1, "delayed", str(tmp_path) + "/", max_iterations=200,
+                            n_live_points=25)
 
-    assert set(fit) == {"samples", "log_evidence", "n_iterations", "converged", "run_time"}
-    assert fit["samples"].shape[1] == len(sm.PHOTOMETRIC_DIMS)
+    assert set(fit) == {"samples", "log_evidence", "log_evidence_error", "n_iterations", "converged", "run_time"}
+    assert fit["samples"].shape[1] == len(sm.MODELS["delayed"].photometric_dims)
     assert np.all((fit["samples"] >= 0) & (fit["samples"] <= 1))
     assert np.isfinite(fit["log_evidence"])
+    assert np.isfinite(fit["log_evidence_error"]) and fit["log_evidence_error"] > 0
     assert fit["n_iterations"] <= 200
+
+
+def test_evidence_error_is_the_square_root_of_the_information_over_the_live_points():
+    """H = mean ln L - ln Z = -2 - (-5) = 3 nats, so the error is sqrt(3 / 300) = 0.1; no information gives 0."""
+    assert np.isclose(sm.evidence_error(np.array([-1.0, -3.0]), -5.0, 300), 0.1)
+    assert sm.evidence_error(np.array([-5.0, -5.0]), -5.0, 300) == 0.0
+
+
+def test_photometric_log_likelihoods_are_the_fit_likelihood():
+    """At each sample, the recomputed ln L equals the fit's own likelihood of that point (DPL model)."""
+    samples = np.random.default_rng(45).random((3, len(sm.MODELS["dblplaw"].photometric_dims)))
+    model_magnitudes, _ = noiseless_photometry(samples[0], 0.1, "dblplaw")
+    observed = model_magnitudes + 1.0            # sample 0 has perfect colours
+    errors = np.full(len(sm.BANDS), 0.05)
+    detected = sm.detected_bands(observed, errors)
+
+    log_likelihoods = sm.photometric_log_likelihoods(samples, 0.1, observed, errors, "dblplaw")
+
+    assert len(log_likelihoods) == 3
+    for sample_index, cube in enumerate(samples):
+        sample_magnitudes, _ = noiseless_photometry(cube, 0.1, "dblplaw")
+        expected = sm.safe_photometric_log_likelihood(sample_magnitudes, observed, errors, detected)
+        assert np.isclose(log_likelihoods[sample_index], expected)
+    perfect_fit = 0.5 * np.log(2 * np.pi / np.sum(1 / errors**2))    # chi2_min = 0
+    assert np.isclose(log_likelihoods[0], perfect_fit)
+
+
+def test_fit_evidence_reads_the_stored_error_or_recomputes_it(tmp_path, monkeypatch):
+    """A fit with log_evidence_error returns it; an older fit gets sqrt(H / N_LIVE_POINTS) from its samples."""
+    posterior = pd.DataFrame({"log_age": [0.5]})
+    metadata = {"converged": True, "run_time": 1.0, "n_iterations": 5, "max_iterations": sm.MAX_ITERATIONS,
+                "log_evidence": -5.0, "redshift": 0.1, "kind": "photometry"}
+    samples = np.zeros((1, len(sm.MODELS["delayed"].photometric_dims)))
+    sm.save_fit(str(tmp_path / "new.h5"), posterior, samples, dict(metadata, log_evidence_error=0.25))
+    sm.save_fit(str(tmp_path / "old.h5"), posterior, samples, metadata)
+    job = {"magnitudes": np.full(12, 20.0), "errors": np.full(12, 0.05), "redshift": 0.1}
+
+    def fixed_log_likelihoods(unit_cube_samples, redshift, magnitudes, errors, sfh_model):
+        return np.array([-1.0, -3.0])
+
+    monkeypatch.setattr(sm, "photometric_log_likelihoods", fixed_log_likelihoods)
+
+    assert sm.fit_evidence(str(tmp_path / "new.h5"), job) == (-5.0, 0.25)
+    log_evidence, log_evidence_error = sm.fit_evidence(str(tmp_path / "old.h5"), job)
+    assert log_evidence == -5.0
+    assert np.isclose(log_evidence_error, np.sqrt(3 / sm.N_LIVE_POINTS))
 
 
 # =============================================================================
@@ -888,15 +995,16 @@ def test_export_and_load_job_round_trip(tmp_path):
     assert loaded["kind"] == "spectrum"
 
 
-def photometry_job(job_id, rng):
-    """A photometry job at z = 0.1: noiseless model magnitudes of a random point, 0.05 mag errors, u undetected.
+def photometry_job(job_id, rng, sfh_model="delayed"):
+    """A photometry job of sfh_model at z = 0.1: noiseless magnitudes of a random point, 0.05 mag errors, u undetected.
 
-    Inputs: job_id: identifier (str); rng: numpy Generator.
-    Returns: job dict with job_id, kind, magnitudes [mag], errors [mag] and redshift.
+    Inputs: job_id: identifier (str); rng: numpy Generator; sfh_model: "delayed" or "dblplaw".
+    Returns: job dict with job_id, kind, sfh_model, magnitudes [mag], errors [mag] and redshift.
     """
-    magnitudes, _ = noiseless_photometry(rng.random(len(sm.PHOTOMETRIC_DIMS)), 0.1)
+    cube = rng.random(len(sm.MODELS[sfh_model].photometric_dims))
+    magnitudes, _ = noiseless_photometry(cube, 0.1, sfh_model)
     magnitudes[0] = 99.0
-    return {"job_id": job_id, "kind": "photometry", "magnitudes": magnitudes,
+    return {"job_id": job_id, "kind": "photometry", "sfh_model": sfh_model, "magnitudes": magnitudes,
             "errors": np.full(len(sm.BANDS), 0.05), "redshift": 0.1}
 
 
@@ -925,10 +1033,26 @@ def test_job_file_written_before_kinds_loads_as_a_spectrum_job(tmp_path):
     assert np.array_equal(loaded["spectrum"]["flux"], job["spectrum"]["flux"])
 
 
+def test_export_and_load_job_round_trip_the_models(tmp_path):
+    """A cross-fit job keeps its model and true model; a job file written before the DPL model is delayed-tau."""
+    job = {"job_id": "cross_calib_003", "kind": "photometry", "sfh_model": "dblplaw", "truth_model": "delayed",
+           "magnitudes": np.full(12, 20.0), "errors": np.full(12, 0.05), "redshift": 0.1}
+    loaded = sm.load_job(sm.export_job(job, str(tmp_path / "jobs")))
+    assert loaded["sfh_model"] == "dblplaw"
+    assert loaded["truth_model"] == "delayed"
+
+    old_path = str(tmp_path / "123.npz")
+    np.savez(old_path, job_id="123", kind="photometry", redshift=0.1, magnitudes=np.full(12, 20.0),
+             errors=np.full(12, 0.05))
+    old_job = sm.load_job(old_path)
+    assert old_job["sfh_model"] == "delayed"
+    assert "truth_model" not in old_job
+
+
 def fake_fit(n_dims):
     """What a fitter returns, without running MultiNest: two unit-cube samples of n_dims coordinates."""
-    return {"samples": np.full((2, n_dims), 0.5), "log_evidence": -1.0, "n_iterations": 7,
-            "converged": True, "run_time": 3.0}
+    return {"samples": np.full((2, n_dims), 0.5), "log_evidence": -1.0, "log_evidence_error": 0.1,
+            "n_iterations": 7, "converged": True, "run_time": 3.0}
 
 
 @pytest.fixture
@@ -940,14 +1064,15 @@ def fake_fitters(monkeypatch):
         called.append("spectrum")
         return fake_fit(len(sm.SPECTRAL_DIMS))
 
-    def fake_fit_photometry(magnitudes, errors, redshift, output_basename, max_iterations, n_live_points):
+    def fake_fit_photometry(magnitudes, errors, redshift, sfh_model, output_basename, max_iterations,
+                            n_live_points):
         called.append("photometry")
-        return fake_fit(len(sm.PHOTOMETRIC_DIMS))
+        return fake_fit(len(sm.MODELS[sfh_model].photometric_dims))
 
     def fake_spectral_labels(unit_cube_samples, redshift):
         return pd.DataFrame({"mw_age": [1.0, 2.0]})
 
-    def fake_photometric_labels(unit_cube_samples, redshift, magnitudes, errors, rng):
+    def fake_photometric_labels(unit_cube_samples, redshift, magnitudes, errors, rng, sfh_model):
         return pd.DataFrame({"mw_age": [3.0, 4.0], "magnitude_offset": [1.0, 1.0]})
 
     monkeypatch.setattr(sm, "fit_spectrum", fake_fit_spectrum)
@@ -1025,6 +1150,88 @@ def test_fit_and_save_never_reads_or_replaces_a_fit_of_an_older_sfh_model(tmp_pa
     assert fake_fitters == []
     _, stored_metadata = sm.load_fit(path)
     assert "sfh_model" not in stored_metadata    # the old file is untouched
+
+
+def test_fit_and_save_fits_each_photometry_job_with_its_own_model(tmp_path, monkeypatch):
+    """A DPL job is fitted and labelled as DPL; a job without sfh_model as delayed-tau; both store their model."""
+    fitted_models = []
+    labelled_models = []
+
+    def capturing_fit_photometry(magnitudes, errors, redshift, sfh_model, output_basename, max_iterations,
+                                 n_live_points):
+        fitted_models.append(sfh_model)
+        return fake_fit(len(sm.MODELS[sfh_model].photometric_dims))
+
+    def capturing_labels(unit_cube_samples, redshift, magnitudes, errors, rng, sfh_model):
+        labelled_models.append(sfh_model)
+        return pd.DataFrame({"mw_age": [3.0, 4.0]})
+
+    monkeypatch.setattr(sm, "fit_photometry", capturing_fit_photometry)
+    monkeypatch.setattr(sm, "photometric_posterior_labels", capturing_labels)
+    photometry = {"kind": "photometry", "magnitudes": np.full(12, 20.0), "errors": np.full(12, 0.05),
+                  "redshift": 0.1}
+    dblplaw_job = dict(photometry, job_id="cross_calib_000", sfh_model="dblplaw", truth_model="delayed")
+    old_job = dict(photometry, job_id="123")      # no sfh_model, as every job exported before the DPL model
+
+    for job in (dblplaw_job, old_job):
+        summary = sm.fit_and_save(job, str(tmp_path), max_iterations=10, n_live_points=25)
+        assert summary["status"] == "fitted", summary["error"]
+
+    assert fitted_models == ["dblplaw", "delayed"]
+    assert labelled_models == ["dblplaw", "delayed"]
+    _, dblplaw_metadata = sm.load_fit(str(tmp_path / "cross_calib_000.h5"))
+    assert dblplaw_metadata["sfh_model"] == "dblplaw"
+    assert dblplaw_metadata["truth_model"] == "delayed"
+    assert dblplaw_metadata["log_evidence_error"] == 0.1
+    assert dblplaw_metadata["n_live_points"] == 25
+    _, old_metadata = sm.load_fit(str(tmp_path / "123.h5"))
+    assert old_metadata["sfh_model"] == "delayed"
+    assert "truth_model" not in old_metadata
+
+
+def test_fit_and_save_fails_a_spectral_job_of_the_dblplaw_model(tmp_path, fake_fitters):
+    """Spectral fits are delayed-tau only (DPL spec, decision 1)."""
+    job = {"job_id": "spectral_dpl", "kind": "spectrum", "sfh_model": "dblplaw", "redshift": 0.1,
+           "spectrum": {"wavelength": np.arange(4000.0, 4010.0), "flux": np.ones(10), "ivar": np.ones(10)}}
+
+    summary = sm.fit_and_save(job, str(tmp_path), max_iterations=10, n_live_points=25)
+
+    assert summary["status"] == "failed"
+    assert "delayed only" in summary["error"]
+    assert fake_fitters == []
+
+
+@pytest.mark.skipif(not multinest_available(), reason="pymultinest cannot import (LD_LIBRARY_PATH?)")
+def test_fit_and_save_dblplaw_photometry_smoke_run(tmp_path):
+    """A short MultiNest run of a DPL photometry job (noiseless mock) is saved with DPL labels and its model."""
+    job = photometry_job("dpl_smoke", np.random.default_rng(38), "dblplaw")
+    summary = sm.fit_and_save(job, str(tmp_path), max_iterations=200, n_live_points=25)
+
+    assert summary["status"] == "fitted", summary["error"]
+    posterior, metadata = sm.load_fit(str(tmp_path / "dpl_smoke.h5"))
+    assert metadata["sfh_model"] == "dblplaw"
+    assert np.isfinite(metadata["log_evidence_error"])
+    for column in (*sm.MODELS["dblplaw"].training_labels, "magnitude_offset"):
+        assert column in posterior.columns, column
+        assert np.isfinite(posterior[column]).all(), column
+
+
+@pytest.mark.skipif(not multinest_available(), reason="pymultinest cannot import (LD_LIBRARY_PATH?)")
+def test_recomputed_evidence_error_agrees_with_multinest(tmp_path):
+    """sqrt(H / n_live) from the stored samples matches MultiNest's own error to a factor of 2."""
+    job = photometry_job("evidence", np.random.default_rng(37))
+    summary = sm.fit_and_save(job, str(tmp_path), max_iterations=5000, n_live_points=50)
+    assert summary["status"] == "fitted", summary["error"]
+    if not summary["converged"]:
+        pytest.skip("the short run did not converge, so its evidence is unfinished")
+    fit_file = str(tmp_path / "evidence.h5")
+    _, metadata = sm.load_fit(fit_file)
+
+    samples = sm.load_unit_cube_samples(fit_file)
+    log_likelihoods = sm.photometric_log_likelihoods(samples, 0.1, job["magnitudes"], job["errors"], "delayed")
+    recomputed = sm.evidence_error(log_likelihoods, metadata["log_evidence"], 50)
+
+    assert 0.5 < recomputed / metadata["log_evidence_error"] < 2.0
 
 
 def test_calibration_cubes_are_deterministic_and_fill_the_spectral_cube():
@@ -1111,7 +1318,7 @@ def test_calibration_coverage_without_jobs_is_nan():
 # =============================================================================
 # Superseding the results of an earlier model (spectroscopic_reference.ipynb, section 4)
 # =============================================================================
-def write_fit(path, max_iterations=sm.MAX_ITERATIONS, sfh_model=sm.SFH_MODEL):
+def write_fit(path, max_iterations=sm.MAX_ITERATIONS, sfh_model="delayed"):
     """A small fit file; sfh_model=None writes it as a 16-bin fit did, without the key."""
     metadata = {"converged": True, "run_time": 1.0, "n_iterations": 5, "max_iterations": max_iterations}
     sm.save_fit(str(path), pd.DataFrame({"log_age": [0.5]}), np.zeros((1, len(sm.SPECTRAL_DIMS))), metadata)
@@ -1138,7 +1345,7 @@ def test_supersede_moves_old_fits_with_their_folders_and_keeps_current_ones(tmp_
     write_fit(tmp_path / "current.h5")
     (tmp_path / "broken.h5").write_bytes(b"not an hdf5 file")
 
-    moved = sm.supersede_outdated_fits(str(tmp_path))
+    moved = sm.supersede_outdated_fits(str(tmp_path), "delayed")
 
     superseded = tmp_path / sm.SUPERSEDED_SUBDIRECTORY
     assert sorted(moved) == ["123", "123.h5", "456.h5", "pilot_789.h5"]
@@ -1158,7 +1365,7 @@ def test_supersede_renames_a_name_already_taken_in_superseded(tmp_path):
     write_fit(tmp_path / "123.h5", sfh_model=None)
     (tmp_path / "123").mkdir()
 
-    moved = sm.supersede_outdated_fits(str(tmp_path))
+    moved = sm.supersede_outdated_fits(str(tmp_path), "delayed")
 
     assert sorted(moved) == ["123", "123.h5"]
     assert (superseded / "123.h5").read_text() == "first-run fit"
@@ -1186,9 +1393,18 @@ def test_move_to_superseded_counts_up_when_the_suffixed_name_is_taken_too(tmp_pa
 def test_calibration_mocks_without_truths_are_not_current(tmp_path):
     """A mock file holding no mock (e.g. every photometric mock lacked detected bands) is redrawn, not reused."""
     joblib.dump(([], {}), tmp_path / sm.CALIBRATION_MOCK_FILE)
-    assert not sm.calibration_mocks_are_current(str(tmp_path / sm.CALIBRATION_MOCK_FILE))
-    write_mock_file(tmp_path / "current.joblib", sm.TRAINING_LABELS)
-    assert sm.calibration_mocks_are_current(str(tmp_path / "current.joblib"))
+    assert not sm.calibration_mocks_are_current(str(tmp_path / sm.CALIBRATION_MOCK_FILE), "delayed")
+    write_mock_file(tmp_path / "current.joblib", sm.MODELS["delayed"].training_labels)
+    assert sm.calibration_mocks_are_current(str(tmp_path / "current.joblib"), "delayed")
+
+
+def test_calibration_mocks_are_current_only_with_their_model_labels(tmp_path):
+    """A mock file is current only in a folder of the model whose calibration labels its truths carry."""
+    write_mock_file(tmp_path / "delayed.joblib", sm.MODELS["delayed"].training_labels)
+    write_mock_file(tmp_path / "dblplaw.joblib", sm.MODELS["dblplaw"].training_labels)
+    assert not sm.calibration_mocks_are_current(str(tmp_path / "delayed.joblib"), "dblplaw")
+    assert sm.calibration_mocks_are_current(str(tmp_path / "dblplaw.joblib"), "dblplaw")
+    assert not sm.calibration_mocks_are_current(str(tmp_path / "dblplaw.joblib"), "delayed")
 
 
 def test_supersede_moves_old_mocks_their_jobs_and_the_run_logs(tmp_path):
@@ -1202,7 +1418,7 @@ def test_supersede_moves_old_mocks_their_jobs_and_the_run_logs(tmp_path):
     (tmp_path / "fit_log.csv").write_text("job_id,status\ncalib_000,fitted\n")
     (tmp_path / "fit_logs").mkdir()
 
-    moved = sm.supersede_outdated_fits(str(tmp_path))
+    moved = sm.supersede_outdated_fits(str(tmp_path), "delayed")
 
     superseded = tmp_path / sm.SUPERSEDED_SUBDIRECTORY
     old_mock_job = os.path.join("jobs", "calib_000.npz")
@@ -1223,7 +1439,7 @@ def test_supersede_keeps_current_mocks_their_jobs_and_logs(tmp_path):
     write_fit(tmp_path / "calib_000.h5")
     (tmp_path / "fit_log.csv").write_text("job_id,status\ncalib_000,fitted\n")
 
-    moved = sm.supersede_outdated_fits(str(tmp_path))
+    moved = sm.supersede_outdated_fits(str(tmp_path), "delayed")
 
     assert moved == []
     assert (jobs / "calib_000.npz").exists() and (tmp_path / "fit_log.csv").exists()
@@ -1236,10 +1452,40 @@ def test_supersede_moves_jobs_of_mocks_whose_file_is_missing(tmp_path):
     jobs.mkdir()
     (jobs / "calib_004.npz").write_bytes(b"orphan job")
 
-    moved = sm.supersede_outdated_fits(str(tmp_path))
+    moved = sm.supersede_outdated_fits(str(tmp_path), "delayed")
 
     assert moved == [os.path.join("jobs", "calib_004.npz")]
-    assert sm.supersede_outdated_fits(str(tmp_path / "missing")) == []
+    assert sm.supersede_outdated_fits(str(tmp_path / "missing"), "delayed") == []
+
+
+def test_supersede_judges_each_folder_by_its_own_model(tmp_path):
+    """A DPL fit stays in photometric_fits_dblplaw and leaves photometric_fits; a delayed-tau fit the reverse."""
+    dblplaw_folder = tmp_path / "photometric_fits_dblplaw"
+    delayed_folder = tmp_path / "photometric_fits"
+    for folder in (dblplaw_folder, delayed_folder):
+        folder.mkdir()
+        write_fit(folder / "dpl.h5", sfh_model="dblplaw")
+        write_fit(folder / "delayed.h5", sfh_model="delayed")
+    write_mock_file(dblplaw_folder / sm.CALIBRATION_MOCK_FILE, sm.MODELS["dblplaw"].training_labels)
+
+    moved_dblplaw = sm.supersede_outdated_fits(str(dblplaw_folder), "dblplaw")
+    moved_delayed = sm.supersede_outdated_fits(str(delayed_folder), "delayed")
+
+    assert moved_dblplaw == ["delayed.h5"]
+    assert moved_delayed == ["dpl.h5"]
+    assert (dblplaw_folder / "dpl.h5").exists()
+    assert (dblplaw_folder / sm.CALIBRATION_MOCK_FILE).exists()    # DPL truths are current in the DPL folder
+    assert (delayed_folder / "delayed.h5").exists()
+
+
+def test_supersede_refuses_a_model_other_than_the_folder_model(tmp_path):
+    folder = tmp_path / "photometric_fits_dblplaw"
+    folder.mkdir()
+    write_fit(folder / "dpl.h5", sfh_model="dblplaw")
+
+    with pytest.raises(ValueError, match="dblplaw"):
+        sm.supersede_outdated_fits(str(folder), "delayed")
+    assert (folder / "dpl.h5").exists()
 
 
 # =============================================================================
@@ -1280,6 +1526,22 @@ def test_run_script_fits_an_exported_photometry_job(tmp_path):
     assert result.returncode == 0, result.stderr
     _, metadata = sm.load_fit(str(tmp_path / "calib_000.h5"))
     assert metadata["kind"] == "photometry"
+
+
+@pytest.mark.skipif(not multinest_available(), reason="pymultinest cannot import (LD_LIBRARY_PATH?)")
+def test_run_script_fits_an_exported_dblplaw_photometry_job(tmp_path):
+    """The worker passes the job's model and true model through to the fit file."""
+    job = photometry_job("cross_calib_000", np.random.default_rng(39), "dblplaw")
+    job["truth_model"] = "delayed"
+    sm.export_job(job, str(tmp_path / "jobs"))
+
+    result = run_script("--jobs-dir", str(tmp_path / "jobs"), "--output-dir", str(tmp_path),
+                        "--max-iterations", "200", "--n-live", "25", "--workers", "1")
+
+    assert result.returncode == 0, result.stderr
+    _, metadata = sm.load_fit(str(tmp_path / "cross_calib_000.h5"))
+    assert metadata["sfh_model"] == "dblplaw"
+    assert metadata["truth_model"] == "delayed"
 
 
 def test_run_script_status_counts_done_and_pending_jobs(tmp_path):
