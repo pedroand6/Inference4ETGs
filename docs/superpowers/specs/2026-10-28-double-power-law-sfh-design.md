@@ -29,7 +29,7 @@ The final report compares, for the two models:
    - the 33 spectral mocks.
 
    DPL is fitted to the S-PLUS aperture photometry only.
-2. **DPL prior.** The peak time is drawn the same way as the delayed-τ age: log-uniform in lookback time.
+2. **DPL prior.** The turnover time τ is drawn the same way as the delayed-τ age: log-uniform in lookback time.
 3. **The comparison reports all four parts:**
    - each model's ML against its own photometric Bagpipes;
    - delayed-τ against DPL on shared labels;
@@ -44,8 +44,8 @@ Bagpipes' `dblplaw` component:
 SFR(t) ∝ [(t/τ)^α + (t/τ)^−β]^−1
 
 - t is the time since the Big Bang.
-- τ [Gyr] is the time of the peak, also counted from the Big Bang.
-- α is the falling slope after the peak; β is the rising slope before it.
+- τ [Gyr] is the turnover time, also counted from the Big Bang. It is the SFR maximum only when α = β; in general the maximum lies at t = τ (β/α)^(1/(α+β)), and for β ≪ α the SFR may still be rising when the galaxy is observed.
+- α is the falling slope after the turnover; β is the rising slope before it.
 - Star formation starts at the Big Bang, so there is no age parameter.
 - There is one metallicity, as in the delayed-τ model.
 
@@ -54,27 +54,27 @@ SFR(t) ∝ [(t/τ)^α + (t/τ)^−β]^−1
 | Parameter | Range | Scale |
 |---|---|---|
 | `redshift` | 0.002 – 0.7 | uniform |
-| `peak_lookback` (time from the SFR peak to the observation) | 0.05 Gyr – t_max(z) = age of the Universe at z − `UNIVERSE_AGE_MARGIN` | log-uniform; drawn as a unit-interval fraction of the log range, like the delayed-τ `age` |
+| `turnover_lookback` (time from the turnover τ to the observation) | 0.05 Gyr – t_max(z) = age of the Universe at z − `UNIVERSE_AGE_MARGIN` | log-uniform; drawn as a unit-interval fraction of the log range, like the delayed-τ `age` |
 | `alpha` | 0.01 – 1000 | log-uniform (Carnall et al. 2018) |
 | `beta` | 0.01 – 1000 | log-uniform (Carnall et al. 2018) |
 | `metallicity`, `av_ism`, `tau_bc`, `logU` | as delayed-τ | as delayed-τ |
 | `log_mass_formed` | fixed at 10, then rescaled to the observed r magnitude as for delayed-τ | — |
 
-- **Bagpipes' τ:** τ = age of the Universe at z − `peak_lookback`. It is at least `UNIVERSE_AGE_MARGIN`, so it is always positive. It always lies below Bagpipes' "unphysical" limit of 1.5 × the age of the Universe.
+- **Bagpipes' τ:** τ = age of the Universe at z − `turnover_lookback`. It is at least `UNIVERSE_AGE_MARGIN`, so it is always positive. It always lies below Bagpipes' "unphysical" limit of 1.5 × the age of the Universe.
 - **Kept unchanged:** dust (CF00), nebular emission, grids, IMF, cosmology and the S-PLUS noise model are those of delayed-τ.
 
 **`DIMS`:**
-`["z", "log_peak_lookback_fraction", "log_alpha", "log_beta", "log_metallicity", "av_ism", "log_tau_bc", "logU"]`
+`["z", "log_turnover_lookback_fraction", "log_alpha", "log_beta", "log_metallicity", "av_ism", "log_tau_bc", "logU"]`
 
 `PHOTOMETRIC_DIMS` is the same list without z.
 
 **Labels:**
 - **Drawn:**
-  - `redshift`, `peak_lookback` [Gyr], `tau` [Gyr since the Big Bang];
+  - `redshift`, `turnover_lookback` [Gyr], `tau` [Gyr since the Big Bang];
   - `alpha`, `beta`, `metallicity`;
   - `av_ism`, `tau_bc`, `logU`, `log_mass_formed`.
 - **Derived:**
-  - `log_peak_lookback`, `log_alpha`, `log_beta`, `log_metallicity`;
+  - `log_turnover_lookback`, `log_alpha`, `log_beta`, `log_metallicity`;
   - `log_mstar` (from Bagpipes);
   - `log_sfr` and `log_ssfr` (the 100-Myr mean, with the floor, as in the delayed-τ amendment);
   - `mw_age`, `f_young`, `f_mid`, `f_old`.
@@ -134,7 +134,7 @@ The global `SFH_MODEL`, `DIMS` and `PHOTOMETRIC_DIMS` of `synthetic_model.py` go
 - each takes the redshift and aperture brightness of a validation galaxy (a brightness donor, as now);
 - each is noised once with `sm.add_splus_noise`.
 
-The test passes when 95% coverage is at least 0.85 for `log_peak_lookback`, `log_alpha`, `log_beta`, `log_metallicity` and `log_mstar`; 68% coverage is reported too.
+The test passes when 95% coverage is at least 0.85 for `log_turnover_lookback`, `log_alpha`, `log_beta`, `log_metallicity` and `log_mstar`; 68% coverage is reported too.
 
 **Cross-fits for the evidence test:**
 - the 33 delayed-τ photometric mocks are fitted with DPL;
@@ -152,7 +152,7 @@ The resulting 66 cheap photometric fits test whether the colours can tell the tw
 ## Part 3: DPL flow and evaluation (`ml_data.py`, `train_ml_model.py`, `ml_model.ipynb`)
 
 **Flow targets (10, in this order).**
-- log_peak_lookback, log_alpha, log_beta, log_metallicity;
+- log_turnover_lookback, log_alpha, log_beta, log_metallicity;
 - av_ism, log_tau_bc, logU;
 - log_mass_formed, log_mstar;
 - redshift.
@@ -217,7 +217,7 @@ The 604 pending delayed-τ spectral fits are independent of this work. When they
 **DPL prior map:**
 - every parameter within bounds;
 - uniform cube values give uniform log values for the log-uniform parameters;
-- `peak_lookback` never exceeds t_max(z), and τ > 0;
+- `turnover_lookback` never exceeds t_max(z), and τ > 0;
 - the Latin hypercube is stratified.
 
 **DPL derived labels:**
@@ -251,3 +251,10 @@ The 604 pending delayed-τ spectral fits are independent of this work. When they
 - Model averaging or choosing one model per galaxy in the catalogue: the evidence is reported, not used.
 - Changing any delayed-τ setting, prior or result.
 - The CNN, and hyper-parameter searches.
+
+## Amendment (2026-10-28, from the plan review)
+
+1. **Name.** The drawn parameter is `turnover_lookback`, not `peak_lookback`: τ is the SFR maximum only when α = β.
+2. **Locked test.** Notebook 2 gets a switch (`EXPORT_LOCKED_TEST_JOBS`) that exports the test-half photometric jobs of both models. It is set once, together with `RUN_LOCKED_TEST`, so the photometric and evidence comparisons also cover the test half.
+3. **Decoding cost.** Decoding DPL labels costs about 0.1 ms per sample, since it sums over Bagpipes' grid. `ml_data.decode_samples` therefore decodes blocks in parallel (`n_jobs`), and the `ml_model.ipynb` job runs with 16 cores and a 12 h limit.
+4. **Old tests.** The existing delayed-τ tests change only through the new `sfh_model` argument and the new metadata keys. Their delayed-τ assertions stay as they are.
