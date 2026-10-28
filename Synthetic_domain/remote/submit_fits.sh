@@ -5,9 +5,10 @@
 # Fits already finished in Synthetic_domain/$FITS_SUBDIR/*.h5 travel in the bundle, so a second job
 # continues where the previous one stopped instead of repeating fits.
 #
-# FITS_SUBDIR picks the set of fits: spectral_fits (the spectral fits) or photometric_fits (the photometric fits of
-# spec amendment A). The two share job ids (specobjids), so their jobs and results never mix:
-#     FITS_SUBDIR=photometric_fits Synthetic_domain/remote/submit_fits.sh
+# FITS_SUBDIR picks the set of fits: spectral_fits (the spectral fits), photometric_fits (the delayed-tau photometric
+# fits of spec amendment A) or photometric_fits_dblplaw (the double-power-law photometric fits and the cross-fits of
+# the delayed-tau mocks). They share job ids (specobjids, calib_<k>), so their jobs and results never mix:
+#     FITS_SUBDIR=photometric_fits_dblplaw Synthetic_domain/remote/submit_fits.sh
 #
 # Settings are environment variables (defaults for the full run); extra arguments go to `hljob run` as they are
 # (for example  -e SYNC_SECONDS=300).

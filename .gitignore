@@ -18,3 +18,4 @@ Synthetic_domain/ml_sfh_catalogue.parquet
 Synthetic_domain/literature/raw/
 Synthetic_domain/notebook_job_logs/
 Synthetic_domain/photometric_fits/
+Synthetic_domain/photometric_fits_dblplaw/

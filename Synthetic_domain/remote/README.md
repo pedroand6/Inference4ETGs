@@ -31,6 +31,14 @@ use the same scripts with `FITS_SUBDIR`:
 
     FITS_SUBDIR=photometric_fits Synthetic_domain/remote/submit_fits.sh
 
+The double-power-law photometric fits (section 6c of notebook 2: the DPL calibration mocks, the validation galaxies
+and the delayed-tau mocks' cross-fits `cross_calib_<k>`) have their own folder:
+
+    FITS_SUBDIR=photometric_fits_dblplaw Synthetic_domain/remote/submit_fits.sh
+
+The DPL mocks' cross-fits (fitted with delayed-tau) are exported to `photometric_fits/jobs/`, so a
+`FITS_SUBDIR=photometric_fits` run after it fits only those: the finished delayed-tau fits travel in its bundle.
+
 They share job ids (specobjids, `calib_<k>`) with the spectral fits, so they never share a folder: the
 job records its folder in `out/fits_subdir.txt`, `fetch_fits.sh` copies into that folder (and stops if a
 `FITS_SUBDIR` you set differs from it), and `sm.fit_and_save` never replaces a fit of the other kind.
@@ -212,5 +220,17 @@ Run and fetch the spectral fits (`remote/submit_fits.sh`, `remote/fetch_fits.sh 
 photometric fits (`FITS_SUBDIR=photometric_fits remote/submit_fits.sh`, `remote/fetch_fits.sh ID`) between runs 2 and
 3. **Run 3, which reads the photometric fits, must also bundle `photometric_fits`** (the
 `.h5` files and `calibration_mocks.joblib`): add `photometric_fits` to the inputs above. Without the mock file,
-cell 18 would draw new mocks whose truths differ from the fitted ones, so it stops when `calib_*.h5` fits exist
-but the mock file is missing.
+cell 18 would draw new mocks whose truths differ from the fitted ones, so it stops when `calib_*` fits (or their
+MultiNest folders) exist but the mock file is missing.
+
+**DPL runs.** The notebook-2 run that exports the DPL jobs needs `photometric_fits` in its inputs (the fits,
+`calibration_mocks.joblib` and, from then on, `cross_fit_mocks.joblib`); the run that reads the DPL fits also needs
+`photometric_fits_dblplaw`. Between the two, fit `photometric_fits_dblplaw` and then `photometric_fits` (above), and
+fetch both. The reading run writes the `phot_dblplaw_*` columns, `phot_log_evidence` and `photometric_cross_fits.csv`;
+it recomputes the evidence error of the older delayed-tau fits from their samples (a few minutes).
+
+**Locked test.** `EXPORT_LOCKED_TEST_JOBS = True` in notebook 2's parameter cell is set once, with `RUN_LOCKED_TEST` of
+`ml_model.ipynb`, after the validation results have been inspected. The export run then also writes the test-half
+galaxy jobs of both models, the two fits runs above fit them, and the reading run fills the test galaxies'
+`phot_*` and `phot_dblplaw_*` columns. Leave it True afterwards: with False, the next reading run leaves those
+columns empty for the test half again.
