@@ -49,7 +49,7 @@ def first_unit_vectors(seed, n_models):
 # =============================================================================
 @pytest.mark.skipif(not parquet_has_column(TRAINING_FILE, "age"), reason="no delayed-tau training set here")
 def test_delayed_path_regenerates_the_first_rows_of_the_stored_training_set():
-    simulated = sm.simulate_models(first_unit_vectors(TRAINING_SEED, N_TRAINING_MODELS))
+    simulated = sm.simulate_models(first_unit_vectors(TRAINING_SEED, N_TRAINING_MODELS), "delayed")
     stored = pd.read_parquet(TRAINING_FILE).head(N_REGRESSION_ROWS)
     columns = sfh.DELAYED.training_labels + sm.BANDS
 
@@ -61,7 +61,7 @@ def test_delayed_path_regenerates_the_first_rows_of_the_stored_training_set():
 @pytest.mark.skipif(not parquet_has_column(VALIDATION_FILE, "age"), reason="no delayed-tau validation set here")
 def test_delayed_path_regenerates_the_labels_of_the_stored_validation_set():
     """The stored labels are rescaled to an observed brightness: undo that with the stored magnitude offset."""
-    simulated = sm.simulate_models(first_unit_vectors(VALIDATION_SEED, N_HELD_OUT_MODELS))
+    simulated = sm.simulate_models(first_unit_vectors(VALIDATION_SEED, N_HELD_OUT_MODELS), "delayed")
     stored = pd.read_parquet(VALIDATION_FILE).head(N_REGRESSION_ROWS)
     offsets = stored["magnitude_offset"].to_numpy()
     assert np.isfinite(offsets).all()

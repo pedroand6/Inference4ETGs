@@ -13,6 +13,7 @@ import pytest
 from scipy.stats import qmc
 
 import bagpipes as pipes
+import sfh_models
 import synthetic_model as sm
 
 MIN_PLAUSIBLE_MAGNITUDE = 5.0    # [mag] AB, for 10^10 M_sun formed
@@ -173,18 +174,37 @@ def test_no_recent_star_formation_sits_on_the_sfr_floor():
 
 
 def test_summary_labels_give_every_training_label():
-    u = np.random.default_rng(6).random(len(sm.DIMS))
-    bagpipes_components, drawn = sm.components(u)
+    u = np.random.default_rng(6).random(len(sm.MODELS["delayed"].dims))
+    bagpipes_components, drawn = sm.MODELS["delayed"].components(u)
     sfh = pipes.models.star_formation_history(bagpipes_components)
-    labels = sm.summary_labels(sfh, drawn)
+    labels = sm.summary_labels(sfh, drawn, "delayed")
 
-    assert list(labels) == sm.TRAINING_LABELS
+    assert list(labels) == sm.MODELS["delayed"].training_labels
     assert all(np.isfinite(value) for value in labels.values())
     assert labels["log_mstar"] == sfh.stellar_mass
     assert np.isclose(labels["log_age"], np.log10(drawn["age"]))
     assert np.isclose(labels["log_tau"], np.log10(drawn["tau"]))
     assert np.isclose(labels["log_metallicity"], np.log10(drawn["metallicity"]))
     assert np.isclose(labels["mw_age"], sm.delayed_mass_weighted_age(drawn["age"], drawn["tau"]))
+
+
+def test_dblplaw_summary_labels_give_every_training_label():
+    dblplaw = sm.MODELS["dblplaw"]
+    u = np.random.default_rng(6).random(len(dblplaw.dims))
+    bagpipes_components, drawn = dblplaw.components(u)
+    sfh = pipes.models.star_formation_history(bagpipes_components)
+    labels = sm.summary_labels(sfh, drawn, "dblplaw")
+
+    assert list(labels) == dblplaw.training_labels
+    assert all(np.isfinite(value) for value in labels.values())
+    assert labels["log_mstar"] == sfh.stellar_mass
+    for log_label, drawn_label in dblplaw.log_labels.items():
+        assert np.isclose(labels[log_label], np.log10(drawn[drawn_label])), log_label
+    expected = sfh_models.dblplaw_labels(drawn["tau"], drawn["alpha"], drawn["beta"], drawn["redshift"],
+                                         drawn["log_mass_formed"], sfh.stellar_mass)
+    for label in sm.HISTORY_LABELS:
+        assert np.isclose(labels[label], expected[label]), label
+    assert np.isclose(labels["mw_age"], sfh.mass_weighted_age, rtol=0.01)
 
 
 def test_ab_magnitudes_are_nan_when_any_flux_is_not_positive():
@@ -194,25 +214,30 @@ def test_ab_magnitudes_are_nan_when_any_flux_is_not_positive():
     assert np.all(np.isnan(sm.ab_magnitudes(flux)))
 
 
-def test_simulated_columns_follow_training_labels_then_bands():
-    table = sm.simulate_models(np.full((2, len(sm.DIMS)), 0.5))
-    assert list(table.columns) == sm.TRAINING_LABELS + sm.BANDS
+@pytest.mark.parametrize("sfh_model", ["delayed", "dblplaw"])
+def test_simulated_columns_follow_training_labels_then_bands(sfh_model):
+    model_definition = sm.MODELS[sfh_model]
+    table = sm.simulate_models(np.full((2, len(model_definition.dims)), 0.5), sfh_model)
+    assert list(table.columns) == model_definition.training_labels + sm.BANDS
     assert np.isfinite(table[sm.BANDS].to_numpy()).all()
 
 
-def test_simulated_models_are_finite_and_their_fractions_sum_to_one():
-    unit_vectors = np.random.default_rng(2).random((4, len(sm.DIMS)))
-    models = sm.simulate_models(unit_vectors)
+@pytest.mark.parametrize("sfh_model", ["delayed", "dblplaw"])
+def test_simulated_models_are_finite_and_their_fractions_sum_to_one(sfh_model):
+    model_definition = sm.MODELS[sfh_model]
+    unit_vectors = np.random.default_rng(2).random((4, len(model_definition.dims)))
+    models = sm.simulate_models(unit_vectors, sfh_model)
 
     assert len(models) == 4
-    assert np.isfinite(models[sm.TRAINING_LABELS + sm.BANDS].to_numpy()).all()
+    assert np.isfinite(models[model_definition.training_labels + sm.BANDS].to_numpy()).all()
     assert np.allclose(models[["f_young", "f_mid", "f_old"]].sum(axis=1), 1.0)
     assert np.allclose(models["log_ssfr"], models["log_sfr"] - models["log_mstar"])
 
 
-def test_simulated_redshift_and_z_band_are_distinct_columns():
-    unit_vectors = np.random.default_rng(3).random((4, len(sm.DIMS)))
-    models = sm.simulate_models(unit_vectors)
+@pytest.mark.parametrize("sfh_model", ["delayed", "dblplaw"])
+def test_simulated_redshift_and_z_band_are_distinct_columns(sfh_model):
+    unit_vectors = np.random.default_rng(3).random((4, len(sm.MODELS[sfh_model].dims)))
+    models = sm.simulate_models(unit_vectors, sfh_model)
 
     assert models["redshift"].between(*sm.Z_RANGE).all()
     # The z band is an AB magnitude; before the fix it held the redshift (below 1)

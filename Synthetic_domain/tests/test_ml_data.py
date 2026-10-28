@@ -24,8 +24,8 @@ def parquet_has_column(path, column):
 @pytest.fixture(scope="module")
 def simulated_models():
     """Two hundred prior draws (Latin hypercube) with labels and noiseless magnitudes."""
-    unit_vectors = qmc.LatinHypercube(d=len(sm.DIMS), seed=30).random(200)
-    return sm.simulate_models(unit_vectors)
+    unit_vectors = qmc.LatinHypercube(d=len(sm.MODELS["delayed"].dims), seed=30).random(200)
+    return sm.simulate_models(unit_vectors, "delayed")
 
 
 def theta_rows(rows):

@@ -98,27 +98,35 @@ def rescale_mass_labels(table, magnitude_offset):
     return shifted
 
 
-def summary_labels(bagpipes_sfh, drawn):
-    """Every TRAINING_LABELS value of one model.
+def summary_labels(bagpipes_sfh, drawn, sfh_model):
+    """Every training label of one model of the given SFH model.
 
     Inputs: bagpipes_sfh: the model's sfh object (stellar_mass in log M_sun, living stars);
-            drawn: dict from components() with the DRAWN_LABELS (extra keys are ignored).
-    Returns: dict ordered as TRAINING_LABELS: the drawn values; log_age and log_tau [log Gyr] and
-             log_metallicity [log Z/Z_sun]; log_mstar from Bagpipes; the delayed_tau_labels values as floats.
+            drawn: dict from the model's components() with its drawn labels (extra keys are ignored);
+            sfh_model: a name in MODELS ("delayed" or "dblplaw").
+    Returns: dict ordered as MODELS[sfh_model].training_labels: the drawn values; the log labels (base-10 logs
+             of drawn values); log_mstar from Bagpipes; the HISTORY_LABELS from the analytic_labels, as floats.
     """
+    model_definition = MODELS[sfh_model]
     labels = {}
-    for label in DRAWN_LABELS:
+    for label in model_definition.drawn_labels:
         labels[label] = drawn[label]
-    labels["log_age"] = np.log10(drawn["age"])
-    labels["log_tau"] = np.log10(drawn["tau"])
-    labels["log_metallicity"] = np.log10(drawn["metallicity"])
+    for log_label, drawn_label in model_definition.log_labels.items():
+        labels[log_label] = np.log10(drawn[drawn_label])
     labels["log_mstar"] = bagpipes_sfh.stellar_mass
 
-    analytic_labels = delayed_tau_labels(drawn["age"], drawn["tau"], drawn["log_mass_formed"],
-                                         bagpipes_sfh.stellar_mass)
-    for label in ("log_sfr", "log_ssfr", "mw_age", "f_young", "f_mid", "f_old"):
-        labels[label] = float(analytic_labels[label])
-    return labels
+    # analytic_labels is vectorised: give it one-element columns
+    drawn_columns = {}
+    for label in model_definition.drawn_labels:
+        drawn_columns[label] = np.array([drawn[label]])
+    history_labels = model_definition.analytic_labels(drawn_columns, np.array([bagpipes_sfh.stellar_mass]))
+    for label in HISTORY_LABELS:
+        labels[label] = float(history_labels[label][0])
+
+    ordered_labels = {}
+    for label in model_definition.training_labels:
+        ordered_labels[label] = labels[label]
+    return ordered_labels
 
 
 def ab_magnitudes(flux_per_angstrom):
@@ -133,32 +141,34 @@ def ab_magnitudes(flux_per_angstrom):
     return -MAGNITUDES_PER_DEX * np.log10(flux_per_hertz) - AB_ZERO_POINT
 
 
-def simulate_models(unit_vectors):
-    """Labels and AB magnitudes (10^10 M_sun formed) for a block of unit-cube vectors.
+def simulate_models(unit_vectors, sfh_model):
+    """Labels and AB magnitudes (10^10 M_sun formed) for a block of unit-cube vectors of one SFH model.
 
-    Inputs: unit_vectors: iterable of unit-cube vectors (dimensionless, in [0, 1)), each ordered as DIMS.
-    Returns: DataFrame with one row per model: the TRAINING_LABELS, then the AB magnitudes [mag] in BANDS
-             order (NaN where a flux is not positive). The "z" column is the z-band magnitude, not the
+    Inputs: unit_vectors: iterable of unit-cube vectors (dimensionless, in [0, 1)), each ordered as
+            MODELS[sfh_model].dims; sfh_model: a name in MODELS ("delayed" or "dblplaw").
+    Returns: DataFrame with one row per model: the model's training_labels, then the AB magnitudes [mag] in
+             BANDS order (NaN where a flux is not positive). The "z" column is the z-band magnitude, not the
              redshift.
 
     One Bagpipes model is built and then updated: update() is ~70x faster than building a new one, and safe
     because every model has the same component set (Bagpipes fixes the components when it builds a model).
     """
+    model_definition = MODELS[sfh_model]
     model = None
     rows = []
     for u in unit_vectors:
-        bagpipes_components, drawn = components(u)
+        bagpipes_components, drawn = model_definition.components(u)
         if model is None:
             model = pipes.model_galaxy(bagpipes_components, filt_list=FILTER_FILES)
         else:
             model.update(bagpipes_components)
 
-        row = summary_labels(model.sfh, drawn)
+        row = summary_labels(model.sfh, drawn, sfh_model)
         magnitudes = ab_magnitudes(model.photometry)
         for band, magnitude in zip(BANDS, magnitudes):
             row[band] = magnitude
         rows.append(row)
-    return pd.DataFrame(rows, columns=TRAINING_LABELS + BANDS)
+    return pd.DataFrame(rows, columns=model_definition.training_labels + BANDS)
 
 
 # =============================================================================
@@ -871,7 +881,7 @@ def sample_label_row(model, bagpipes_components, drawn):
     Returns: dict: the TRAINING_LABELS in order (summary_labels), then the extra drawn parameters, then
              model_r [mag], the model r magnitude for 10^10 M_sun formed. Mass-like labels are for that mass.
     """
-    row = summary_labels(model.sfh, drawn)
+    row = summary_labels(model.sfh, drawn, SFH_MODEL)
     for key, value in drawn.items():
         if key not in row:
             row[key] = value
