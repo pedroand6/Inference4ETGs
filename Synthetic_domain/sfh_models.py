@@ -292,7 +292,8 @@ BAGPIPES_AGES, BAGPIPES_AGE_WIDTHS = bagpipes_age_grid()      # [Gyr]
 # or above the edge, which matches Bagpipes' "ages < edge"
 YOUNG_EDGE_INDEX = int(np.searchsorted(BAGPIPES_AGES, LABEL_EDGES[0]))     # f_young: grid ages below 0.1 Gyr
 OLD_EDGE_INDEX = int(np.searchsorted(BAGPIPES_AGES, LABEL_EDGES[1]))       # f_old: grid ages from 1 Gyr on
-RECENT_EDGE_INDEX = int(np.searchsorted(BAGPIPES_AGES, SFR_TIMESCALE))     # log_sfr: grid ages below 0.1 Gyr
+# log_sfr: grid ages below SFR_TIMESCALE
+RECENT_EDGE_INDEX = int(np.searchsorted(BAGPIPES_AGES, SFR_TIMESCALE))
 
 
 def bagpipes_universe_age(redshift):
