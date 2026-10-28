@@ -942,6 +942,39 @@ def safe_photometric_log_likelihood(model_magnitudes, observed_magnitudes, error
     return offset_marginal_log_likelihood(model_magnitudes, observed_magnitudes, errors, detected)[0]
 
 
+def starting_photometry_model(redshift, sfh_model):
+    """The photometry model a photometric fit starts from: built once, at the midpoint of the unit cube.
+
+    Inputs: redshift: spectroscopic redshift (dimensionless); sfh_model: "delayed" or "dblplaw".
+    Returns: a model_galaxy with the S-PLUS filters. Every point of a fit has the same component set, so the
+             model is then updated in place (photometric_point_log_likelihood).
+    """
+    midpoint_cube = np.full(len(MODELS[sfh_model].photometric_dims), MIDPOINT_DRAW)
+    starting_components, _ = photometric_components(midpoint_cube, redshift, sfh_model)
+    return updated_photometry_model(None, starting_components)
+
+
+def photometric_point_log_likelihood(model, cube, redshift, sfh_model, magnitudes, errors, detected):
+    """Log-likelihood of the photometry at one unit-cube point, as the photometric fit's sampler computes it.
+
+    Why one function: fit_photometry's likelihood and photometric_log_likelihoods (the evidence error) must
+    give the same number at the same point.
+    Inputs: model: photometry model_galaxy from starting_photometry_model, updated in place to the point;
+            cube: unit-cube point (dimensionless, in MODELS[sfh_model].photometric_dims order);
+            redshift: spectroscopic redshift (dimensionless); sfh_model: "delayed" or "dblplaw";
+            magnitudes, errors: [mag] the fitted photometry; detected: boolean mask from detected_bands.
+    Returns: log-likelihood (dimensionless), LOG_ZERO for an impossible model.
+    """
+    bagpipes_components, _ = photometric_components(cube, redshift, sfh_model)
+    # PyMultiNest calls sys.exit if the likelihood raises: a model Bagpipes cannot compute is impossible
+    try:
+        model.update(bagpipes_components)
+        model_magnitudes = ab_magnitudes(model.photometry)
+    except Exception:
+        return LOG_ZERO
+    return safe_photometric_log_likelihood(model_magnitudes, magnitudes, errors, detected)
+
+
 def fit_photometry(magnitudes, errors, redshift, sfh_model, output_basename, max_iterations,
                    n_live_points=N_LIVE_POINTS):
     """MultiNest fit of one galaxy's 12-band photometry under one SFH model's training prior at a fixed redshift.
@@ -963,28 +996,20 @@ def fit_photometry(magnitudes, errors, redshift, sfh_model, output_basename, max
         raise ValueError(f"{detected.sum()} detected bands, fewer than MIN_DETECTED_BANDS = {MIN_DETECTED_BANDS}")
 
     # 2. Bagpipes model built once with the S-PLUS filters; every point has the same component set
-    n_dims = len(MODELS[sfh_model].photometric_dims)
-    midpoint_cube = np.full(n_dims, MIDPOINT_DRAW)
-    starting_components, _ = photometric_components(midpoint_cube, redshift, sfh_model)
-    model = updated_photometry_model(None, starting_components)
+    model = starting_photometry_model(redshift, sfh_model)
 
     # 3. Likelihood of one unit-cube point
     def log_likelihood(cube):
-        """Log-likelihood of the photometry for one unit-cube point.
+        """Log-likelihood of the photometry for one unit-cube point (photometric_point_log_likelihood).
 
         Inputs: cube: unit-cube point (dimensionless, in the model's photometric_dims order).
         Returns: log-likelihood (dimensionless), LOG_ZERO for an impossible model.
         """
-        bagpipes_components, _ = photometric_components(cube, redshift, sfh_model)
-        # PyMultiNest calls sys.exit if the likelihood raises: a model Bagpipes cannot compute is impossible
-        try:
-            model.update(bagpipes_components)
-            model_magnitudes = ab_magnitudes(model.photometry)
-        except Exception:
-            return LOG_ZERO
-        return safe_photometric_log_likelihood(model_magnitudes, magnitudes, errors, detected)
+        return photometric_point_log_likelihood(model, cube, redshift, sfh_model, magnitudes, errors,
+                                                detected)
 
     # 4. MultiNest over the unit cube
+    n_dims = len(MODELS[sfh_model].photometric_dims)
     return run_multinest(log_likelihood, n_dims, output_basename, max_iterations, n_live_points)
 
 
@@ -1051,13 +1076,11 @@ def photometric_log_likelihoods(unit_cube_samples, redshift, magnitudes, errors,
     magnitudes = np.asarray(magnitudes, dtype=float)
     errors = np.asarray(errors, dtype=float)
     detected = detected_bands(magnitudes, errors)
-    model = None
+    model = starting_photometry_model(redshift, sfh_model)
     log_likelihoods = []
     for cube in thinned_samples(unit_cube_samples, max_samples):
-        bagpipes_components, _ = photometric_components(cube, redshift, sfh_model)
-        model = updated_photometry_model(model, bagpipes_components)
-        model_magnitudes = ab_magnitudes(model.photometry)
-        log_likelihoods.append(safe_photometric_log_likelihood(model_magnitudes, magnitudes, errors, detected))
+        log_likelihoods.append(photometric_point_log_likelihood(model, cube, redshift, sfh_model, magnitudes,
+                                                                errors, detected))
     return np.array(log_likelihoods)
 
 
