@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 from scipy.integrate import simpson
 from scipy.stats import chi2 as chi_squared
+from scipy.stats import qmc
 
 import bagpipes as pipes
 # The shared prior and the SFH models live in sfh_models.py. They are re-exported here, so sm.Z_RANGE,
@@ -1348,6 +1349,10 @@ MIN_COVERAGE_95 = 0.85           # smallest acceptable share of truths inside th
 CALIBRATION_LABELS = MODELS["delayed"].calibration_labels   # delayed-tau alias, removed in Task 11
 CALIBRATION_LEVELS = (0.68, 0.95)                   # central-interval probabilities reported (fractions)
 CALIBRATION_ID_PREFIX = "calib_"                    # job ids are calib_000, calib_001, ...
+CROSS_CALIBRATION_ID_PREFIX = "cross_calib_"   # cross-fit ids: cross_calib_007 is mock calib_007 fitted with the other model
+# Reference-CSV columns of each model's photometric fits: <prefix><label>_p16, <prefix>log_evidence, ...
+PHOTOMETRIC_PREFIXES = {"delayed": "phot_", "dblplaw": "phot_dblplaw_"}
+PHOTOMETRIC_EXTRA_LABELS = ["mw_age", "log_sfr"]   # summarised besides the calibration and the shared labels
 PERCENT = 100                    # percent per unit fraction
 
 
@@ -1466,12 +1471,177 @@ def calibration_coverage(posteriors, truths, labels, levels=CALIBRATION_LEVELS):
     return pd.DataFrame(rows)
 
 
+# -----------------------------------------------------------------------------
+# Photometric calibration mocks of any SFH model, and the cross-fits of the evidence test (DPL spec, part 2)
+# -----------------------------------------------------------------------------
+def draw_photometric_cubes(n_mocks, sfh_model, seed):
+    """Unit-cube points of photometric calibration mocks: a Latin hypercube over the model's photometric dims.
+
+    Why a Latin hypercube: as for the training sets, so that 33 mocks still cover every parameter range evenly.
+    Inputs: n_mocks: number of points (count); sfh_model: "delayed" or "dblplaw"; seed: Latin hypercube seed (integer).
+    Returns: array (n_mocks, len(MODELS[sfh_model].photometric_dims)), values in [0, 1) (dimensionless).
+    """
+    sampler = qmc.LatinHypercube(len(MODELS[sfh_model].photometric_dims), seed=seed)
+    return sampler.random(n_mocks)
+
+
+def noiseless_photometric_mocks(cubes, redshifts, sfh_model):
+    """Noiseless S-PLUS photometry and true labels of known photometric-fit points, for 10^10 M_sun formed.
+
+    Inputs: cubes: unit-cube points (dimensionless), shape (n_mocks, len(MODELS[sfh_model].photometric_dims));
+            redshifts: one redshift per point (dimensionless); sfh_model: "delayed" or "dblplaw".
+    Returns: (magnitudes [mag], shape (n_mocks, 12) in BANDS order, NaN where a flux is not positive;
+             truths: list of Series, one per point, as sample_label_row gives them: the model's training labels,
+             mass-like ones for 10^10 M_sun formed, and model_r [mag]).
+    """
+    magnitudes = np.zeros((len(cubes), len(BANDS)))
+    truths = []
+    model = None
+    for mock_index, cube in enumerate(cubes):
+        bagpipes_components, drawn = photometric_components(cube, redshifts[mock_index], sfh_model)
+        model = updated_photometry_model(model, bagpipes_components)
+        magnitudes[mock_index] = ab_magnitudes(model.photometry)
+        truths.append(pd.Series(sample_label_row(model, bagpipes_components, drawn, sfh_model)))
+    return magnitudes, truths
+
+
+def photometric_mock_jobs(job_ids, noiseless_magnitudes, redshifts, magnitude_offsets, truths, noise_table, rng,
+                          sfh_model):
+    """Photometry jobs of mocks at given brightness, noised once as the training data, with their true labels.
+
+    Each mock moves by its magnitude offset (observed minus model, the same in every band), then gets S-PLUS
+    errors, flux noise and non-detections (add_splus_noise); its true mass-like labels move with the offset
+    (rescale_mass_labels). A mock left with fewer than MIN_DETECTED_BANDS detected bands cannot be fitted and is
+    left out.
+    Inputs: job_ids: one id per mock (str); noiseless_magnitudes: [mag] (n_mocks, 12) in BANDS order, for
+            10^10 M_sun formed; redshifts: one per mock (dimensionless); magnitude_offsets: [mag] one per mock
+            (NaN gives a mock with no detection, so it is left out); truths: dict job_id -> Series of the true
+            labels for 10^10 M_sun formed; noise_table: output of fit_noise_model; rng: numpy Generator (only
+            add_splus_noise draws from it); sfh_model: the model the jobs are fitted with.
+    Returns: (jobs, rescaled_truths): jobs is a list of photometry job dicts as fit_and_save takes (job_id, kind,
+             sfh_model, magnitudes, errors [mag], redshift), in input order without the left-out mocks;
+             rescaled_truths maps each kept job_id to its truth at the mock's brightness.
+    """
+    offsets = np.asarray(magnitude_offsets, dtype=float)
+    scaled_magnitudes = noiseless_magnitudes + offsets[:, np.newaxis]
+    noisy_magnitudes, noisy_errors, _ = add_splus_noise(scaled_magnitudes, noise_table, rng)
+
+    jobs = []
+    rescaled_truths = {}
+    for mock_index, job_id in enumerate(job_ids):
+        detected = detected_bands(noisy_magnitudes[mock_index], noisy_errors[mock_index])
+        if detected.sum() < MIN_DETECTED_BANDS:
+            continue
+        jobs.append({"job_id": job_id, "kind": PHOTOMETRY_JOB, "sfh_model": sfh_model,
+                     "magnitudes": noisy_magnitudes[mock_index], "errors": noisy_errors[mock_index],
+                     "redshift": float(redshifts[mock_index])})
+        truth = truths[job_id].to_frame().T
+        rescaled_truths[job_id] = rescale_mass_labels(truth, offsets[mock_index]).iloc[0]
+    return jobs, rescaled_truths
+
+
+def draw_photometric_calibration_mocks(n_mocks, sfh_model, donor_redshifts, donor_r, noise_table, seed):
+    """Photometric calibration mocks from a model's prior, each at the redshift and brightness of a real galaxy.
+
+    Why a donor galaxy: the mock then has a real redshift and aperture brightness, and so realistic S-PLUS errors.
+    The unit-cube points come from draw_photometric_cubes(seed); the donors and the noise from
+    numpy.random.default_rng(seed), donors first.
+    Inputs: n_mocks: number of mocks (count); sfh_model: "delayed" or "dblplaw"; donor_redshifts: spectroscopic
+            redshifts of the candidate donors (dimensionless); donor_r: their aperture r magnitudes [mag] (a donor
+            with a non-finite r, or r at or above UNDETECTED_MAGNITUDE, is never chosen); noise_table: output of
+            fit_noise_model; seed: integer.
+    Returns: (jobs, truths) as photometric_mock_jobs returns them, with ids calib_000, calib_001, ... (a mock with
+             too few detected bands is left out, so an id can be missing); truths at the donor's brightness.
+    Raises: ValueError when no donor is usable.
+    """
+    donor_redshifts = np.asarray(donor_redshifts, dtype=float)
+    donor_r = np.asarray(donor_r, dtype=float)
+    usable = np.isfinite(donor_r) & (donor_r < UNDETECTED_MAGNITUDE) & np.isfinite(donor_redshifts)
+    if not usable.any():
+        raise ValueError("no usable brightness donor (finite redshift and detected r)")
+    usable_redshifts = donor_redshifts[usable]
+    usable_r = donor_r[usable]
+
+    # 1. Points of the prior, and one donor galaxy per mock
+    cubes = draw_photometric_cubes(n_mocks, sfh_model, seed)
+    rng = np.random.default_rng(seed)
+    donors = rng.integers(len(usable_r), size=n_mocks)
+    redshifts = usable_redshifts[donors]
+
+    # 2. Noiseless photometry for 10^10 M_sun formed, moved to the donor's r magnitude, then noised once
+    noiseless_magnitudes, truth_list = noiseless_photometric_mocks(cubes, redshifts, sfh_model)
+    magnitude_offsets = usable_r[donors] - noiseless_magnitudes[:, BANDS.index("r")]
+    job_ids = []
+    truths = {}
+    for mock_index in range(n_mocks):
+        job_id = f"{CALIBRATION_ID_PREFIX}{mock_index:03d}"
+        job_ids.append(job_id)
+        truths[job_id] = truth_list[mock_index]
+    return photometric_mock_jobs(job_ids, noiseless_magnitudes, redshifts, magnitude_offsets, truths, noise_table,
+                                 rng, sfh_model)
+
+
+def cross_fit_id(mock_id):
+    """Job id of the cross-fit of a calibration mock: calib_007 -> cross_calib_007.
+
+    Inputs: mock_id: calibration-mock id (str, CALIBRATION_ID_PREFIX followed by the three-digit index).
+    Returns: the cross-fit id (str).
+    Raises: ValueError for an id that is not a calibration-mock id.
+    """
+    if not mock_id.startswith(CALIBRATION_ID_PREFIX):
+        raise ValueError(f"{mock_id} is not a calibration-mock id ({CALIBRATION_ID_PREFIX}<k>)")
+    return CROSS_CALIBRATION_ID_PREFIX + mock_id[len(CALIBRATION_ID_PREFIX):]
+
+
+def cross_fit_jobs(mock_jobs, mock_truths, fitted_model):
+    """One model's photometric mocks as jobs fitted with the other model, for the evidence test.
+
+    Why: with the truth known, the evidence of the true model should win; if it does not, the colours cannot
+    tell the two models apart. The photometry, redshift and truth of each mock are kept unchanged.
+    Inputs: mock_jobs: photometry jobs of one model's calibration mocks (as in its mock file; a job without
+            sfh_model is delayed-tau); mock_truths: dict mock job_id -> Series of the true labels;
+            fitted_model: the model to fit them with, not the mocks' own.
+    Returns: (jobs, truths): one job per mock with job_id cross_fit_id(mock id), sfh_model = fitted_model and
+             truth_model = the mock's own model; truths maps the new ids to the mocks' truths. The input jobs are
+             not changed.
+    Raises: ValueError when a mock is already of fitted_model.
+    """
+    jobs = []
+    truths = {}
+    for mock_job in mock_jobs:
+        truth_model = job_model(mock_job)
+        if truth_model == fitted_model:
+            raise ValueError(f"{mock_job['job_id']} is a {truth_model} mock: a cross-fit uses the other model")
+        job = dict(mock_job)
+        job["job_id"] = cross_fit_id(mock_job["job_id"])
+        job["sfh_model"] = fitted_model
+        job["truth_model"] = truth_model
+        jobs.append(job)
+        truths[job["job_id"]] = mock_truths[mock_job["job_id"]]
+    return jobs, truths
+
+
+def photometric_summary_labels(sfh_model):
+    """Labels of a model's photometric fits that the reference CSV summarises.
+
+    Inputs: sfh_model: "delayed" or "dblplaw".
+    Returns: list of label names, each once: the model's calibration labels, then PHOTOMETRIC_EXTRA_LABELS, then
+             the SHARED_LABELS not listed yet (the labels the model comparison uses).
+    """
+    labels = list(MODELS[sfh_model].calibration_labels)
+    for label in [*PHOTOMETRIC_EXTRA_LABELS, *SHARED_LABELS]:
+        if label not in labels:
+            labels.append(label)
+    return labels
+
+
 # =============================================================================
 # 8. Superseding the results of an earlier model or run (spectroscopic_reference.ipynb, section 4)
 # =============================================================================
 SUPERSEDED_SUBDIRECTORY = "superseded"     # inside each fits folder: results of earlier, replaced runs
 SUPERSEDED_NAME_SUFFIX = "_16bin"          # added to a name already taken there (first-run fits, same id)
 CALIBRATION_MOCK_FILE = "calibration_mocks.joblib"   # (jobs, truths) of a fits folder's calibration mocks
+CROSS_FIT_MOCK_FILE = "cross_fit_mocks.joblib"   # (jobs, truths) of the cross-fits exported into a fits folder
 JOBS_SUBDIRECTORY = "jobs"                 # exported fit jobs, one .npz each
 RUN_LOG_NAMES = ("fit_log.csv", "fit_logs")   # logs of run_spectral_fits.py; their rows name the fits run
 # The SFH model of each fits folder: a fit of another model in it is superseded, never read
@@ -1522,6 +1692,26 @@ def calibration_mocks_are_current(mock_file, sfh_model):
     return True
 
 
+def cross_fit_mocks_are_current(mock_file, sfh_model):
+    """Whether a stored cross-fit mock file belongs to a fits folder of sfh_model and has current truths.
+
+    Inputs: mock_file: path of a joblib file with (jobs, truths) as cross_fit_jobs returns them;
+            sfh_model: the folder's model, "delayed" or "dblplaw".
+    Returns: bool: True when there is at least one job, every job is fitted with sfh_model, and every truth has
+             the calibration labels of its job's truth_model.
+    """
+    jobs, truths = joblib.load(mock_file)
+    if len(jobs) == 0:
+        return False
+    for job in jobs:
+        truth_model = job.get("truth_model")
+        if job_model(job) != sfh_model or truth_model not in MODELS or job["job_id"] not in truths:
+            return False
+        if not set(MODELS[truth_model].calibration_labels) <= set(truths[job["job_id"]].index):
+            return False
+    return True
+
+
 def supersede_outdated_fits(fits_directory, sfh_model):
     """Move every result of an earlier model or run out of a fits folder, into its SUPERSEDED_SUBDIRECTORY.
 
@@ -1532,11 +1722,13 @@ def supersede_outdated_fits(fits_directory, sfh_model):
     Moved, in this order:
       1. every readable .h5 fit that fails fit_is_current(metadata, sfh_model), with its MultiNest folder (the
          name without .h5); an unreadable .h5 stays, because fit_and_save fits that job again;
-      2. CALIBRATION_MOCK_FILE when its truths lack the model's calibration labels (16-bin mocks) or it holds none;
-      3. while no mock file is left, the jobs/calib_*.npz files, which then belong to no current mock;
+      2. CALIBRATION_MOCK_FILE when its truths lack the model's calibration labels (16-bin mocks) or it holds none,
+         and CROSS_FIT_MOCK_FILE when cross_fit_mocks_are_current says it does not belong here;
+      3. while no mock file is left, the jobs/calib_*.npz files, which then belong to no current mock, and while
+         no cross-fit mock file is left, the jobs/cross_calib_*.npz files;
       4. when any fit moved, the run logs RUN_LOG_NAMES (notebook 2 reads failures from them, and
          fetch_fits.sh drops new rows of ids already logged).
-    Inputs: fits_directory: folder with the .h5 fits, jobs/ and the mock file (str); a missing folder is fine;
+    Inputs: fits_directory: folder with the .h5 fits, jobs/ and the mock files (str); a missing folder is fine;
             sfh_model: the folder's model, "delayed" or "dblplaw".
     Returns: list of the moved names (str), relative to fits_directory; empty when everything is current.
     Raises: ValueError when the folder is one of FIT_FOLDER_MODELS and sfh_model is not its model.
@@ -1563,20 +1755,30 @@ def supersede_outdated_fits(fits_directory, sfh_model):
                 moved.append(fit_name)
     fits_were_moved = len(moved) > 0
 
-    # 2. Calibration mocks of an earlier model
+    # 2. Mock files of an earlier model, or made for the other folder
     mock_file = os.path.join(fits_directory, CALIBRATION_MOCK_FILE)
     if os.path.exists(mock_file) and not calibration_mocks_are_current(mock_file, sfh_model):
         move_to_superseded(fits_directory, CALIBRATION_MOCK_FILE)
         moved.append(CALIBRATION_MOCK_FILE)
+    cross_mock_file = os.path.join(fits_directory, CROSS_FIT_MOCK_FILE)
+    if os.path.exists(cross_mock_file) and not cross_fit_mocks_are_current(cross_mock_file, sfh_model):
+        move_to_superseded(fits_directory, CROSS_FIT_MOCK_FILE)
+        moved.append(CROSS_FIT_MOCK_FILE)
 
     # 3. Job files of mocks that no stored mock file holds (the notebook stores mocks before exporting them)
+    orphan_prefixes = []
+    if not os.path.exists(mock_file):
+        orphan_prefixes.append(CALIBRATION_ID_PREFIX)
+    if not os.path.exists(cross_mock_file):
+        orphan_prefixes.append(CROSS_CALIBRATION_ID_PREFIX)
     jobs_directory = os.path.join(fits_directory, JOBS_SUBDIRECTORY)
-    if not os.path.exists(mock_file) and os.path.isdir(jobs_directory):
+    if os.path.isdir(jobs_directory):
         for name in sorted(os.listdir(jobs_directory)):
-            if name.startswith(CALIBRATION_ID_PREFIX):
-                job_name = os.path.join(JOBS_SUBDIRECTORY, name)
-                move_to_superseded(fits_directory, job_name)
-                moved.append(job_name)
+            for prefix in orphan_prefixes:
+                if name.startswith(prefix):
+                    job_name = os.path.join(JOBS_SUBDIRECTORY, name)
+                    move_to_superseded(fits_directory, job_name)
+                    moved.append(job_name)
 
     # 4. Run logs of the moved fits
     if fits_were_moved:

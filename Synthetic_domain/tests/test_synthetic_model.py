@@ -1315,6 +1315,129 @@ def test_calibration_coverage_without_jobs_is_nan():
     assert (table["n_jobs"] == 0).all()
 
 
+NOISE_MODEL_FILE = "splus_noise_model.csv"    # the stored S-PLUS error model (training_set.ipynb)
+
+
+def test_photometric_cubes_are_a_seeded_latin_hypercube():
+    cubes = sm.draw_photometric_cubes(33, "dblplaw", seed=2)
+
+    assert cubes.shape == (33, len(sm.MODELS["dblplaw"].photometric_dims))
+    assert np.array_equal(cubes, sm.draw_photometric_cubes(33, "dblplaw", seed=2))
+    for column in cubes.T:    # one point in each of the 33 strata of every coordinate
+        assert sorted(np.floor(column * 33).astype(int)) == list(range(33))
+
+
+def test_noiseless_photometric_mocks_give_the_photometry_and_truth_of_each_point():
+    cubes = np.random.default_rng(42).random((2, len(sm.MODELS["dblplaw"].photometric_dims)))
+    redshifts = np.array([0.1, 0.2])
+
+    magnitudes, truths = sm.noiseless_photometric_mocks(cubes, redshifts, "dblplaw")
+
+    assert magnitudes.shape == (2, len(sm.BANDS))
+    assert np.isfinite(magnitudes).all()
+    for mock_index, truth in enumerate(truths):
+        for label in (*sm.MODELS["dblplaw"].training_labels, "model_r"):
+            assert label in truth.index, label
+        assert truth["redshift"] == redshifts[mock_index]
+        assert truth["model_r"] == magnitudes[mock_index, sm.BANDS.index("r")]
+        _, drawn = sm.photometric_components(cubes[mock_index], redshifts[mock_index], "dblplaw")
+        assert truth["alpha"] == drawn["alpha"]
+
+
+def test_photometric_mock_jobs_move_the_truths_with_the_brightness_and_leave_out_undetected_mocks():
+    noise_table = pd.read_csv(NOISE_MODEL_FILE)
+    noiseless = np.full((2, len(sm.BANDS)), 18.0)
+    truths = {}
+    for job_id in ("m0", "m1"):
+        truths[job_id] = pd.Series({"log_mass_formed": 10.0, "log_mstar": 9.8, "log_sfr": -1.0, "mw_age": 5.0})
+    offsets = np.array([1.0, np.nan])     # m1 has no brightness donor: nothing is detected
+
+    jobs, rescaled = sm.photometric_mock_jobs(["m0", "m1"], noiseless, np.array([0.1, 0.2]), offsets, truths,
+                                              noise_table, np.random.default_rng(40), "dblplaw")
+    repeat_jobs, _ = sm.photometric_mock_jobs(["m0", "m1"], noiseless, np.array([0.1, 0.2]), offsets, truths,
+                                              noise_table, np.random.default_rng(40), "dblplaw")
+
+    assert [job["job_id"] for job in jobs] == ["m0"]
+    job = jobs[0]
+    assert job["kind"] == sm.PHOTOMETRY_JOB and job["sfh_model"] == "dblplaw" and job["redshift"] == 0.1
+    detected = sm.detected_bands(job["magnitudes"], job["errors"])
+    assert detected.sum() >= sm.MIN_DETECTED_BANDS
+    assert np.allclose(job["magnitudes"][detected], 19.0, atol=0.5)
+    assert np.array_equal(job["magnitudes"], repeat_jobs[0]["magnitudes"], equal_nan=True)
+    assert set(rescaled) == {"m0"}
+    assert np.isclose(rescaled["m0"]["log_mstar"], 9.8 - sm.DEX_PER_MAGNITUDE)
+    assert np.isclose(rescaled["m0"]["log_mass_formed"], 10.0 - sm.DEX_PER_MAGNITUDE)
+    assert rescaled["m0"]["mw_age"] == 5.0
+
+
+def test_draw_photometric_calibration_mocks_take_a_donor_redshift_and_brightness():
+    noise_table = pd.read_csv(NOISE_MODEL_FILE)
+    donor_redshifts = np.array([0.05, 0.1, 0.15])
+    donor_r = np.array([16.0, 17.0, 99.0])    # the third galaxy is undetected in r: never a donor
+    donor_r_by_redshift = {0.05: 16.0, 0.1: 17.0}
+
+    jobs, truths = sm.draw_photometric_calibration_mocks(3, "dblplaw", donor_redshifts, donor_r, noise_table, 41)
+    repeat_jobs, _ = sm.draw_photometric_calibration_mocks(3, "dblplaw", donor_redshifts, donor_r, noise_table, 41)
+
+    assert len(jobs) >= 1
+    assert {job["job_id"] for job in jobs} <= {"calib_000", "calib_001", "calib_002"}
+    assert set(truths) == {job["job_id"] for job in jobs}
+    for job, repeat in zip(jobs, repeat_jobs):
+        assert job["redshift"] in donor_r_by_redshift
+        assert job["sfh_model"] == "dblplaw"
+        truth = truths[job["job_id"]]
+        offset = donor_r_by_redshift[job["redshift"]] - truth["model_r"]
+        assert np.isclose(truth["log_mass_formed"], sm.LOG_MASS_FORMED - sm.DEX_PER_MAGNITUDE * offset)
+        for label in sm.MODELS["dblplaw"].calibration_labels:
+            assert np.isfinite(truth[label]), label
+        assert np.array_equal(job["magnitudes"], repeat["magnitudes"], equal_nan=True)
+
+
+def test_calibration_coverage_runs_on_the_dblplaw_labels():
+    """Truth = one posterior sample: every DPL calibration label has one usable mock and a finite coverage."""
+    cubes = np.random.default_rng(43).random((3, len(sm.MODELS["dblplaw"].photometric_dims)))
+    magnitudes, _ = sm.noiseless_photometric_mocks(cubes[:1], np.array([0.1]), "dblplaw")
+    posterior = sm.photometric_posterior_labels(cubes, 0.1, magnitudes[0], np.full(len(sm.BANDS), 0.05),
+                                                np.random.default_rng(44), "dblplaw")
+    labels = sm.MODELS["dblplaw"].calibration_labels
+
+    table = sm.calibration_coverage({"calib_000": posterior}, {"calib_000": posterior.iloc[1]}, labels)
+
+    assert list(table["label"].unique()) == labels
+    assert (table["n_jobs"] == 1).all()
+    assert table["coverage"].notna().all()
+
+
+def test_cross_fit_jobs_fit_one_model_s_mocks_with_the_other():
+    mock_jobs = [{"job_id": "calib_000", "kind": "photometry", "magnitudes": np.full(12, 20.0),
+                  "errors": np.full(12, 0.05), "redshift": 0.1}]        # stored before jobs named their model
+    mock_truths = {"calib_000": pd.Series({"log_age": 0.5})}
+
+    jobs, truths = sm.cross_fit_jobs(mock_jobs, mock_truths, "dblplaw")
+
+    assert [job["job_id"] for job in jobs] == ["cross_calib_000"]
+    assert jobs[0]["sfh_model"] == "dblplaw"
+    assert jobs[0]["truth_model"] == "delayed"
+    assert np.array_equal(jobs[0]["magnitudes"], mock_jobs[0]["magnitudes"])
+    assert truths["cross_calib_000"] is mock_truths["calib_000"]
+    assert "sfh_model" not in mock_jobs[0]     # the mock jobs are left alone
+    with pytest.raises(ValueError, match="other model"):
+        sm.cross_fit_jobs(mock_jobs, mock_truths, "delayed")
+    assert sm.cross_fit_id("calib_007") == "cross_calib_007"
+    with pytest.raises(ValueError):
+        sm.cross_fit_id("10311134961714089984")
+
+
+def test_photometric_summary_labels_and_prefixes():
+    assert sm.photometric_summary_labels("delayed") == [
+        "log_age", "log_tau", "log_metallicity", "log_mstar", "mw_age", "log_sfr",
+        "av_ism", "log_ssfr", "f_young", "f_mid", "f_old"]
+    assert sm.photometric_summary_labels("dblplaw") == [
+        "log_turnover_lookback", "log_alpha", "log_beta", "log_metallicity", "log_mstar", "mw_age", "log_sfr",
+        "av_ism", "log_ssfr", "f_young", "f_mid", "f_old"]
+    assert sm.PHOTOMETRIC_PREFIXES == {"delayed": "phot_", "dblplaw": "phot_dblplaw_"}
+
+
 # =============================================================================
 # Superseding the results of an earlier model (spectroscopic_reference.ipynb, section 4)
 # =============================================================================
@@ -1486,6 +1609,43 @@ def test_supersede_refuses_a_model_other_than_the_folder_model(tmp_path):
     with pytest.raises(ValueError, match="dblplaw"):
         sm.supersede_outdated_fits(str(folder), "delayed")
     assert (folder / "dpl.h5").exists()
+
+
+def write_cross_mock_file(path, fitted_model, truth_model):
+    """A cross-fit mock file as the notebook stores it: (jobs, truths) of one cross_calib_000 job."""
+    job = {"job_id": "cross_calib_000", "kind": "photometry", "sfh_model": fitted_model, "truth_model": truth_model}
+    labels = sm.MODELS[truth_model].training_labels
+    joblib.dump(([job], {"cross_calib_000": pd.Series(np.zeros(len(labels)), index=labels)}), path)
+
+
+def test_cross_fit_mocks_are_current_only_in_a_folder_of_their_fitted_model(tmp_path):
+    path = tmp_path / sm.CROSS_FIT_MOCK_FILE
+    write_cross_mock_file(path, "delayed", "dblplaw")
+    assert sm.cross_fit_mocks_are_current(str(path), "delayed")
+    assert not sm.cross_fit_mocks_are_current(str(path), "dblplaw")
+    joblib.dump(([], {}), path)
+    assert not sm.cross_fit_mocks_are_current(str(path), "delayed")
+
+
+def test_supersede_moves_cross_jobs_only_without_a_current_cross_mock_file(tmp_path):
+    """Current cross mocks, their jobs and fits stay; cross mocks made for the other folder go, with their jobs."""
+    folder = tmp_path / "photometric_fits"
+    jobs = folder / "jobs"
+    jobs.mkdir(parents=True)
+    (jobs / "cross_calib_000.npz").write_bytes(b"cross job")
+    (jobs / "calib_000.npz").write_bytes(b"mock job")
+    write_mock_file(folder / sm.CALIBRATION_MOCK_FILE, sm.MODELS["delayed"].training_labels)
+    write_cross_mock_file(folder / sm.CROSS_FIT_MOCK_FILE, "delayed", "dblplaw")
+    write_fit(folder / "cross_calib_000.h5")       # a delayed-tau fit of a DPL mock: current in this folder
+
+    assert sm.supersede_outdated_fits(str(folder), "delayed") == []
+
+    write_cross_mock_file(folder / sm.CROSS_FIT_MOCK_FILE, "dblplaw", "delayed")   # made for the other folder
+    moved = sm.supersede_outdated_fits(str(folder), "delayed")
+
+    assert sorted(moved) == sorted([sm.CROSS_FIT_MOCK_FILE, os.path.join("jobs", "cross_calib_000.npz")])
+    assert (jobs / "calib_000.npz").exists()
+    assert (folder / "cross_calib_000.h5").exists()
 
 
 # =============================================================================
