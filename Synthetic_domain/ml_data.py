@@ -288,6 +288,7 @@ def simulate_observations(table, catalogue_r, catalogue_z, noise_table, rng, sfh
     observations["targets"] = encode_targets(labels, sfh_model)
     return observations
 
+
 def validation_observations(held_out, mode, rng, sfh_model):
     """Inputs and targets of a held-out set whose noise is already fixed (synthetic_validation/test).
 
@@ -320,6 +321,7 @@ def validation_observations(held_out, mode, rng, sfh_model):
     observations["valid"] = observations["valid"] & np.isfinite(held_out["magnitude_offset"].to_numpy())
     observations["targets"] = encode_targets(labels, sfh_model)
     return observations
+
 
 # =============================================================================
 # 5. Standardisation
