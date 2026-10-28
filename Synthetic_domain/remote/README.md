@@ -170,11 +170,14 @@ catalogue and rewritten, so the `splus_noise_model.csv` sent below is only overw
 
 `SFH_MODELS` in the parameter cell lists the models to build. A model whose three set files exist in the job is
 skipped (`REBUILD_SETS = False`), so a model's stored sets travel only to be kept. The run that made the
-double-power-law sets (`*_dblplaw.parquet`, commit 623cd5c) added `training_set.parquet synthetic_validation.parquet
-synthetic_test.parquet` to the inputs above, and the delayed-tau sets were kept.
+double-power-law sets (`*_dblplaw.parquet`, commit 623cd5c) added `training_set.parquet
+synthetic_validation.parquet synthetic_test.parquet` to the inputs above, and the delayed-tau sets were kept.
 
-The delayed-tau run took 12 min (2^19 + 2 x 2^14 Bagpipes models and the coverage test) with a 6.2 GB memory peak. With the script
-defaults (8 cores, 16000 MB, 4 h) the notebook uses `N_JOBS=7` workers (one core is left for the main process).
+The delayed-tau run took 12 min (2^19 + 2 x 2^14 Bagpipes models and the coverage test) with a 6.2 GB memory peak.
+The notebook takes its worker count from the environment variable `N_JOBS` (default 7, for 8 cores); on 16 cores
+pass it through hljob. The server refuses more than 7168 MB per job, so run it with
+`HLJOB_OPTIONS="--pause-llm -e N_JOBS=15" CORES=16 MEMORY_MB=7100`. (The DPL run, job 2af348, took 16 min with
+the default 7 workers.)
 It writes `training_set.parquet` (125 MB), `synthetic_validation.parquet` and
 `synthetic_test.parquet` (6 MB each), `splus_noise_model.csv` and the two figures, and `fetch_notebook.sh` brings
 back every file it wrote. The parquet files are git-ignored and reproducible from the seeds; the CSV and the
