@@ -1393,6 +1393,29 @@ def test_draw_photometric_calibration_mocks_take_a_donor_redshift_and_brightness
         assert np.array_equal(job["magnitudes"], repeat["magnitudes"], equal_nan=True)
 
 
+def test_calibration_mock_donors_are_independent_of_the_latin_hypercube(monkeypatch):
+    """With one shared seed, mock 1's donor tracked mock 0's first-coordinate jitter (correlation 0.99999)."""
+    n_mocks, n_donors = 33, 200
+    captured = {}
+
+    def recorded_noiseless_mocks(cubes, redshifts, sfh_model):
+        captured["cubes"], captured["redshifts"] = cubes, redshifts
+        truths = [pd.Series({**dict.fromkeys(sm.MASS_DEPENDENT_LABELS, 10.0), "model_r": 18.0}) for _ in cubes]
+        return np.full((len(cubes), len(sm.BANDS)), 18.0), truths
+
+    monkeypatch.setattr(sm, "noiseless_photometric_mocks", recorded_noiseless_mocks)
+    noise_table = pd.read_csv(NOISE_MODEL_FILE)
+    donor_redshifts = np.arange(n_donors) / 1000    # the redshift gives back the donor index
+    donor_r = np.full(n_donors, 17.0)
+    donor_fractions, jitters = [], []
+    for seed in range(200):
+        sm.draw_photometric_calibration_mocks(n_mocks, "dblplaw", donor_redshifts, donor_r, noise_table, seed)
+        donor_fractions.append(np.rint(captured["redshifts"][1] * 1000) / n_donors)
+        jitters.append(1 - np.modf(n_mocks * captured["cubes"][0, 0])[0])
+
+    assert abs(np.corrcoef(donor_fractions, jitters)[0, 1]) < 0.3
+
+
 def test_calibration_coverage_runs_on_the_dblplaw_labels():
     """Truth = one posterior sample: every DPL calibration label has one usable mock and a finite coverage."""
     cubes = np.random.default_rng(43).random((3, len(sm.MODELS["dblplaw"].photometric_dims)))
