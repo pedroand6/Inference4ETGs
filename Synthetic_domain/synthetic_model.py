@@ -1079,8 +1079,13 @@ def fit_evidence(fit_file, job):
     Inputs: fit_file: path of a photometric fit (str); job: its photometry job (magnitudes and errors [mag],
             the photometry the fit used).
     Returns: (log_evidence, log_evidence_error), dimensionless floats.
+    Raises: ValueError when the fit's kind is not PHOTOMETRY_JOB (a fit stored without a kind is spectral):
+            its error could not be recomputed with the photometric likelihood.
     """
     _, metadata = load_fit(fit_file)
+    stored_kind = metadata.get("kind", SPECTRUM_JOB)
+    if stored_kind != PHOTOMETRY_JOB:
+        raise ValueError(f"{fit_file} is not a photometric fit (kind {stored_kind!r})")
     if "log_evidence_error" in metadata:
         return float(metadata["log_evidence"]), float(metadata["log_evidence_error"])
     samples = load_unit_cube_samples(fit_file)

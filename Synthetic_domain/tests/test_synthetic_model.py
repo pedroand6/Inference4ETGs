@@ -980,6 +980,21 @@ def test_fit_evidence_reads_the_stored_error_or_recomputes_it(tmp_path, monkeypa
     assert np.isclose(log_evidence_error, np.sqrt(3 / sm.N_LIVE_POINTS))
 
 
+def test_fit_evidence_refuses_a_fit_that_is_not_photometric(tmp_path):
+    """A spectral fit, or one stored without a kind (so spectral), has no photometric likelihood."""
+    posterior = pd.DataFrame({"log_age": [0.5]})
+    metadata = {"converged": True, "run_time": 1.0, "n_iterations": 5, "max_iterations": sm.MAX_ITERATIONS,
+                "log_evidence": -5.0, "log_evidence_error": 0.25, "redshift": 0.1}
+    samples = np.zeros((1, len(sm.SPECTRAL_DIMS)))
+    sm.save_fit(str(tmp_path / "spectrum.h5"), posterior, samples, dict(metadata, kind="spectrum"))
+    sm.save_fit(str(tmp_path / "no_kind.h5"), posterior, samples, metadata)
+    job = {"magnitudes": np.full(12, 20.0), "errors": np.full(12, 0.05), "redshift": 0.1}
+
+    for name in ("spectrum.h5", "no_kind.h5"):
+        with pytest.raises(ValueError, match="not a photometric fit"):
+            sm.fit_evidence(str(tmp_path / name), job)
+
+
 # =============================================================================
 # Job files and the calibration test
 # =============================================================================

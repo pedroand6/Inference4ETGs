@@ -103,7 +103,7 @@ Inference4ETGs/
     │                                 the `agreement_verdict` of the "works" test, model comparison and evidence
     ├── train_ml_model.py             training CLI (--sfh-model delayed|dblplaw; --embedding mlp, the default),
     │                                 run on the PC GPU
-    ├── tests/                        pytest suite (264 tests) for every module above
+    ├── tests/                        pytest suite (265 tests) for every module above
     ├── pytest.ini                    test paths and warning filters
     ├── remote/                       scripts that run heavy work as hljob jobs on the PC (see §7)
     ├── splus-filters/                the 12 S-PLUS filter curves
@@ -344,7 +344,7 @@ Note that `spectroscopic_reference.csv` stores `specobjid` as text. Read it with
 
 - `.venv/` holds Python 3.10 with [`requirements.txt`](requirements.txt) (Bagpipes 1.3.5, PyMultiNest, torch 2.5.1, zuko 1.2.0, …). The MultiNest shared library is built into `.venv/lib`.
 - The Jupyter kernel **"Inference4ETGs (MultiNest)"** (`inference4etgs`) runs `.venv/bin/python` with `LD_LIBRARY_PATH=.../.venv/lib`, so PyMultiNest loads. Select it when you open a notebook.
-- Run the tests (264 tests, CPU, about 4 to 6 minutes; without `LD_LIBRARY_PATH` the MultiNest tests are skipped; the two tests that read the generated parquet sets run now that the delayed-tau sets exist, and skip with a reason if 16-bin sets are put back):
+- Run the tests (265 tests, CPU, about 4 to 6 minutes; without `LD_LIBRARY_PATH` the MultiNest tests are skipped; the two tests that read the generated parquet sets run now that the delayed-tau sets exist, and skip with a reason if 16-bin sets are put back):
 
   ```bash
   cd Synthetic_domain && LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python -m pytest tests -q
