@@ -263,3 +263,28 @@ it recomputes the evidence error of the older delayed-tau fits from their sample
 galaxy jobs of both models, the two fits runs above fit them, and the reading run fills the test galaxies'
 `phot_*` and `phot_dblplaw_*` columns. Leave it True afterwards: with False, the next reading run leaves those
 columns empty for the test half again.
+
+**DPL spectral runs (DPL spec, amendment 2).** Section 6d of notebook 2 exports `spectral_fits_dblplaw/jobs/`
+and `spectral_fits_dblplaw/calibration_mocks.joblib` in every run; the first run that has it draws the mocks.
+From then on, every notebook-2 run must bundle `spectral_fits_dblplaw` (the mock file and the fits) and
+`skipped_fit_jobs_dblplaw.txt`. A run without them does not fail: section 6d draws throw-away mocks
+(`fetch_notebook.sh` keeps the local ones) and leaves the `spec_dblplaw_*` columns empty. Between the export and
+the reading run, fit `spectral_fits_dblplaw` (above) and fetch it. The reading run writes the `spec_dblplaw_*`
+columns, and section 6 writes `spec_log_evidence` and `spec_log_evidence_error` of the delayed-tau spectral fits.
+Before the first export, make the empty folder (`mkdir -p spectral_fits_dblplaw`): the bundle stops on a missing
+input. From then on every notebook-2 run uses this command, with all four fit folders and both skip lists:
+
+    cd Synthetic_domain
+    EXCLUDE_NAMES="superseded pilot jobs" FLOAT32_FILES=training_set.parquet remote/submit_notebook.sh \
+        spectroscopic_reference.ipynb dr3_corrected.csv ../Data/sdss_eboss_firefly-dr16_slim.fits \
+        ../dustMaps/csfd training_set.parquet spectra spectral_fits spectral_fits_dblplaw photometric_fits \
+        photometric_fits_dblplaw skipped_fit_jobs.txt skipped_fit_jobs_dblplaw.txt splus_aperture_photometry.csv \
+        splus_noise_model.csv spectroscopic_reference.csv literature
+    remote/fetch_notebook.sh ID
+
+Notebook 2 reads no `jobs/` folder (it exports every job again), so `jobs` in `EXCLUDE_NAMES` keeps all the
+`jobs/` folders out of the bundle (about 80 MB: 39 MB per spectral jobs folder); `fetch_notebook.sh` brings back
+the jobs the run exported and still keeps the local `calib_*.npz`. The bundle is still large: 1.5 GB on
+2026-10-29 with 788 delayed-tau spectral fits and no DPL spectral folder (`spectra/` 1.4 GB, the CSFD map
+289 MB), and about 2 GB once both spectral folders are finished (about 300 MB of fits each). That is close to
+hljobd's 3 GB limit, so check it first with `BUNDLE_ONLY=<folder>` in front of the same command.
