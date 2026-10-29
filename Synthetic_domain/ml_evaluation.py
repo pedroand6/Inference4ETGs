@@ -37,6 +37,7 @@ DBLPLAW_MODEL = "dblplaw"                    # favoured by ln B <= -INCONCLUSIVE
 NO_MODEL = "neither"                         # an inconclusive ln B favours no model
 TRUTH_SIGNS = {DELAYED_MODEL: 1.0, DBLPLAW_MODEL: -1.0}   # sign of ln B that favours each true model
 ALL_MOCKS_ROW = "all"                        # true_model_recovery row over every mock
+FAVOURED_MODEL_ORDER = [DELAYED_MODEL, NO_MODEL, DBLPLAW_MODEL]   # order of favoured_model_crosstab
 
 
 # =============================================================================
@@ -160,7 +161,9 @@ def reference_comparison_rows(ml_posteriors, galaxies, labels, prefix=""):
     One helper for both reference sets, so the spectral and photometric verdicts use the same ML draws.
     Inputs: ml_posteriors: dict label -> ML samples (n, m), rows in the order of galaxies;
             galaxies: DataFrame (n rows) with specobjid and {prefix}<label>_p16/_median/_p84;
-            labels: the labels to compare; prefix: "" (spectral fits) or "phot_" (photometric fits).
+            labels: the labels to compare; prefix: a spectral prefix (sm.SPECTRAL_PREFIXES: "" for the
+            delayed-tau spectral fits, "spec_dblplaw_" for the DPL ones) or a photometric one
+            (sm.PHOTOMETRIC_PREFIXES: "phot_", "phot_dblplaw_").
     Returns: list of dicts with label, specobjid, offset_in_widths, inside_68 and inside_95
              (as compare_with_spectral), labels outer and galaxies inner.
     """
@@ -271,7 +274,8 @@ def summary_comparison_rows(galaxies, labels, estimate_prefix, reference_prefix=
     """reference_comparison_rows for an estimate stored as percentiles (e.g. a photometric Bagpipes fit).
 
     Inputs: galaxies: DataFrame with specobjid, the estimate's {estimate_prefix}<label>_p16/_median/_p84
-            columns and the reference's {reference_prefix}<label>_* columns (by default the spectral fit's);
+            columns and the reference's {reference_prefix}<label>_* columns (by default the delayed-tau
+            spectral fit's; "spec_dblplaw_" for the DPL spectral fit's);
             labels: the labels to compare.
     Returns: list of dicts with label, specobjid, offset_in_widths, inside_68 and inside_95, labels outer and
              galaxies inner. A galaxy missing any of the six percentiles of a label (the estimate's or the
@@ -465,6 +469,53 @@ def evidence_category_fractions(log_bayes):
         rows.append({"favoured_model": model, "strength": strength, "n_galaxies": n_galaxies,
                      "fraction": fraction})
     return pd.DataFrame(rows)
+
+
+def log_bayes_sign_agreement(first_log_bayes, second_log_bayes):
+    """How often two ln B of the same galaxies point the same way (e.g. photometric against spectral).
+
+    Inputs: first_log_bayes, second_log_bayes: arrays (n,) of ln B [nats], paired by galaxy (positive favours
+            delayed-tau). A galaxy with either ln B NaN is left out.
+    Returns: dict with
+             - n_galaxies: galaxies with both ln B finite (count);
+             - same_sign: share of them whose two ln B have the same sign (a ln B of exactly 0 matches only
+               another 0);
+             - same_favoured_model: share of them whose two ln B favour the same model (favoured_model; two
+               inconclusive ln B both favour NO_MODEL, so they count as the same).
+             The shares are NaN without galaxies.
+    """
+    first = np.asarray(first_log_bayes, dtype=float)
+    second = np.asarray(second_log_bayes, dtype=float)
+    usable = np.isfinite(first) & np.isfinite(second)
+    n_galaxies = int(usable.sum())
+    if n_galaxies == 0:
+        return {"n_galaxies": 0, "same_sign": np.nan, "same_favoured_model": np.nan}
+    same_sign = np.sign(first[usable]) == np.sign(second[usable])
+    same_favoured_model = favoured_model(first[usable]) == favoured_model(second[usable])
+    return {"n_galaxies": n_galaxies, "same_sign": float(np.mean(same_sign)),
+            "same_favoured_model": float(np.mean(same_favoured_model))}
+
+
+def favoured_model_crosstab(first_log_bayes, second_log_bayes):
+    """Counts of galaxies by the model each of two ln B favours (e.g. photometric against spectral).
+
+    Inputs: first_log_bayes, second_log_bayes: arrays (n,) of ln B [nats], paired by galaxy. A galaxy with
+            either ln B NaN is left out.
+    Returns: DataFrame of counts, 3 x 3: rows (index name "first") are the model the first ln B favours,
+             columns (name "second") the model the second favours, both in FAVOURED_MODEL_ORDER
+             (favoured_model: DELAYED_MODEL, NO_MODEL for an inconclusive ln B, DBLPLAW_MODEL). An empty
+             cell is 0.
+    """
+    first = np.asarray(first_log_bayes, dtype=float)
+    second = np.asarray(second_log_bayes, dtype=float)
+    usable = np.isfinite(first) & np.isfinite(second)
+    first_models = favoured_model(first[usable])
+    second_models = favoured_model(second[usable])
+    counts = pd.DataFrame(0, index=pd.Index(FAVOURED_MODEL_ORDER, name="first"),
+                          columns=pd.Index(FAVOURED_MODEL_ORDER, name="second"))
+    for first_model, second_model in zip(first_models, second_models):
+        counts.loc[first_model, second_model] += 1
+    return counts
 
 
 def true_model_recovery(cross_fits):

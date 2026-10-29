@@ -373,3 +373,32 @@ def test_true_model_recovery_without_mocks_is_nan():
     recovery = ev.true_model_recovery(cross_fit_table([], []))
     assert (recovery["n_mocks"] == 0).all()
     assert recovery["prefers_truth"].isna().all()
+
+
+def test_log_bayes_sign_agreement_of_a_hand_made_table():
+    photometric = np.array([2.0, -5.0, 0.5, 4.0, np.nan, -0.2])
+    spectral = np.array([10.0, -50.0, -30.0, -2.0, 1.0, 0.3])
+    agreement = ev.log_bayes_sign_agreement(photometric, spectral)
+    assert agreement["n_galaxies"] == 5                                     # the NaN galaxy is left out
+    assert np.isclose(agreement["same_sign"], 2 / 5)                        # galaxies 0 and 1
+    assert np.isclose(agreement["same_favoured_model"], 3 / 5)              # 0, 1, and 5 (both inconclusive)
+
+
+def test_favoured_model_crosstab_of_a_hand_made_table():
+    photometric = np.array([2.0, -5.0, 0.5, 4.0, np.nan, -0.2])
+    spectral = np.array([10.0, -50.0, -30.0, -2.0, 1.0, 0.3])
+    crosstab = ev.favoured_model_crosstab(photometric, spectral)
+    assert list(crosstab.index) == ["delayed", "neither", "dblplaw"]
+    assert list(crosstab.columns) == ["delayed", "neither", "dblplaw"]
+    assert (crosstab.index.name, crosstab.columns.name) == ("first", "second")
+    expected = np.array([[1, 0, 1],      # first favours delayed: second delayed (0), second DPL (3)
+                         [0, 1, 1],      # first inconclusive: second inconclusive (5), second DPL (2)
+                         [0, 0, 1]])     # first favours DPL: second DPL (1)
+    assert np.array_equal(crosstab.to_numpy(), expected)
+
+
+def test_evidence_agreement_without_galaxies_is_nan_and_zero():
+    agreement = ev.log_bayes_sign_agreement([np.nan, 1.0], [2.0, np.nan])
+    assert agreement["n_galaxies"] == 0
+    assert np.isnan(agreement["same_sign"]) and np.isnan(agreement["same_favoured_model"])
+    assert (ev.favoured_model_crosstab([np.nan], [np.nan]).to_numpy() == 0).all()
