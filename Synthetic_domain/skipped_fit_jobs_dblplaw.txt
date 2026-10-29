@@ -1,0 +1,5 @@
+# DPL spectral fit jobs deliberately left unfitted, one job_id per line ('#' starts a comment).
+# remote/submit_fits.sh does not send them (FITS_SUBDIR=spectral_fits_dblplaw), and the DPL spectral
+# calibration test of spectroscopic_reference.ipynb (section 6d) gives its verdict on the other mocks,
+# listing these as skipped. The DPL mocks reuse the calib_<k> ids of the delayed-tau mocks, so the two
+# models keep separate lists (skipped_fit_jobs.txt is the delayed-tau one).

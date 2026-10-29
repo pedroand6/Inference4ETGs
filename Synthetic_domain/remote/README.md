@@ -39,11 +39,21 @@ and the delayed-tau mocks' cross-fits `cross_calib_<k>`) have their own folder:
 The DPL mocks' cross-fits (fitted with delayed-tau) are exported to `photometric_fits/jobs/`, so a
 `FITS_SUBDIR=photometric_fits` run after it fits only those: the finished delayed-tau fits travel in its bundle.
 
+The double-power-law spectral fits (section 6d of notebook 2: every galaxy with a prepared spectrum, refitted
+with the DPL prior, and 33 DPL calibration mocks, about 1400 fits) have their own folder too:
+
+    FITS_SUBDIR=spectral_fits_dblplaw Synthetic_domain/remote/submit_fits.sh
+
+They take about 30 h, so two 24 h jobs: fetch the first (`fetch_fits.sh ID`) and submit again; the second fits
+only the rest, because the finished fits travel in its bundle.
+
 They share job ids (specobjids, `calib_<k>`) with the spectral fits, so they never share a folder: the
 job records its folder in `out/fits_subdir.txt`, `fetch_fits.sh` copies into that folder (and stops if a
 `FITS_SUBDIR` you set differs from it), and `sm.fit_and_save` never replaces a fit of the other kind.
-`skipped_fit_jobs.txt` applies to the spectral fits only (`SKIP_LIST` overrides it). It is empty for the delayed-tau
-model: the ids it listed named 16-bin mocks, and the new mocks reuse the `calib_<k>` ids. `BUNDLE_ONLY=<folder>`
+`skipped_fit_jobs.txt` applies to the delayed-tau spectral fits and `skipped_fit_jobs_dblplaw.txt` to the DPL
+spectral fits (`SKIP_LIST` overrides either; the photometric folders have none). Each folder needs its own
+list, because every folder's mocks reuse the `calib_<k>` ids. Both are empty: the ids `skipped_fit_jobs.txt`
+listed named 16-bin mocks. `BUNDLE_ONLY=<folder>`
 writes the bundle and submits nothing. `JOB_SCRIPT=benchmark_job.sh` benchmarks the jobs of `FITS_SUBDIR` too.
 
 ## Follow

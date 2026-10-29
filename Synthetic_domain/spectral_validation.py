@@ -180,6 +180,8 @@ def rest_frame_spectrum(sdss_fits_path, redshift, ebv):
 # =============================================================================
 N_PREDICTIVE_SAMPLES = 100     # posterior samples per galaxy for the model indices
 MAX_Z_SCORE = 2.0              # an index agrees when |z| < MAX_Z_SCORE
+# The rulers read the delayed-tau spectral fits: the validation stays on them (DPL spec, amendment 2)
+RULER_SFH_MODEL = "delayed"
 
 
 def evenly_spaced_rows(samples, n_samples):
@@ -190,7 +192,7 @@ def evenly_spaced_rows(samples, n_samples):
 
 def model_flux_for_sample(model, cube, redshift, data_flux, data_ivar):
     """Model spectrum of one posterior sample on the model's grid, times the calibration polynomial fitted to the data."""
-    components, _, _ = sm.spectral_components(cube, redshift)
+    components, _, _ = sm.spectral_components(cube, redshift, RULER_SFH_MODEL)
     model.update(components)
     flux = model.spectrum[:, 1]
     polynomial = sm.calibration_polynomial(flux, data_flux, data_ivar)
@@ -201,14 +203,15 @@ def predictive_indices(unit_cube_samples, redshift, observed_wavelength_air, dat
                        n_samples=N_PREDICTIVE_SAMPLES):
     """Indices of the Bagpipes model spectra of posterior samples, measured exactly like the observed ones.
 
-    Inputs: unit-cube posterior samples (n, SPECTRAL_DIMS); redshift; the galaxy's native observed air
-            wavelength grid [Angstrom] and its flux/ivar on that grid (restricted to sm.OBSERVED_RANGE by the caller).
+    Inputs: unit-cube posterior samples of a delayed-tau spectral fit (n, sm.spectral_dims(RULER_SFH_MODEL));
+            redshift; the galaxy's native observed air wavelength grid [Angstrom] and its flux/ivar on that
+            grid (restricted to sm.OBSERVED_RANGE by the caller).
     The calibration polynomial basis is uniform in pixel index, which differs slightly from the fit's 5 A bins
     (negligible for the indices).
     Returns: DataFrame (samples x INDEX_NAMES); a sample whose model flux is not positive in a band gets NaN there.
     """
     kept = evenly_spaced_rows(unit_cube_samples, n_samples)
-    first_components, _, _ = sm.spectral_components(kept[0], redshift)
+    first_components, _, _ = sm.spectral_components(kept[0], redshift, RULER_SFH_MODEL)
     model = pipes.model_galaxy(first_components, spec_wavs=observed_wavelength_air)
     rest_wavelength = observed_wavelength_air / (1 + redshift)
     rows = []
@@ -330,7 +333,8 @@ def light_weighted_age_and_metallicity(unit_cube_samples, redshift, n_samples=N_
     and the sample's metallicity (r_band_light_per_age_step; dust-free, without nebular emission). With a
     single metallicity the light-weighted Z is that metallicity. The S-PLUS r filter stands in for SDSS r
     (negligible difference).
-    Inputs: unit_cube_samples: unit-cube posterior samples (dimensionless, shape (n, len(SPECTRAL_DIMS)));
+    Inputs: unit_cube_samples: unit-cube posterior samples of a delayed-tau spectral fit (dimensionless,
+            shape (n, len(sm.spectral_dims(RULER_SFH_MODEL))));
             redshift: the galaxy redshift (dimensionless; it sets the oldest allowed age);
             n_samples: at most this many evenly spaced samples are used (count).
     Returns: DataFrame with log_age_light [log yr] and log_metallicity_light [log Z/Z_sun], one row per kept
@@ -340,7 +344,7 @@ def light_weighted_age_and_metallicity(unit_cube_samples, redshift, n_samples=N_
     star_formation = None
     rows = []
     for cube in kept:
-        components, drawn, _ = sm.spectral_components(cube, redshift)
+        components, drawn, _ = sm.spectral_components(cube, redshift, RULER_SFH_MODEL)
         # One SFH object updated in place; only the SFH is needed, not a full model
         if star_formation is None:
             star_formation = pipes.models.star_formation_history(components)

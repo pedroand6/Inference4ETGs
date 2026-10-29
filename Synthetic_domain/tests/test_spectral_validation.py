@@ -9,6 +9,7 @@ import spectral_validation as sv
 import synthetic_model as sm
 
 GRID = np.arange(3700.0, 5600.0, 1.0)      # rest-frame air Angstrom, 1 A pixels
+SPECTRAL_DIMS = sm.spectral_dims("delayed")  # unit-cube dims of the delayed-tau fits the rulers read
 
 
 def flat_spectrum(level=1.0):
@@ -67,13 +68,13 @@ def test_measurement_error_shrinks_with_signal_to_noise():
 def model_galaxy_spectrum(cube, redshift):
     """Noise-free model spectrum of one cube point on a 1 A observed air grid, and that grid."""
     observed_grid = np.arange(sm.OBSERVED_RANGE[0], sm.OBSERVED_RANGE[1], 1.0)
-    components, _, _ = sm.spectral_components(cube, redshift)
+    components, _, _ = sm.spectral_components(cube, redshift, "delayed")
     model = pipes.model_galaxy(components, spec_wavs=observed_grid)
     return observed_grid, model.spectrum[:, 1]
 
 
 def test_predictive_indices_reproduce_a_noise_free_model():
-    cube = np.full(len(sm.SPECTRAL_DIMS), 0.5)
+    cube = np.full(len(SPECTRAL_DIMS), 0.5)
     redshift = 0.05
     observed_grid, flux = model_galaxy_spectrum(cube, redshift)
     ivar = np.full(flux.shape, 1.0 / (0.01 * np.median(flux)) ** 2)
@@ -84,7 +85,7 @@ def test_predictive_indices_reproduce_a_noise_free_model():
 
 
 def test_predictive_indices_skip_degenerate_samples(monkeypatch):
-    cube = np.full((2, len(sm.SPECTRAL_DIMS)), 0.5)
+    cube = np.full((2, len(SPECTRAL_DIMS)), 0.5)
     redshift = 0.05
     observed_grid, flux = model_galaxy_spectrum(cube[0], redshift)
     ivar = np.ones_like(flux)
@@ -126,12 +127,12 @@ def test_index_comparison_p_uses_replicated_data_with_observational_noise():
 
 def delayed_cube(age, tau, redshift):
     """Midpoint SPECTRAL_DIMS cube whose age [Gyr] and tau [Gyr] are the given ones at this redshift."""
-    cube = np.full(len(sm.SPECTRAL_DIMS), 0.5)
+    cube = np.full(len(SPECTRAL_DIMS), 0.5)
     log_age_range = np.log10(sm.maximum_age(redshift)) - np.log10(sm.AGE_MIN)
-    cube[sm.SPECTRAL_DIMS.index("log_age_fraction")] = (np.log10(age) - np.log10(sm.AGE_MIN)) / log_age_range
+    cube[SPECTRAL_DIMS.index("log_age_fraction")] = (np.log10(age) - np.log10(sm.AGE_MIN)) / log_age_range
     log_tau_range = np.log10(sm.TAU_RANGE[1]) - np.log10(sm.TAU_RANGE[0])
-    cube[sm.SPECTRAL_DIMS.index("log_tau")] = (np.log10(tau) - np.log10(sm.TAU_RANGE[0])) / log_tau_range
-    _, drawn, _ = sm.spectral_components(cube, redshift)
+    cube[SPECTRAL_DIMS.index("log_tau")] = (np.log10(tau) - np.log10(sm.TAU_RANGE[0])) / log_tau_range
+    _, drawn, _ = sm.spectral_components(cube, redshift, "delayed")
     assert np.isclose(drawn["age"], age) and np.isclose(drawn["tau"], tau)
     return cube
 
@@ -154,11 +155,11 @@ def test_light_weighted_age_of_an_extended_sfh_is_below_its_mass_weighted_age():
 
 
 def test_light_weighted_metallicity_is_the_single_metallicity():
-    cubes = np.random.default_rng(5).random((3, len(sm.SPECTRAL_DIMS)))
+    cubes = np.random.default_rng(5).random((3, len(SPECTRAL_DIMS)))
     result = sv.light_weighted_age_and_metallicity(cubes, 0.1, n_samples=3)
     assert list(result.columns) == ["log_age_light", "log_metallicity_light"]
     for row_index, cube in enumerate(cubes):
-        _, drawn, _ = sm.spectral_components(cube, 0.1)
+        _, drawn, _ = sm.spectral_components(cube, 0.1, "delayed")
         assert result["log_metallicity_light"].iloc[row_index] == np.log10(drawn["metallicity"])
         assert np.isfinite(result["log_age_light"].iloc[row_index])
 

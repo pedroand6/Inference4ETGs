@@ -604,13 +604,20 @@ def safe_spectral_log_likelihood(model_flux, data_flux, data_ivar, noise_scale):
         return LOG_ZERO
 
 
-# Spectral fits are delayed-tau only (DPL spec, decision 1): the DPL model is fitted to the photometry alone
-SPECTRAL_MODEL = "delayed"
+# The spectral fit's own nuisance parameters, after the SFH model's dims: velocity dispersion, noise scale
+SPECTRAL_NUISANCE_DIMS = ["veldisp", "noise_scale"]
 
-# Redshift is fixed to the spectroscopic value, so it leaves the list; veldisp and noise_scale join it
-SPECTRAL_DIMS = list(MODELS[SPECTRAL_MODEL].photometric_dims)
-SPECTRAL_DIMS.append("veldisp")
-SPECTRAL_DIMS.append("noise_scale")
+
+def spectral_dims(sfh_model):
+    """Unit-cube dimensions of a spectral fit of one SFH model, in order.
+
+    Why: the redshift is fixed to the spectroscopic value, so it leaves the model's dims, and the spectral
+    nuisance parameters join them. Each SFH model has its own spectral fits (DPL spec, amendment 2).
+    Inputs: sfh_model: "delayed" or "dblplaw".
+    Returns: new list of names: MODELS[sfh_model].photometric_dims, then SPECTRAL_NUISANCE_DIMS (8 names for
+             delayed-tau, 9 for the double power law).
+    """
+    return [*MODELS[sfh_model].photometric_dims, *SPECTRAL_NUISANCE_DIMS]
 
 
 def training_unit_vector(cube_by_name, sfh_model):
@@ -633,21 +640,21 @@ def training_unit_vector(cube_by_name, sfh_model):
     return unit_vector
 
 
-def spectral_components(cube, redshift):
-    """Bagpipes components, drawn parameters and noise scale for one spectral-fit unit-cube point.
+def spectral_components(cube, redshift, sfh_model):
+    """Bagpipes components, drawn parameters and noise scale for one spectral-fit point of an SFH model.
 
-    The SFH, metallicity, dust and nebular part is the delayed-tau training prior (MODELS[SPECTRAL_MODEL]) at
-    the fixed spectroscopic redshift, which also sets the oldest allowed age; veldisp and noise_scale are the
-    spectral nuisance parameters.
-    Inputs: cube: unit-cube values (dimensionless, in [0, 1)) ordered as SPECTRAL_DIMS;
-            redshift: spectroscopic redshift (dimensionless).
-    Returns: (bagpipes_components, drawn, noise_scale). The components are the delayed-tau model's plus
-             veldisp [km/s]; drawn holds the model's drawn labels plus veldisp [km/s]; noise_scale is the
-             error multiplier (dimensionless, 1 to 5).
+    The SFH, metallicity, dust and nebular part is the model's training prior (MODELS[sfh_model]) at the fixed
+    spectroscopic redshift, which also sets the oldest allowed age (delayed-tau) or turnover (double power
+    law); veldisp and noise_scale are the spectral nuisance parameters, the same for every model.
+    Inputs: cube: unit-cube values (dimensionless, in [0, 1)) ordered as spectral_dims(sfh_model);
+            redshift: spectroscopic redshift (dimensionless); sfh_model: "delayed" or "dblplaw".
+    Returns: (bagpipes_components, drawn, noise_scale). The components are the model's plus veldisp [km/s];
+             drawn holds the model's drawn labels plus veldisp [km/s]; noise_scale is the error multiplier
+             (dimensionless, 1 to 5).
     """
-    cube_by_name = dict(zip(SPECTRAL_DIMS, cube))
-    unit_vector = training_unit_vector(cube_by_name, SPECTRAL_MODEL)
-    bagpipes_components, drawn = MODELS[SPECTRAL_MODEL].components(unit_vector, fixed_redshift=redshift)
+    cube_by_name = dict(zip(spectral_dims(sfh_model), cube))
+    unit_vector = training_unit_vector(cube_by_name, sfh_model)
+    bagpipes_components, drawn = MODELS[sfh_model].components(unit_vector, fixed_redshift=redshift)
     veldisp = uniform(cube_by_name["veldisp"], *VELDISP_RANGE)
     bagpipes_components["veldisp"] = veldisp
     drawn["veldisp"] = veldisp
@@ -733,40 +740,49 @@ def multinest_iterations(output_basename):
     return multinest_iteration_bounds(output_basename)[0]
 
 
-def fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_points=N_LIVE_POINTS):
-    """MultiNest fit of one prepared spectrum under the training prior at a fixed redshift.
+def fit_spectrum(spectrum, redshift, sfh_model, output_basename, max_iterations, n_live_points=N_LIVE_POINTS):
+    """MultiNest fit of one prepared spectrum under an SFH model's training prior at a fixed redshift.
 
-    The sampler works directly on the unit cube (SPECTRAL_DIMS): spectral_components maps each point
-    to physical values, exactly as the training set does. output_basename must be short (MultiNest
-    limit of 100 characters), e.g. "spectral_fits/<id>/".
+    The sampler works directly on the unit cube (spectral_dims(sfh_model)): spectral_components maps each
+    point to physical values, exactly as the training set does. Every SFH model gets the same likelihood
+    (calibration polynomial, noise scale) and MultiNest settings, so their evidences can be compared.
+    output_basename must be short (MultiNest limit of 100 characters), e.g. "spectral_fits/<id>/".
     Inputs: spectrum: dict with wavelength [Angstrom, observed], flux and ivar, as from prepare_spectrum;
-            redshift: spectroscopic redshift (dimensionless); output_basename: directory prefix for the
-            MultiNest files (str); max_iterations: MultiNest iteration limit (count);
-            n_live_points: live points (count).
-    Returns: dict with samples (unit-cube points, shape (n_samples, len(SPECTRAL_DIMS))), log_evidence
-             (dimensionless ln Z), log_evidence_error (MultiNest's uncertainty of ln Z, sqrt(H / n_live)),
-             n_iterations (count, from multinest_iterations), converged (bool: the run certainly stopped
-             before max_iterations, judged by the upper bound of the count) and run_time [s].
+            redshift: spectroscopic redshift (dimensionless); sfh_model: "delayed" or "dblplaw";
+            output_basename: directory prefix for the MultiNest files (str); max_iterations: MultiNest
+            iteration limit (count); n_live_points: live points (count).
+    Returns: dict with samples (unit-cube points, shape (n_samples, len(spectral_dims(sfh_model)))),
+             log_evidence (dimensionless ln Z), log_evidence_error (MultiNest's uncertainty of ln Z,
+             sqrt(H / n_live)), n_iterations (count, from multinest_iterations), converged (bool: the run
+             certainly stopped before max_iterations, judged by the upper bound of the count) and
+             run_time [s].
     """
+    n_dims = len(spectral_dims(sfh_model))
+
     # 1. Bagpipes model built once; each likelihood call updates it in place, which is much faster
-    midpoint_cube = np.full(len(SPECTRAL_DIMS), MIDPOINT_DRAW)
-    starting_components, _, _ = spectral_components(midpoint_cube, redshift)
+    midpoint_cube = np.full(n_dims, MIDPOINT_DRAW)
+    starting_components, _, _ = spectral_components(midpoint_cube, redshift, sfh_model)
     model = pipes.model_galaxy(starting_components, spec_wavs=spectrum["wavelength"])
 
     # 2. Likelihood of one unit-cube point: model spectrum vs data, with the S/N-scaling noise multiplier
     def log_likelihood(cube):
         """Log-likelihood of the spectrum for one unit-cube point.
 
-        Inputs: cube: unit-cube point (dimensionless, SPECTRAL_DIMS order).
+        Inputs: cube: unit-cube point (dimensionless, spectral_dims(sfh_model) order).
         Returns: log-likelihood (dimensionless), LOG_ZERO for an impossible model.
         """
-        bagpipes_components, _, noise_scale = spectral_components(cube, redshift)
-        model.update(bagpipes_components)
-        model_flux = model.spectrum[:, 1]
+        bagpipes_components, _, noise_scale = spectral_components(cube, redshift, sfh_model)
+        # PyMultiNest calls sys.exit if the likelihood raises: a model Bagpipes cannot compute is impossible
+        # (as in photometric_point_log_likelihood; a point that computes gets the same value as before)
+        try:
+            model.update(bagpipes_components)
+            model_flux = model.spectrum[:, 1]
+        except Exception:
+            return LOG_ZERO
         return safe_spectral_log_likelihood(model_flux, spectrum["flux"], spectrum["ivar"], noise_scale)
 
     # 3. MultiNest over the unit cube
-    return run_multinest(log_likelihood, len(SPECTRAL_DIMS), output_basename, max_iterations, n_live_points)
+    return run_multinest(log_likelihood, n_dims, output_basename, max_iterations, n_live_points)
 
 
 def run_multinest(log_likelihood, n_dims, output_basename, max_iterations, n_live_points):
@@ -820,14 +836,15 @@ def run_multinest(log_likelihood, n_dims, output_basename, max_iterations, n_liv
     }
 
 
-def posterior_labels(unit_cube_samples, redshift):
+def posterior_labels(unit_cube_samples, redshift, sfh_model):
     """Labels of each spectral-fit posterior sample, from a Bagpipes model that also gives S-PLUS photometry.
 
     Keeps at most MAX_POSTERIOR_SAMPLES evenly spaced samples, because building labels is the slow part.
     model_r is the model r magnitude for 10^10 M_sun formed, used later to rescale mass-like labels.
-    Inputs: unit_cube_samples: unit-cube points (dimensionless, shape (n_samples, len(SPECTRAL_DIMS)));
-            redshift: spectroscopic redshift (dimensionless).
-    Returns: DataFrame with one row per kept sample: the delayed-tau training labels (mass-like ones for
+    Inputs: unit_cube_samples: unit-cube points (dimensionless, shape (n_samples,
+            len(spectral_dims(sfh_model)))); redshift: spectroscopic redshift (dimensionless);
+            sfh_model: the fit's model, "delayed" or "dblplaw".
+    Returns: DataFrame with one row per kept sample: the model's training labels (mass-like ones for
              10^10 M_sun formed), then veldisp [km/s], noise_scale (dimensionless) and model_r [mag].
     """
     # 1. Thin the samples evenly: neighbouring MultiNest samples are nearly identical
@@ -837,11 +854,11 @@ def posterior_labels(unit_cube_samples, redshift):
     model = None
     rows = []
     for cube in kept_samples:
-        bagpipes_components, drawn, noise_scale = spectral_components(cube, redshift)
+        bagpipes_components, drawn, noise_scale = spectral_components(cube, redshift, sfh_model)
         model = updated_photometry_model(model, bagpipes_components)
         drawn_with_noise = dict(drawn)
         drawn_with_noise["noise_scale"] = noise_scale
-        rows.append(sample_label_row(model, bagpipes_components, drawn_with_noise, SPECTRAL_MODEL))
+        rows.append(sample_label_row(model, bagpipes_components, drawn_with_noise, sfh_model))
     return pd.DataFrame(rows)
 
 
@@ -1127,22 +1144,22 @@ def fit_evidence(fit_file, job):
     return float(metadata["log_evidence"]), log_evidence_error
 
 
-def make_mock_spectrum(cube, redshift, template_spectrum, rng):
-    """Mock spectrum from a known unit-cube point, with the wavelengths, mask and errors of a real one.
+def make_mock_spectrum(cube, redshift, template_spectrum, rng, sfh_model):
+    """Mock spectrum of a known point of an SFH model, with the wavelengths, mask and errors of a real one.
 
     The model is scaled to the template's median flux so the mock has the template's S/N. The
     noise_scale coordinate is set to UNIT_NOISE_CUBE_VALUE (error multiplier 1) because the mock
     noise is the template's own.
-    Inputs: cube: unit-cube point (dimensionless, SPECTRAL_DIMS order); redshift: dimensionless;
+    Inputs: cube: unit-cube point (dimensionless, spectral_dims(sfh_model) order); redshift: dimensionless;
             template_spectrum: dict from prepare_spectrum (wavelength [Angstrom], flux, ivar);
-            rng: numpy Generator.
+            rng: numpy Generator (only its normal() is used, once); sfh_model: "delayed" or "dblplaw".
     Returns: (spectrum dict with wavelength, flux and ivar, truth labels as a pandas Series with the
-             same labels as posterior_labels).
+             same labels as posterior_labels of sfh_model).
     """
     # 1. Known model on the template's wavelength grid (copied, so the caller's point is not changed)
     cube = np.array(cube, dtype=float)
-    cube[SPECTRAL_DIMS.index("noise_scale")] = UNIT_NOISE_CUBE_VALUE
-    bagpipes_components, _, _ = spectral_components(cube, redshift)
+    cube[spectral_dims(sfh_model).index("noise_scale")] = UNIT_NOISE_CUBE_VALUE
+    bagpipes_components, _, _ = spectral_components(cube, redshift, sfh_model)
     model = pipes.model_galaxy(bagpipes_components, spec_wavs=template_spectrum["wavelength"])
     model_flux = model.spectrum[:, 1]
 
@@ -1157,7 +1174,7 @@ def make_mock_spectrum(cube, redshift, template_spectrum, rng):
     # 3. Spectrum and truth labels of the same point, so a fit can be checked against them
     spectrum = {"wavelength": template_spectrum["wavelength"], "flux": mock_flux,
                 "ivar": template_spectrum["ivar"].copy()}
-    truth = posterior_labels(cube[np.newaxis, :], redshift).iloc[0]
+    truth = posterior_labels(cube[np.newaxis, :], redshift, sfh_model).iloc[0]
     return spectrum, truth
 
 
@@ -1169,7 +1186,7 @@ def save_fit(path, posterior, unit_cube_samples, metadata):
     records its sfh_model, so fits of an earlier or of the other SFH model can be told apart (fit_is_current).
     Inputs: path: output file path (str); posterior: DataFrame of labels, one column per label;
             unit_cube_samples: unit-cube points (dimensionless, shape (n_samples, n_dims), n_dims that of the
-            fit: len(SPECTRAL_DIMS) or the model's photometric_dims);
+            fit: len(spectral_dims(sfh_model)) or the model's photometric_dims);
             metadata: dict of scalars (converged, run_time [s], n_iterations, max_iterations, n_live_points,
             log_evidence, log_evidence_error, redshift, kind, sfh_model and, for a cross-fit, truth_model;
             files written before kinds existed have no kind and are spectral). Without sfh_model, the fit is
@@ -1243,18 +1260,18 @@ def job_model(job):
 
 
 def fit_spectrum_job(job, multinest_basename, max_iterations, n_live_points):
-    """Fit a spectrum job and label its posterior samples.
+    """Fit a spectrum job with its SFH model and label its posterior samples.
 
-    Inputs: job: dict with spectrum (as from prepare_spectrum) and redshift (dimensionless); multinest_basename:
-            directory prefix for the MultiNest files (str); max_iterations, n_live_points: counts.
+    Inputs: job: dict with spectrum (as from prepare_spectrum), redshift (dimensionless) and sfh_model
+            (job_model: "delayed" for a job without one, as every job exported before the DPL spectral fits);
+            multinest_basename: directory prefix for the MultiNest files (str); max_iterations, n_live_points:
+            counts.
     Returns: (fit dict from fit_spectrum, posterior DataFrame from posterior_labels).
-    Raises: ValueError for a job of a model other than SPECTRAL_MODEL (spectral fits are delayed-tau only).
     """
-    if job_model(job) != SPECTRAL_MODEL:
-        raise ValueError(f"spectral fits are {SPECTRAL_MODEL} only, not {job_model(job)} "
-                         "(DPL spec, decision 1)")
-    fit = fit_spectrum(job["spectrum"], job["redshift"], multinest_basename, max_iterations, n_live_points)
-    posterior = posterior_labels(fit["samples"], job["redshift"])
+    sfh_model = job_model(job)
+    fit = fit_spectrum(job["spectrum"], job["redshift"], sfh_model, multinest_basename, max_iterations,
+                       n_live_points)
+    posterior = posterior_labels(fit["samples"], job["redshift"], sfh_model)
     return fit, posterior
 
 
@@ -1375,6 +1392,9 @@ CALIBRATION_ID_PREFIX = "calib_"                    # job ids are calib_000, cal
 CROSS_CALIBRATION_ID_PREFIX = "cross_calib_"
 # Reference-CSV columns of each model's photometric fits: <prefix><label>_p16, <prefix>log_evidence, ...
 PHOTOMETRIC_PREFIXES = {"delayed": "phot_", "dblplaw": "phot_dblplaw_"}
+# ... and of each model's spectral fits: <prefix><label>_p16, <prefix>converged, ...; delayed-tau keeps the
+# plain names of the first spectral fits (only its ln Z columns are named spec_log_evidence(_error))
+SPECTRAL_PREFIXES = {"delayed": "", "dblplaw": "spec_dblplaw_"}
 PHOTOMETRIC_EXTRA_LABELS = ["mw_age", "log_sfr"]   # summarised besides the calibration and the shared labels
 PERCENT = 100                    # percent per unit fraction
 
@@ -1436,36 +1456,66 @@ def load_job(path):
         return job
 
 
-def draw_calibration_cubes(n_mocks, rng):
-    """Unit-cube points of the calibration mocks: uniform over every SPECTRAL_DIMS coordinate.
+def draw_calibration_cubes(n_mocks, rng, sfh_model):
+    """Unit-cube points of an SFH model's spectral calibration mocks: uniform over its spectral_dims.
 
-    Uniform on the unit cube is the training prior at the template's redshift (log-uniform age, tau and Z).
+    Uniform on the unit cube is the model's training prior at the template's redshift (log-uniform age, tau
+    and Z for delayed-tau; log-uniform turnover lookback, alpha, beta and Z for the double power law).
     draw_calibration_mocks calls this first on its rng, so the cubes can be redrawn from the same seed.
-    Inputs: n_mocks: number of points (count); rng: numpy Generator.
-    Returns: array of shape (n_mocks, len(SPECTRAL_DIMS)), values in [0, 1) (dimensionless).
+    Inputs: n_mocks: number of points (count); rng: numpy Generator; sfh_model: "delayed" or "dblplaw".
+    Returns: array of shape (n_mocks, len(spectral_dims(sfh_model))), values in [0, 1) (dimensionless).
     """
-    return rng.random((n_mocks, len(SPECTRAL_DIMS)))
+    return rng.random((n_mocks, len(spectral_dims(sfh_model))))
 
 
-def draw_calibration_mocks(n_mocks, templates, rng):
-    """Mock spectra with known labels, each on the wavelengths, mask and errors of a random real galaxy.
+def draw_calibration_mocks(n_mocks, templates, rng, sfh_model):
+    """Mock spectra of an SFH model with known labels, each with the wavelengths, mask and errors of a galaxy.
 
     Inputs: n_mocks: number of mocks (count); templates: list of (spectrum dict from prepare_spectrum,
-            redshift (dimensionless)); rng: numpy Generator.
-    Returns: (jobs, truths): jobs is a list of dicts as fit_and_save takes (job_id calib_000, calib_001, ...);
-             truths maps each job_id to its true labels (Series, as posterior_labels columns: the
-             spectral model's training_labels, veldisp, noise_scale and model_r).
+            redshift (dimensionless)); rng: numpy Generator; sfh_model: "delayed" or "dblplaw".
+    Returns: (jobs, truths): jobs is a list of spectrum job dicts as fit_and_save takes (job_id calib_000,
+             calib_001, ..., kind SPECTRUM_JOB, sfh_model, spectrum, redshift); truths maps each job_id to its
+             true labels (Series, as posterior_labels columns: the model's training_labels, veldisp,
+             noise_scale and model_r).
     """
-    cubes = draw_calibration_cubes(n_mocks, rng)
+    cubes = draw_calibration_cubes(n_mocks, rng, sfh_model)
     jobs = []
     truths = {}
     for mock_index, cube in enumerate(cubes):
         job_id = f"{CALIBRATION_ID_PREFIX}{mock_index:03d}"
         template_spectrum, redshift = templates[rng.integers(len(templates))]
-        spectrum, truth = make_mock_spectrum(cube, redshift, template_spectrum, rng)
-        jobs.append({"job_id": job_id, "spectrum": spectrum, "redshift": redshift})
+        spectrum, truth = make_mock_spectrum(cube, redshift, template_spectrum, rng, sfh_model)
+        jobs.append({"job_id": job_id, "kind": SPECTRUM_JOB, "sfh_model": sfh_model, "spectrum": spectrum,
+                     "redshift": redshift})
         truths[job_id] = truth
     return jobs, truths
+
+
+def dblplaw_spectral_jobs(delayed_jobs):
+    """The galaxies' prepared spectra as spectral jobs of the double power law (DPL spec, amendment 2).
+
+    Why the calibration mocks are left out: they were drawn from the delayed-tau prior, so their truths have
+    no DPL labels; the DPL fitter gets its own mocks (draw_calibration_mocks with "dblplaw").
+    Inputs: delayed_jobs: delayed-tau spectral jobs, as notebook 2 exports them to spectral_fits/jobs/ (a job
+            without kind is a spectrum job, one without sfh_model is delayed-tau): galaxies, and possibly
+            calibration mocks (job ids starting with CALIBRATION_ID_PREFIX).
+    Returns: list of new job dicts, one per galaxy, in input order: the same job_id, spectrum and redshift,
+             with kind SPECTRUM_JOB and sfh_model "dblplaw". The input jobs are not changed; their spectrum
+             dicts are shared, not copied (nothing writes to them).
+    Raises: ValueError for a job that is not a delayed-tau spectrum job.
+    """
+    jobs = []
+    for delayed_job in delayed_jobs:
+        if job_kind(delayed_job) != SPECTRUM_JOB or job_model(delayed_job) != "delayed":
+            raise ValueError(f"{delayed_job['job_id']} is not a delayed-tau spectrum job "
+                             f"({job_kind(delayed_job)}, {job_model(delayed_job)})")
+        if str(delayed_job["job_id"]).startswith(CALIBRATION_ID_PREFIX):
+            continue
+        job = dict(delayed_job)
+        job["kind"] = SPECTRUM_JOB
+        job["sfh_model"] = "dblplaw"
+        jobs.append(job)
+    return jobs
 
 
 def calibration_coverage(posteriors, truths, labels, levels=CALIBRATION_LEVELS):
@@ -1679,7 +1729,7 @@ JOBS_SUBDIRECTORY = "jobs"                 # exported fit jobs, one .npz each
 RUN_LOG_NAMES = ("fit_log.csv", "fit_logs")   # logs of run_spectral_fits.py; their rows name the fits run
 # The SFH model of each fits folder: a fit of another model in it is superseded, never read
 FIT_FOLDER_MODELS = {"spectral_fits": "delayed", "photometric_fits": "delayed",
-                     "photometric_fits_dblplaw": "dblplaw"}
+                     "photometric_fits_dblplaw": "dblplaw", "spectral_fits_dblplaw": "dblplaw"}
 
 
 def move_to_superseded(fits_directory, name):
@@ -1751,8 +1801,8 @@ def supersede_outdated_fits(fits_directory, sfh_model):
 
     Why: run_spectral_fits.py counts any top-level .h5 as done, and new calibration mocks reuse the calib_<k>
     ids, so an old file left in place would be skipped as finished or scored against a new truth. Each folder
-    is judged against its own SFH model (FIT_FOLDER_MODELS): a DPL fit stays in photometric_fits_dblplaw and
-    leaves photometric_fits, and the reverse.
+    is judged against its own SFH model (FIT_FOLDER_MODELS): a DPL fit stays in photometric_fits_dblplaw or
+    spectral_fits_dblplaw and leaves photometric_fits or spectral_fits, and the reverse.
     Moved, in this order:
       1. every readable .h5 fit that fails fit_is_current(metadata, sfh_model), with its MultiNest folder (the
          name without .h5); an unreadable .h5 stays, because fit_and_save fits that job again;

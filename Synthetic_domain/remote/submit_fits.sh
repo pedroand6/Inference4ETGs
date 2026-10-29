@@ -5,11 +5,11 @@
 # Fits already finished in Synthetic_domain/$FITS_SUBDIR/*.h5 travel in the bundle, so a second job
 # continues where the previous one stopped instead of repeating fits.
 #
-# FITS_SUBDIR picks the set of fits: spectral_fits (the spectral fits), photometric_fits (the delayed-tau
-# photometric fits of spec amendment A) or photometric_fits_dblplaw (the double-power-law photometric fits and
-# the cross-fits of the delayed-tau mocks). They share job ids (specobjids, calib_<k>), so their jobs and
-# results never mix:
-#     FITS_SUBDIR=photometric_fits_dblplaw Synthetic_domain/remote/submit_fits.sh
+# FITS_SUBDIR picks the set of fits: spectral_fits (the delayed-tau spectral fits), spectral_fits_dblplaw (the
+# double-power-law spectral fits), photometric_fits (the delayed-tau photometric fits of spec amendment A) or
+# photometric_fits_dblplaw (the double-power-law photometric fits and the cross-fits of the delayed-tau
+# mocks). They share job ids (specobjids, calib_<k>), so their jobs and results never mix:
+#     FITS_SUBDIR=spectral_fits_dblplaw Synthetic_domain/remote/submit_fits.sh
 #
 # Settings are environment variables (defaults for the full run); extra arguments go to `hljob run` as they are
 # (for example  -e SYNC_SECONDS=300).
@@ -21,8 +21,9 @@
 #   JOB_SCRIPT       script run inside the job: fit_job.sh or benchmark_job.sh   [default fit_job.sh]
 #   FITS_SUBDIR      folder of Synthetic_domain with jobs/ and the results     [default spectral_fits]
 #   JOB_NAME         name shown in `hljob ls`                                  [default $FITS_SUBDIR]
-#   SKIP_LIST        file of job ids left out of the bundle   [default skipped_fit_jobs.txt for spectral_fits, none
-#                    otherwise: the photometric calibration mocks reuse the ids calib_<k> of the spectral ones]
+#   SKIP_LIST        file of job ids left out of the bundle   [default skipped_fit_jobs.txt for spectral_fits,
+#                    skipped_fit_jobs_dblplaw.txt for spectral_fits_dblplaw, none for the photometric folders:
+#                    every folder's calibration mocks reuse the ids calib_<k>, so each needs its own list]
 #   MULTINEST_SOURCE the MultiNest source folder                               [default ~/Programs/MultiNest]
 #   BUNDLE_ONLY      set to a folder path to only write bundle.tar.gz there and NOT submit   [default: submit]
 set -euo pipefail
@@ -43,6 +44,8 @@ SYNTHETIC_DIR="$(dirname "$REMOTE_DIR")"
 export PATH="$HOME/.local/bin:$PATH"       # where hljob is installed
 if [[ "$FITS_SUBDIR" == "spectral_fits" ]]; then
     SKIP_LIST="${SKIP_LIST-$SYNTHETIC_DIR/skipped_fit_jobs.txt}"
+elif [[ "$FITS_SUBDIR" == "spectral_fits_dblplaw" ]]; then
+    SKIP_LIST="${SKIP_LIST-$SYNTHETIC_DIR/skipped_fit_jobs_dblplaw.txt}"
 else
     SKIP_LIST="${SKIP_LIST-}"
 fi

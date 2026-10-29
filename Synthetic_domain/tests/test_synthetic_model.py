@@ -19,6 +19,7 @@ import synthetic_model as sm
 MIN_PLAUSIBLE_MAGNITUDE = 5.0    # [mag] AB, for 10^10 M_sun formed
 MAX_PLAUSIBLE_MAGNITUDE = 40.0   # [mag] AB
 LOW_REDSHIFT = 0.002             # Bagpipes needs z > 0 to build a star formation history
+N_DELAYED_SPECTRAL_DIMS = len(sm.spectral_dims("delayed"))   # dims of a delayed-tau spectral fit (8)
 
 
 # =============================================================================
@@ -450,15 +451,35 @@ def test_spectral_log_likelihood_guard_returns_log_zero():
 
 
 def test_spectral_components_fix_redshift_and_add_veldisp():
-    cube = np.full(len(sm.SPECTRAL_DIMS), 0.5)
-    bagpipes_components, drawn, noise_scale = sm.spectral_components(cube, redshift=0.08)
+    cube = np.full(len(sm.spectral_dims("delayed")), 0.5)
+    bagpipes_components, drawn, noise_scale = sm.spectral_components(cube, redshift=0.08, sfh_model="delayed")
 
-    assert "z" not in sm.SPECTRAL_DIMS
+    assert "z" not in sm.spectral_dims("delayed")
     assert bagpipes_components["redshift"] == 0.08
     assert sm.VELDISP_RANGE[0] <= bagpipes_components["veldisp"] <= sm.VELDISP_RANGE[1]
     assert drawn["veldisp"] == bagpipes_components["veldisp"]
     assert 1.0 <= noise_scale <= 5.0
     assert bagpipes_components["delayed"]["age"] == drawn["age"] <= sm.maximum_age(0.08)
+
+
+def test_dblplaw_spectral_components_are_its_photometric_components_plus_the_nuisances():
+    """A DPL spectral point is the DPL photometric point at fixed redshift, plus veldisp and noise_scale."""
+    dims = sm.spectral_dims("dblplaw")
+    cube = np.random.default_rng(50).random(len(dims))
+    photometric_part = cube[:len(sm.MODELS["dblplaw"].photometric_dims)]
+    expected_components, expected_drawn = sm.photometric_components(photometric_part, 0.08, "dblplaw")
+
+    bagpipes_components, drawn, noise_scale = sm.spectral_components(cube, 0.08, "dblplaw")
+
+    veldisp = sm.uniform(cube[dims.index("veldisp")], *sm.VELDISP_RANGE)
+    assert bagpipes_components["veldisp"] == veldisp
+    assert drawn["veldisp"] == veldisp
+    assert noise_scale == 10 ** sm.uniform(cube[dims.index("noise_scale")], *sm.LOG_NOISE_SCALE_RANGE)
+    del bagpipes_components["veldisp"]
+    del drawn["veldisp"]
+    assert bagpipes_components == expected_components
+    assert drawn == expected_drawn
+    assert "dblplaw" in bagpipes_components and "delayed" not in bagpipes_components
 
 
 def test_split_by_hash_is_stable():
@@ -591,25 +612,29 @@ def test_rescale_mass_labels_takes_one_offset_per_row_and_nan_gives_nan():
 # =============================================================================
 # MultiNest fit and fit files (run with LD_LIBRARY_PATH=../.venv/lib)
 # =============================================================================
-def mock_job(job_id, rng):
-    """A small mock spectrum job at z = 0.1.
+def mock_job(job_id, rng, sfh_model="delayed"):
+    """A small mock spectrum job of sfh_model at z = 0.1.
 
-    Inputs: job_id: identifier (str); rng: numpy Generator.
-    Returns: (job dict with job_id, spectrum and redshift, truth labels as a Series).
+    Inputs: job_id: identifier (str); rng: numpy Generator; sfh_model: "delayed" or "dblplaw".
+    Returns: (job dict with job_id, spectrum and redshift, and sfh_model for a DPL job (a delayed-tau job has
+             no sfh_model, as every job exported before the DPL spectral fits), truth labels as a Series).
     """
     wavelength_vacuum = 10 ** np.arange(np.log10(3700), np.log10(9300), 1e-4)
     template = sm.prepare_spectrum(wavelength_vacuum, np.ones_like(wavelength_vacuum),
                                    np.full_like(wavelength_vacuum, 100.0), ebv=0.0)
-    cube = rng.random(len(sm.SPECTRAL_DIMS))
-    spectrum, truth = sm.make_mock_spectrum(cube, 0.1, template, rng)
-    return {"job_id": job_id, "spectrum": spectrum, "redshift": 0.1}, truth
+    cube = rng.random(len(sm.spectral_dims(sfh_model)))
+    spectrum, truth = sm.make_mock_spectrum(cube, 0.1, template, rng, sfh_model)
+    job = {"job_id": job_id, "spectrum": spectrum, "redshift": 0.1}
+    if sfh_model != "delayed":
+        job["sfh_model"] = sfh_model
+    return job, truth
 
 
 def test_make_mock_spectrum_returns_truth_labels():
     """The mock spectrum is finite and its truth carries every training label, finite."""
     job, truth = mock_job("mock_test", np.random.default_rng(9))
     assert np.isfinite(job["spectrum"]["flux"]).all()
-    for column in (*sm.MODELS[sm.SPECTRAL_MODEL].training_labels, "veldisp", "noise_scale", "model_r"):
+    for column in (*sm.MODELS["delayed"].training_labels, "veldisp", "noise_scale", "model_r"):
         assert np.isfinite(truth[column]), column
     assert truth["noise_scale"] == 1.0    # the mock noise is the template's own
 
@@ -622,7 +647,7 @@ def test_fit_and_save_smoke_run(tmp_path):
     assert summary["status"] == "fitted", summary["error"]
     posterior, metadata = sm.load_fit(str(tmp_path / "smoke.h5"))
     assert len(posterior) > 0
-    for column in (*sm.MODELS[sm.SPECTRAL_MODEL].training_labels, "model_r", "veldisp", "noise_scale"):
+    for column in (*sm.MODELS["delayed"].training_labels, "model_r", "veldisp", "noise_scale"):
         assert column in posterior.columns, column
     assert metadata["converged"] in (True, False)
     assert metadata["max_iterations"] == 100
@@ -649,7 +674,7 @@ def test_fit_is_current_compares_the_fit_model_with_the_folder_model():
     assert not sm.fit_is_current({"sfh_model": "dblplaw", "max_iterations": full_run}, "delayed")
     assert not sm.fit_is_current({"sfh_model": "dblplaw", "max_iterations": full_run - 1}, "dblplaw")
     assert sm.FIT_FOLDER_MODELS == {"spectral_fits": "delayed", "photometric_fits": "delayed",
-                                    "photometric_fits_dblplaw": "dblplaw"}
+                                    "photometric_fits_dblplaw": "dblplaw", "spectral_fits_dblplaw": "dblplaw"}
 
 
 def test_save_and_load_fit_round_trip_the_sfh_model(tmp_path):
@@ -657,7 +682,7 @@ def test_save_and_load_fit_round_trip_the_sfh_model(tmp_path):
     path = str(tmp_path / "round_trip.h5")
     posterior = pd.DataFrame({"log_age": [0.1, 0.2]})
     metadata = {"converged": True, "run_time": 5.0, "n_iterations": 10, "max_iterations": sm.MAX_ITERATIONS}
-    sm.save_fit(path, posterior, np.zeros((2, len(sm.SPECTRAL_DIMS))), metadata)
+    sm.save_fit(path, posterior, np.zeros((2, N_DELAYED_SPECTRAL_DIMS)), metadata)
 
     loaded_posterior, loaded_metadata = sm.load_fit(path)
 
@@ -688,24 +713,110 @@ def test_a_job_without_sfh_model_is_delayed():
     assert sm.job_model({"job_id": "cross_calib_000", "sfh_model": "dblplaw"}) == "dblplaw"
 
 
-def test_spectral_dims_stay_the_delayed_photometric_dims_plus_the_nuisances():
-    """Spectral fits are delayed-tau only (DPL spec, decision 1); the DPL photometric fit has 7 dimensions."""
-    assert sm.SPECTRAL_MODEL == "delayed"
-    assert sm.SPECTRAL_DIMS == [*sm.MODELS["delayed"].photometric_dims, "veldisp", "noise_scale"]
+def test_spectral_dims_are_each_model_s_photometric_dims_plus_the_nuisances():
+    """Each SFH model has its own spectral fits (DPL spec, amendment 2); delayed-tau keeps its 8 dims."""
+    assert sm.spectral_dims("delayed") == [*sm.MODELS["delayed"].photometric_dims, "veldisp", "noise_scale"]
+    assert sm.spectral_dims("delayed") == ["log_age_fraction", "log_tau", "log_metallicity", "av_ism",
+                                           "log_tau_bc", "logU", "veldisp", "noise_scale"]
+    assert sm.spectral_dims("dblplaw") == [*sm.MODELS["dblplaw"].photometric_dims, "veldisp", "noise_scale"]
     assert len(sm.MODELS["dblplaw"].photometric_dims) == 7
+    assert not hasattr(sm, "SPECTRAL_DIMS") and not hasattr(sm, "SPECTRAL_MODEL")
 
 
-def test_posterior_labels_of_midpoint_cubes_give_every_training_label():
-    """Three midpoint samples: one row each, every training-label column finite and as the prior maps it."""
-    cubes = np.full((3, len(sm.SPECTRAL_DIMS)), 0.5)
-    posterior = sm.posterior_labels(cubes, 0.1)
+STORED_SPECTRAL_FITS = "spectral_fits"          # the delayed-tau spectral fits (git-ignored; on this machine)
+N_REGRESSION_SAMPLES = 3                        # samples relabelled from the stored fit (~0.1 s each)
+STORED_LABEL_RTOL = 1e-10                       # "exactly", up to floating-point rounding
 
-    training_labels = sm.MODELS[sm.SPECTRAL_MODEL].training_labels
+
+def stored_spectral_fit_files():
+    """Fit files of galaxies (not mocks) in STORED_SPECTRAL_FITS, sorted; empty when the folder is missing."""
+    if not os.path.isdir(STORED_SPECTRAL_FITS):
+        return []
+    names = sorted(name for name in os.listdir(STORED_SPECTRAL_FITS)
+                   if name.endswith(".h5") and not name.startswith(sm.CALIBRATION_ID_PREFIX))
+    return [os.path.join(STORED_SPECTRAL_FITS, name) for name in names]
+
+
+@pytest.mark.skipif(len(stored_spectral_fit_files()) == 0, reason="no stored delayed-tau spectral fit here")
+def test_delayed_spectral_labels_reproduce_a_stored_spectral_fit():
+    """The refactored delayed-tau spectral path labels a stored fit's samples exactly as its fit did."""
+    fit_file = stored_spectral_fit_files()[0]
+    stored_posterior, metadata = sm.load_fit(fit_file)
+    assert metadata["sfh_model"] == "delayed"
+    # The stored rows are the labels of the thinned samples, in order
+    kept_samples = sm.thinned_samples(sm.load_unit_cube_samples(fit_file))
+    assert kept_samples.shape[1] == len(sm.spectral_dims("delayed"))
+
+    relabelled = sm.posterior_labels(kept_samples[:N_REGRESSION_SAMPLES], metadata["redshift"], "delayed")
+
+    assert set(relabelled.columns) == set(stored_posterior.columns)
+    for column in stored_posterior.columns:
+        assert np.allclose(relabelled[column], stored_posterior[column].iloc[:N_REGRESSION_SAMPLES],
+                           rtol=STORED_LABEL_RTOL, atol=0, equal_nan=True), column
+
+
+STORED_MOCK_FILE = os.path.join(STORED_SPECTRAL_FITS, sm.CALIBRATION_MOCK_FILE)
+NOTEBOOK_SEED = 0                               # SEED of spectroscopic_reference.ipynb, which drew the mocks
+
+
+@pytest.mark.skipif(not os.path.exists(STORED_MOCK_FILE), reason="no stored delayed-tau spectral mocks here")
+def test_delayed_calibration_mock_truths_reproduce_the_stored_mocks():
+    """The delayed-tau mock points, redrawn from the notebook's seed, give the stored truths exactly."""
+    mock_jobs, truths = joblib.load(STORED_MOCK_FILE)
+    cubes = sm.draw_calibration_cubes(len(mock_jobs), np.random.default_rng(NOTEBOOK_SEED), "delayed")
+    noise_index = sm.spectral_dims("delayed").index("noise_scale")
+    for mock_index in (0, len(mock_jobs) - 1):
+        cube = cubes[mock_index].copy()
+        cube[noise_index] = sm.UNIT_NOISE_CUBE_VALUE       # as make_mock_spectrum sets it
+        mock_job = mock_jobs[mock_index]
+        truth = sm.posterior_labels(cube[np.newaxis, :], mock_job["redshift"], "delayed").iloc[0]
+        stored_truth = truths[mock_job["job_id"]]
+        assert list(truth.index) == list(stored_truth.index)
+        assert np.allclose(truth.to_numpy(dtype=float), stored_truth.to_numpy(dtype=float),
+                           rtol=STORED_LABEL_RTOL, atol=0)
+
+
+def test_dblplaw_posterior_labels_give_every_dblplaw_training_label():
+    """Three DPL spectral samples: one row each, every DPL training label finite and as the prior maps it."""
+    cubes = np.random.default_rng(51).random((3, len(sm.spectral_dims("dblplaw"))))
+    posterior = sm.posterior_labels(cubes, 0.1, "dblplaw")
+
+    training_labels = sm.MODELS["dblplaw"].training_labels
     assert len(posterior) == 3
     assert list(posterior.columns[:len(training_labels)]) == training_labels
     for column in (*training_labels, "veldisp", "noise_scale", "model_r"):
         assert np.isfinite(posterior[column]).all(), column
-    _, drawn, _ = sm.spectral_components(cubes[0], 0.1)
+    for row_index, cube in enumerate(cubes):
+        _, drawn, noise_scale = sm.spectral_components(cube, 0.1, "dblplaw")
+        for label in sm.MODELS["dblplaw"].drawn_labels:
+            assert posterior[label].iloc[row_index] == drawn[label], label
+        assert posterior["noise_scale"].iloc[row_index] == noise_scale
+    fractions = posterior[["f_young", "f_mid", "f_old"]].sum(axis=1)
+    assert np.allclose(fractions, 1.0)
+
+
+def test_make_mock_spectrum_of_the_dblplaw_model_returns_its_truth_labels():
+    """A DPL mock spectrum is finite and its truth carries every DPL training and calibration label."""
+    job, truth = mock_job("mock_dblplaw", np.random.default_rng(52), "dblplaw")
+    assert job["sfh_model"] == "dblplaw"
+    assert np.isfinite(job["spectrum"]["flux"]).all()
+    for column in (*sm.MODELS["dblplaw"].training_labels, "veldisp", "noise_scale", "model_r"):
+        assert np.isfinite(truth[column]), column
+    assert set(sm.MODELS["dblplaw"].calibration_labels) <= set(truth.index)
+    assert truth["noise_scale"] == 1.0    # the mock noise is the template's own
+
+
+def test_posterior_labels_of_midpoint_cubes_give_every_training_label():
+    """Three midpoint samples: one row each, every training-label column finite and as the prior maps it."""
+    cubes = np.full((3, N_DELAYED_SPECTRAL_DIMS), 0.5)
+    posterior = sm.posterior_labels(cubes, 0.1, "delayed")
+
+    training_labels = sm.MODELS["delayed"].training_labels
+    assert len(posterior) == 3
+    assert list(posterior.columns[:len(training_labels)]) == training_labels
+    for column in (*training_labels, "veldisp", "noise_scale", "model_r"):
+        assert np.isfinite(posterior[column]).all(), column
+    _, drawn, _ = sm.spectral_components(cubes[0], 0.1, "delayed")
     for label in ("redshift", "age", "tau", "metallicity", "av_ism", "tau_bc", "logU", "log_mass_formed"):
         assert posterior[label].iloc[0] == drawn[label], label
     fractions = posterior[["f_young", "f_mid", "f_old"]].sum(axis=1)
@@ -717,7 +828,7 @@ def test_fit_and_save_skips_existing_output(tmp_path):
     job, _ = mock_job("skip", np.random.default_rng(11))
     posterior = pd.DataFrame({"mw_age": [1.0, 2.0]})
     metadata = {"converged": True, "run_time": 5.0, "n_iterations": 10, "log_evidence": -1.0}
-    sm.save_fit(str(tmp_path / "skip.h5"), posterior, np.zeros((2, len(sm.SPECTRAL_DIMS))), metadata)
+    sm.save_fit(str(tmp_path / "skip.h5"), posterior, np.zeros((2, N_DELAYED_SPECTRAL_DIMS)), metadata)
 
     summary = sm.fit_and_save(job, str(tmp_path), max_iterations=100, n_live_points=40)
 
@@ -730,7 +841,7 @@ def test_save_fit_failure_leaves_no_file_at_the_final_path(tmp_path):
     posterior = pd.DataFrame({"mw_age": [1.0, 2.0]})
     path = str(tmp_path / "failed_write.h5")
     with pytest.raises(TypeError):
-        sm.save_fit(path, posterior, np.zeros((2, len(sm.SPECTRAL_DIMS))), {"converged": object()})
+        sm.save_fit(path, posterior, np.zeros((2, N_DELAYED_SPECTRAL_DIMS)), {"converged": object()})
     assert not os.path.exists(path)
 
 
@@ -740,7 +851,7 @@ def test_fit_and_save_refits_a_truncated_output_file(tmp_path):
     posterior = pd.DataFrame({"mw_age": [1.0, 2.0]})
     metadata = {"converged": True, "run_time": 5.0, "n_iterations": 10, "log_evidence": -1.0}
     path = str(tmp_path / "truncated.h5")
-    sm.save_fit(path, posterior, np.zeros((2, len(sm.SPECTRAL_DIMS))), metadata)
+    sm.save_fit(path, posterior, np.zeros((2, N_DELAYED_SPECTRAL_DIMS)), metadata)
     with open(path, "r+b") as damaged:
         damaged.truncate(os.path.getsize(path) // 2)
 
@@ -990,7 +1101,7 @@ def test_fit_evidence_refuses_a_fit_that_is_not_photometric(tmp_path):
     posterior = pd.DataFrame({"log_age": [0.5]})
     metadata = {"converged": True, "run_time": 1.0, "n_iterations": 5, "max_iterations": sm.MAX_ITERATIONS,
                 "log_evidence": -5.0, "log_evidence_error": 0.25, "redshift": 0.1}
-    samples = np.zeros((1, len(sm.SPECTRAL_DIMS)))
+    samples = np.zeros((1, N_DELAYED_SPECTRAL_DIMS))
     sm.save_fit(str(tmp_path / "spectrum.h5"), posterior, samples, dict(metadata, kind="spectrum"))
     sm.save_fit(str(tmp_path / "no_kind.h5"), posterior, samples, metadata)
     job = {"magnitudes": np.full(12, 20.0), "errors": np.full(12, 0.05), "redshift": 0.1}
@@ -1084,16 +1195,16 @@ def fake_fitters(monkeypatch):
     """Replace both fitters and both labellers; returns the list of fitters called, in order."""
     called = []
 
-    def fake_fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_points):
+    def fake_fit_spectrum(spectrum, redshift, sfh_model, output_basename, max_iterations, n_live_points):
         called.append("spectrum")
-        return fake_fit(len(sm.SPECTRAL_DIMS))
+        return fake_fit(len(sm.spectral_dims(sfh_model)))
 
     def fake_fit_photometry(magnitudes, errors, redshift, sfh_model, output_basename, max_iterations,
                             n_live_points):
         called.append("photometry")
         return fake_fit(len(sm.MODELS[sfh_model].photometric_dims))
 
-    def fake_spectral_labels(unit_cube_samples, redshift):
+    def fake_spectral_labels(unit_cube_samples, redshift, sfh_model):
         return pd.DataFrame({"mw_age": [1.0, 2.0]})
 
     def fake_photometric_labels(unit_cube_samples, redshift, magnitudes, errors, rng, sfh_model):
@@ -1129,7 +1240,7 @@ def test_fit_and_save_never_replaces_a_fit_of_the_other_kind(tmp_path, fake_fitt
     posterior = pd.DataFrame({"mw_age": [1.0, 2.0]})
     metadata = {"converged": True, "run_time": 5.0, "n_iterations": 10, "log_evidence": -1.0}
     path = str(tmp_path / "1105771463723476992.h5")
-    sm.save_fit(path, posterior, np.zeros((2, len(sm.SPECTRAL_DIMS))), metadata)   # no kind: a spectral fit
+    sm.save_fit(path, posterior, np.zeros((2, N_DELAYED_SPECTRAL_DIMS)), metadata)   # no kind: a spectral fit
     photometric_job = {"job_id": "1105771463723476992", "kind": "photometry", "magnitudes": np.full(12, 20.0),
                        "errors": np.full(12, 0.05), "redshift": 0.1}
 
@@ -1162,7 +1273,7 @@ def test_fit_and_save_never_reads_or_replaces_a_fit_of_an_older_sfh_model(tmp_pa
     path = str(tmp_path / "old_model.h5")
     posterior = pd.DataFrame({"mw_age": [1.0, 2.0]})
     metadata = {"converged": True, "run_time": 5.0, "n_iterations": 10, "log_evidence": -1.0}
-    sm.save_fit(path, posterior, np.zeros((2, len(sm.SPECTRAL_DIMS))), metadata)
+    sm.save_fit(path, posterior, np.zeros((2, N_DELAYED_SPECTRAL_DIMS)), metadata)
     with h5py.File(path, "a") as stored:
         del stored.attrs["sfh_model"]    # what every fit written before the delayed-tau model looks like
     job, _ = mock_job("old_model", np.random.default_rng(35))
@@ -1213,16 +1324,72 @@ def test_fit_and_save_fits_each_photometry_job_with_its_own_model(tmp_path, monk
     assert "truth_model" not in old_metadata
 
 
-def test_fit_and_save_fails_a_spectral_job_of_the_dblplaw_model(tmp_path, fake_fitters):
-    """Spectral fits are delayed-tau only (DPL spec, decision 1)."""
-    job = {"job_id": "spectral_dpl", "kind": "spectrum", "sfh_model": "dblplaw", "redshift": 0.1,
-           "spectrum": {"wavelength": np.arange(4000.0, 4010.0), "flux": np.ones(10), "ivar": np.ones(10)}}
+def test_fit_and_save_fits_each_spectral_job_with_its_own_model(tmp_path, monkeypatch):
+    """A DPL spectral job is fitted and labelled as DPL (DPL spec, amendment 2), a job without sfh_model as
+    delayed-tau; both store their model."""
+    fitted_models = []
+    labelled_models = []
 
-    summary = sm.fit_and_save(job, str(tmp_path), max_iterations=10, n_live_points=25)
+    def capturing_fit_spectrum(spectrum, redshift, sfh_model, output_basename, max_iterations, n_live_points):
+        fitted_models.append(sfh_model)
+        return fake_fit(len(sm.spectral_dims(sfh_model)))
 
-    assert summary["status"] == "failed"
-    assert "delayed only" in summary["error"]
-    assert fake_fitters == []
+    def capturing_labels(unit_cube_samples, redshift, sfh_model):
+        labelled_models.append(sfh_model)
+        return pd.DataFrame({"mw_age": [1.0, 2.0]})
+
+    monkeypatch.setattr(sm, "fit_spectrum", capturing_fit_spectrum)
+    monkeypatch.setattr(sm, "posterior_labels", capturing_labels)
+    spectrum = {"wavelength": np.arange(4000.0, 4010.0), "flux": np.ones(10), "ivar": np.ones(10)}
+    dblplaw_job = {"job_id": "spectral_dpl", "kind": "spectrum", "sfh_model": "dblplaw", "redshift": 0.1,
+                   "spectrum": spectrum}
+    old_job = {"job_id": "spectral_old", "redshift": 0.1, "spectrum": spectrum}   # as every delayed-tau job
+
+    for job in (dblplaw_job, old_job):
+        summary = sm.fit_and_save(job, str(tmp_path), max_iterations=10, n_live_points=25)
+        assert summary["status"] == "fitted", summary["error"]
+
+    assert fitted_models == ["dblplaw", "delayed"]
+    assert labelled_models == ["dblplaw", "delayed"]
+    _, dblplaw_metadata = sm.load_fit(str(tmp_path / "spectral_dpl.h5"))
+    assert dblplaw_metadata["sfh_model"] == "dblplaw"
+    assert dblplaw_metadata["kind"] == "spectrum"
+    assert dblplaw_metadata["log_evidence_error"] == 0.1
+    assert sm.load_unit_cube_samples(str(tmp_path / "spectral_dpl.h5")).shape[1] == 9
+    _, old_metadata = sm.load_fit(str(tmp_path / "spectral_old.h5"))
+    assert old_metadata["sfh_model"] == "delayed"
+
+
+class ZeroNoise:
+    """Stands in for the numpy Generator of make_mock_spectrum: no noise, so the mock is the model itself."""
+
+    def normal(self, mean, sigma, size):
+        """Zeros of the requested length (dimensionless), whatever mean and sigma are."""
+        return np.zeros(size)
+
+
+@pytest.mark.skipif(not multinest_available(), reason="pymultinest cannot import (LD_LIBRARY_PATH?)")
+def test_fit_and_save_dblplaw_spectral_smoke_run_on_a_noiseless_mock(tmp_path):
+    """A short MultiNest run of a DPL spectrum job (noiseless mock) is saved with DPL labels and model."""
+    wavelength_vacuum = 10 ** np.arange(np.log10(3700), np.log10(9300), 1e-4)
+    template = sm.prepare_spectrum(wavelength_vacuum, np.ones_like(wavelength_vacuum),
+                                   np.full_like(wavelength_vacuum, 100.0), ebv=0.0)
+    cube = np.random.default_rng(54).random(len(sm.spectral_dims("dblplaw")))
+    spectrum, _ = sm.make_mock_spectrum(cube, 0.1, template, ZeroNoise(), "dblplaw")
+    job = {"job_id": "dpl_spectral_smoke", "kind": "spectrum", "sfh_model": "dblplaw", "spectrum": spectrum,
+           "redshift": 0.1}
+
+    summary = sm.fit_and_save(job, str(tmp_path), max_iterations=100, n_live_points=40)
+
+    assert summary["status"] == "fitted", summary["error"]
+    posterior, metadata = sm.load_fit(str(tmp_path / "dpl_spectral_smoke.h5"))
+    assert metadata["sfh_model"] == "dblplaw"
+    assert metadata["kind"] == "spectrum"
+    assert "log_evidence_error" in metadata
+    assert sm.load_unit_cube_samples(str(tmp_path / "dpl_spectral_smoke.h5")).shape[1] == 9
+    for column in (*sm.MODELS["dblplaw"].training_labels, "veldisp", "noise_scale", "model_r"):
+        assert column in posterior.columns, column
+        assert np.isfinite(posterior[column]).all(), column
 
 
 @pytest.mark.skipif(not multinest_available(), reason="pymultinest cannot import (LD_LIBRARY_PATH?)")
@@ -1260,26 +1427,26 @@ def test_recomputed_evidence_error_agrees_with_multinest(tmp_path):
 
 
 def test_calibration_cubes_are_deterministic_and_fill_the_spectral_cube():
-    first = sm.draw_calibration_cubes(60, np.random.default_rng(0))
-    second = sm.draw_calibration_cubes(60, np.random.default_rng(0))
+    first = sm.draw_calibration_cubes(60, np.random.default_rng(0), "delayed")
+    second = sm.draw_calibration_cubes(60, np.random.default_rng(0), "delayed")
     assert np.array_equal(first, second)
-    assert first.shape == (60, len(sm.SPECTRAL_DIMS))
+    assert first.shape == (60, N_DELAYED_SPECTRAL_DIMS)
     assert np.all((first >= 0) & (first < 1))
 
 
 def test_calibration_labels_are_the_log_parameters_and_the_stellar_mass():
-    calibration_labels = sm.MODELS[sm.SPECTRAL_MODEL].calibration_labels
+    calibration_labels = sm.MODELS["delayed"].calibration_labels
     assert calibration_labels == ["log_age", "log_tau", "log_metallicity", "log_mstar"]
-    assert len(sm.SPECTRAL_DIMS) == 8 and len(sm.MODELS["delayed"].photometric_dims) == 6
+    assert N_DELAYED_SPECTRAL_DIMS == 8 and len(sm.MODELS["delayed"].photometric_dims) == 6
 
 
 def test_calibration_coverage_runs_on_the_calibration_labels():
     """Truth = one posterior sample: every calibration label has one usable mock and a finite coverage."""
-    cubes = np.random.default_rng(36).random((3, len(sm.SPECTRAL_DIMS)))
-    posterior = sm.posterior_labels(cubes, 0.1)
+    cubes = np.random.default_rng(36).random((3, N_DELAYED_SPECTRAL_DIMS))
+    posterior = sm.posterior_labels(cubes, 0.1, "delayed")
     truth = posterior.iloc[1]
 
-    calibration_labels = sm.MODELS[sm.SPECTRAL_MODEL].calibration_labels
+    calibration_labels = sm.MODELS["delayed"].calibration_labels
     table = sm.calibration_coverage({"calib_000": posterior}, {"calib_000": truth}, calibration_labels)
 
     assert len(table) == len(calibration_labels) * len(sm.CALIBRATION_LEVELS)
@@ -1293,8 +1460,8 @@ def test_draw_calibration_mocks_ids_count_and_seed():
                                    np.full_like(wavelength_vacuum, 100.0), ebv=0.0)
     templates = [(template, 0.1), (template, 0.2)]
 
-    jobs, truths = sm.draw_calibration_mocks(3, templates, np.random.default_rng(4))
-    repeat_jobs, _ = sm.draw_calibration_mocks(3, templates, np.random.default_rng(4))
+    jobs, truths = sm.draw_calibration_mocks(3, templates, np.random.default_rng(4), "delayed")
+    repeat_jobs, _ = sm.draw_calibration_mocks(3, templates, np.random.default_rng(4), "delayed")
 
     assert [job["job_id"] for job in jobs] == ["calib_000", "calib_001", "calib_002"]
     assert set(truths) == {job["job_id"] for job in jobs}
@@ -1302,6 +1469,65 @@ def test_draw_calibration_mocks_ids_count_and_seed():
     for job, repeat in zip(jobs, repeat_jobs):
         assert np.array_equal(job["spectrum"]["flux"], repeat["spectrum"]["flux"])
         assert job["redshift"] == repeat["redshift"]
+
+
+def test_calibration_cubes_of_each_model_fill_its_spectral_cube():
+    """Delayed-tau cubes are the same uniforms as before; DPL cubes have the 9 DPL spectral dimensions."""
+    delayed_cubes = sm.draw_calibration_cubes(33, np.random.default_rng(0), "delayed")
+    assert np.array_equal(delayed_cubes, np.random.default_rng(0).random((33, 8)))
+    dblplaw_cubes = sm.draw_calibration_cubes(33, np.random.default_rng(0), "dblplaw")
+    assert dblplaw_cubes.shape == (33, len(sm.spectral_dims("dblplaw"))) == (33, 9)
+    assert np.all((dblplaw_cubes >= 0) & (dblplaw_cubes < 1))
+
+
+def test_draw_dblplaw_calibration_mocks_are_dblplaw_spectrum_jobs_with_current_truths(tmp_path):
+    """DPL mocks are DPL spectrum jobs, and a mock file of them is current in a DPL folder only."""
+    wavelength_vacuum = 10 ** np.arange(np.log10(3700), np.log10(9300), 1e-4)
+    template = sm.prepare_spectrum(wavelength_vacuum, np.ones_like(wavelength_vacuum),
+                                   np.full_like(wavelength_vacuum, 100.0), ebv=0.0)
+
+    jobs, truths = sm.draw_calibration_mocks(2, [(template, 0.1)], np.random.default_rng(53), "dblplaw")
+
+    assert [job["job_id"] for job in jobs] == ["calib_000", "calib_001"]
+    for job in jobs:
+        assert job["kind"] == sm.SPECTRUM_JOB
+        assert sm.job_model(job) == "dblplaw"
+        assert set(sm.MODELS["dblplaw"].calibration_labels) <= set(truths[job["job_id"]].index)
+    mock_file = str(tmp_path / sm.CALIBRATION_MOCK_FILE)
+    joblib.dump((jobs, truths), mock_file)
+    assert sm.calibration_mocks_are_current(mock_file, "dblplaw")
+    assert not sm.calibration_mocks_are_current(mock_file, "delayed")
+
+
+def test_dblplaw_spectral_jobs_copy_the_galaxies_and_leave_out_the_mocks():
+    """The galaxies' delayed-tau spectral jobs become DPL jobs with the same id, spectrum and redshift."""
+    spectrum = {"wavelength": np.arange(4000.0, 4010.0), "flux": np.ones(10), "ivar": np.ones(10)}
+    delayed_jobs = [{"job_id": "calib_000", "spectrum": spectrum, "redshift": 0.2},
+                    {"job_id": "1105771463723476992", "spectrum": spectrum, "redshift": 0.1},
+                    {"job_id": "10311134961714089984", "kind": "spectrum", "sfh_model": "delayed",
+                     "spectrum": spectrum, "redshift": 0.3}]
+
+    jobs = sm.dblplaw_spectral_jobs(delayed_jobs)
+
+    assert [job["job_id"] for job in jobs] == ["1105771463723476992", "10311134961714089984"]
+    for job, delayed_job in zip(jobs, delayed_jobs[1:]):
+        assert job["kind"] == sm.SPECTRUM_JOB
+        assert job["sfh_model"] == "dblplaw"
+        assert job["redshift"] == delayed_job["redshift"]
+        assert job["spectrum"] is delayed_job["spectrum"]
+    assert "sfh_model" not in delayed_jobs[1]          # the delayed-tau jobs are left alone
+    assert delayed_jobs[2]["sfh_model"] == "delayed"
+
+
+def test_dblplaw_spectral_jobs_refuse_a_job_that_is_not_a_delayed_spectrum_job():
+    spectrum = {"wavelength": np.arange(4000.0, 4010.0), "flux": np.ones(10), "ivar": np.ones(10)}
+    photometry = {"job_id": "123", "kind": "photometry", "magnitudes": np.full(12, 20.0),
+                  "errors": np.full(12, 0.05), "redshift": 0.1}
+    dblplaw_spectrum = {"job_id": "456", "sfh_model": "dblplaw", "spectrum": spectrum, "redshift": 0.1}
+
+    for job in (photometry, dblplaw_spectrum):
+        with pytest.raises(ValueError, match="not a delayed-tau spectrum job"):
+            sm.dblplaw_spectral_jobs([job])
 
 
 def test_calibration_coverage_of_a_calibrated_and_a_biased_label():
@@ -1492,13 +1718,19 @@ def test_photometric_summary_labels_and_prefixes():
     assert sm.PHOTOMETRIC_PREFIXES == {"delayed": "phot_", "dblplaw": "phot_dblplaw_"}
 
 
+def test_spectral_prefixes_keep_the_delayed_names_plain():
+    """The delayed-tau spectral columns keep the names of the first fits; the DPL ones are spec_dblplaw_*."""
+    assert sm.SPECTRAL_PREFIXES == {"delayed": "", "dblplaw": "spec_dblplaw_"}
+    assert set(sm.SPECTRAL_PREFIXES) == set(sm.MODELS)
+
+
 # =============================================================================
 # Superseding the results of an earlier model (spectroscopic_reference.ipynb, section 4)
 # =============================================================================
 def write_fit(path, max_iterations=sm.MAX_ITERATIONS, sfh_model="delayed"):
     """A small fit file; sfh_model=None writes it as a 16-bin fit did, without the key."""
     metadata = {"converged": True, "run_time": 1.0, "n_iterations": 5, "max_iterations": max_iterations}
-    sm.save_fit(str(path), pd.DataFrame({"log_age": [0.5]}), np.zeros((1, len(sm.SPECTRAL_DIMS))), metadata)
+    sm.save_fit(str(path), pd.DataFrame({"log_age": [0.5]}), np.zeros((1, N_DELAYED_SPECTRAL_DIMS)), metadata)
     with h5py.File(path, "a") as fit_file:
         if sfh_model is None:
             del fit_file.attrs["sfh_model"]
@@ -1663,6 +1895,22 @@ def test_supersede_refuses_a_model_other_than_the_folder_model(tmp_path):
     with pytest.raises(ValueError, match="dblplaw"):
         sm.supersede_outdated_fits(str(folder), "delayed")
     assert (folder / "dpl.h5").exists()
+
+
+def test_supersede_keeps_dblplaw_spectral_fits_only_in_their_folder(tmp_path):
+    """spectral_fits_dblplaw is a DPL folder: a delayed-tau fit leaves it; spectral_fits does the reverse."""
+    dblplaw_folder = tmp_path / "spectral_fits_dblplaw"
+    delayed_folder = tmp_path / "spectral_fits"
+    for folder in (dblplaw_folder, delayed_folder):
+        folder.mkdir()
+        write_fit(folder / "dpl.h5", sfh_model="dblplaw")
+        write_fit(folder / "delayed.h5", sfh_model="delayed")
+
+    assert sm.supersede_outdated_fits(str(dblplaw_folder), "dblplaw") == ["delayed.h5"]
+    assert sm.supersede_outdated_fits(str(delayed_folder), "delayed") == ["dpl.h5"]
+    assert (dblplaw_folder / "dpl.h5").exists() and (delayed_folder / "delayed.h5").exists()
+    with pytest.raises(ValueError, match="dblplaw"):
+        sm.supersede_outdated_fits(str(dblplaw_folder), "delayed")
 
 
 def write_cross_mock_file(path, fitted_model, truth_model):

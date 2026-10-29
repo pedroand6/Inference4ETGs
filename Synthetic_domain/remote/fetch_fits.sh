@@ -3,9 +3,9 @@
 # without overwriting a local file that is newer than the downloaded one.
 # Works on a running job too (it gets the files copied to out/ so far) and after a timeout.
 #
-# The fits folder is the one the job recorded in out/fits_subdir.txt (spectral_fits, photometric_fits or
-# photometric_fits_dblplaw). Jobs made before it was recorded are spectral fits; for them FITS_SUBDIR may name
-# the folder [default spectral_fits].
+# The fits folder is the one the job recorded in out/fits_subdir.txt (spectral_fits, spectral_fits_dblplaw,
+# photometric_fits or photometric_fits_dblplaw). Jobs made before it was recorded are delayed-tau spectral
+# fits; for them FITS_SUBDIR may name the folder [default spectral_fits].
 # A FITS_SUBDIR that differs from the recorded folder stops the script: spectral and photometric fits share
 # job ids (specobjids), so a fit copied into the wrong folder would replace another.
 #
