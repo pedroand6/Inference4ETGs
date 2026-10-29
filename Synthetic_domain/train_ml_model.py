@@ -87,6 +87,8 @@ def parse_arguments(argv=None):
     parser.add_argument("--data-dir", default=".")
     parser.add_argument("--output-dir", default="ml_runs")
     parser.add_argument("--epochs", type=int, default=ml_networks.DEFAULT_CONFIG["epochs"])
+    # A noisy validation loss can stop a run long before its cosine schedule ends; --patience EPOCHS runs it out
+    parser.add_argument("--patience", type=int, default=ml_networks.DEFAULT_CONFIG["patience"])
     parser.add_argument("--max-train-rows", type=int, default=None, help="subset for smoke tests")
     parser.add_argument("--max-validation-rows", type=int, default=None, help="subset for smoke tests")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
@@ -144,7 +146,8 @@ def main(argv=None):
 
     # 4. Train and save
     config = ml_networks.model_config(sfh_model)
-    config.update(embedding=arguments.embedding, epochs=arguments.epochs, seed=arguments.seed,
+    config.update(embedding=arguments.embedding, epochs=arguments.epochs, patience=arguments.patience,
+                  seed=arguments.seed,
                   training_commit=git_commit(), torch_version=torch.__version__,
                   n_training_models=len(training), device=device)
     estimator = ml_networks.build_estimator(config)

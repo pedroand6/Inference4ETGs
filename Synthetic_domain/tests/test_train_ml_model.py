@@ -50,6 +50,11 @@ def test_sfh_model_argument_defaults_to_delayed():
         train_ml_model.parse_arguments(["--sfh-model", "exponential"])
 
 
+def test_patience_argument_defaults_to_the_config_patience():
+    assert train_ml_model.parse_arguments([]).patience == ml_networks.DEFAULT_CONFIG["patience"]
+    assert train_ml_model.parse_arguments(["--patience", "200"]).patience == 200
+
+
 @pytest.mark.parametrize("sfh_model", ["delayed", "dblplaw"])
 def test_training_cli_writes_a_run(tmp_path, sfh_model):
     if not sets_are_generated(sfh_model):

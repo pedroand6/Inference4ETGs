@@ -10,6 +10,7 @@
 # Environment variables (set by submit_training.sh with hljob -e):
 #   EMBEDDINGS   embeddings to train, one after the other   [default "mlp"]
 #   SFH_MODEL    SFH model to train: delayed or dblplaw          [default delayed]
+#   PATIENCE     epochs without validation improvement before stopping   [default: ml_networks.DEFAULT_CONFIG]
 #   ALLOW_CPU_TRAINING  set to 1 to train on the CPU when no GPU is usable   [default: fail without a GPU]
 set -euo pipefail
 
@@ -64,7 +65,7 @@ for embedding in $EMBEDDINGS; do
     set_stage "train_${embedding}_${SFH_MODEL}" "$OUT_DIR/memory_samples.csv"
     training_exit_code=0
     python train_ml_model.py --sfh-model "$SFH_MODEL" --embedding "$embedding" \
-        --output-dir "$OUT_DIR/ml_runs" --device "$DEVICE" \
+        --output-dir "$OUT_DIR/ml_runs" --device "$DEVICE" ${PATIENCE:+--patience "$PATIENCE"} \
         >> "$OUT_DIR/train_${embedding}_${SFH_MODEL}.log" 2>&1 || training_exit_code=$?
     echo "'$embedding' finished with exit code $training_exit_code"
     if [[ "$training_exit_code" -ne 0 ]]; then

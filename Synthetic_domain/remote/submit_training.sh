@@ -10,6 +10,7 @@
 #   TIME_LIMIT       wall-clock limit HH:MM:SS                                 [default 08:00:00]
 #   EMBEDDINGS       embeddings to train, one after the other                  [default "mlp"]
 #   SFH_MODEL        SFH model to train: delayed or dblplaw (sfh_models.MODELS)   [default delayed]
+#   PATIENCE         epochs without validation improvement before stopping   [default: the training default]
 #   ALLOW_CPU_TRAINING set to 1 to let the job train on the CPU if no GPU is usable    [default: the job fails]
 #   JOB_NAME         name shown in `hljob ls`                                  [default ml_training]
 #   MULTINEST_SOURCE the MultiNest source folder (build_env.sh builds it)      [default ~/Programs/MultiNest]
@@ -78,7 +79,7 @@ fi
 
 # 6. Submit (one GPU job that trains every embedding). Both files are uploaded to inputs/.
 job_id="$(hljob run --detach --gpu -n "$JOB_NAME" -c "$CORES" -m "$MEMORY_MB" -t "$TIME_LIMIT" \
-    -e EMBEDDINGS="$EMBEDDINGS" -e SFH_MODEL="$SFH_MODEL" -e ALLOW_CPU_TRAINING="$ALLOW_CPU_TRAINING" "$@" \
+    -e EMBEDDINGS="$EMBEDDINGS" -e SFH_MODEL="$SFH_MODEL" -e PATIENCE="${PATIENCE:-}" -e ALLOW_CPU_TRAINING="$ALLOW_CPU_TRAINING" "$@" \
     -f "$scratch_dir/bundle.tar.gz" -f "$REMOTE_DIR/train_job.sh" -- bash inputs/train_job.sh)"
 
 echo "Submitted job $job_id (GPU, $CORES cores, $MEMORY_MB MB, $TIME_LIMIT, SFH model: $SFH_MODEL," \
