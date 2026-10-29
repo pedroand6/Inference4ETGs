@@ -13,8 +13,7 @@ Each model has its own training sets, photometric Bagpipes fits and flow, and a 
 
 The predictor is a **neural posterior estimator (NPE)**: an embedding network followed by a `zuko` normalizing flow. It is trained on synthetic Bagpipes galaxies. The project tries hard to **validate honestly**: there are held-out synthetic sets, a set of real galaxies whose labels come from Bagpipes fits of their SDSS spectra (and of their S-PLUS photometry), a locked test set, and independent physical checks that do not depend on full-spectrum fitting.
 
-> Status in one line (2026-10-26): the pipeline was rebuilt around the delayed-τ model (it replaces the earlier 16-bin non-parametric SFH, which is kept in git as the tag `nonparametric-16bin`). The code and its unit tests are done, and the synthetic sets are generated (commit `0d6316d`; the Part 1 numbers are in [§8](#8-current-status-and-results)). **The fits, the training and the evaluation (Parts 2 and 3) are still pending the PC runs**, so §8 has no results for them yet.
-> 2026-10-28: the double power law was added next to delayed-τ ([spec](docs/superpowers/specs/2026-10-28-double-power-law-sfh-design.md)). Its sets are generated (commit `623cd5c`); its fits, its training and the model comparison are pending the PC runs.
+> Status (2026-10-29): two SFH models run side by side, delayed-τ and the double power law (DPL, [spec](docs/superpowers/specs/2026-10-28-double-power-law-sfh-design.md)). The delayed-τ model has validation results on 382 reference galaxies (755 of 1359 spectra fitted). The ML agrees with photometric Bagpipes on every label, and with spectral Bagpipes on τ and Z but not on age and M*. The DPL sets, photometric fits and flow are done; the reading of its fits and the model comparison are running on the PC. The locked test has not been run. Details in [§8](#8-current-status-and-results).
 
 ---
 
@@ -344,7 +343,7 @@ Note that `spectroscopic_reference.csv` stores `specobjid` as text. Read it with
 
 - `.venv/` holds Python 3.10 with [`requirements.txt`](requirements.txt) (Bagpipes 1.3.5, PyMultiNest, torch 2.5.1, zuko 1.2.0, …). The MultiNest shared library is built into `.venv/lib`.
 - The Jupyter kernel **"Inference4ETGs (MultiNest)"** (`inference4etgs`) runs `.venv/bin/python` with `LD_LIBRARY_PATH=.../.venv/lib`, so PyMultiNest loads. Select it when you open a notebook.
-- Run the tests (266 tests, CPU, about 4 to 6 minutes; without `LD_LIBRARY_PATH` the MultiNest tests are skipped; the two tests that read the generated parquet sets run now that the delayed-tau sets exist, and skip with a reason if 16-bin sets are put back):
+- Run the tests (267 tests, CPU, about 4 to 6 minutes; without `LD_LIBRARY_PATH` the MultiNest tests are skipped; the two tests that read the generated parquet sets run now that the delayed-tau sets exist, and skip with a reason if 16-bin sets are put back):
 
   ```bash
   cd Synthetic_domain && LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python -m pytest tests -q
@@ -354,13 +353,13 @@ Note that `spectroscopic_reference.csv` stores `specobjid` as text. Read it with
 
 ### Heavy work: `hljob` jobs on the PC ([`Synthetic_domain/remote/`](Synthetic_domain/remote/))
 
-Each job runs in a fresh container on the PC. Inside the job, `build_env.sh` rebuilds Python 3.10 with the pinned versions and MultiNest (skipped for training jobs), and checks the Bagpipes grids against `grid_md5.txt`. Only one job runs at a time. Follow a job with `hljob logs ID -f`, `hljob ls` and `hljob wait ID`.
+Each job runs in a fresh container on the PC. Inside the job, `build_env.sh` rebuilds Python 3.10 with the pinned versions and MultiNest (skipped for training jobs), and checks the Bagpipes grids against `grid_md5.txt`. Only one job runs at a time; later submissions queue. The PyTorch download is retried three times, because a dropped CUDA wheel used to fail whole jobs. Follow a job with `hljob logs ID -f`, `hljob ls` and `hljob wait ID`.
 
 | Task | Submit (runs locally) | Fetch the results |
 |---|---|---|
 | MultiNest fits of exported jobs | `Synthetic_domain/remote/submit_fits.sh` (defaults: 16 cores, 7000 MB, 24 h, `WORKERS=14`, `MAX_ITERATIONS=50000`, `FITS_SUBDIR=spectral_fits` (set `photometric_fits` for the photometric fits, `photometric_fits_dblplaw` for the DPL ones); `SKIP_LIST` defaults to `skipped_fit_jobs.txt` for `spectral_fits` only; finished `.h5` files travel along, so a resubmission resumes; `BUNDLE_ONLY=<folder>` packs without submitting) | `remote/fetch_fits.sh ID` → the folder the job recorded in `out/fits_subdir.txt` (works on running jobs too) |
-| NPE training (GPU) | `Synthetic_domain/remote/submit_training.sh` (defaults: `EMBEDDINGS=mlp`, `SFH_MODEL=delayed` (set `dblplaw` for the DPL flow), 8 h; fails fast without a usable GPU) | `hljob fetch ID -o /tmp/ml_job`, then copy `out/ml_runs/*` into `Synthetic_domain/ml_runs/` |
-| Execute a notebook | `Synthetic_domain/remote/submit_notebook.sh <notebook> <inputs…>` (defaults: 8 cores, 16000 MB, 4 h; `GPU=1`, `NEEDS_MULTINEST=1`, `FLOAT32_FILES` to halve big parquet uploads, `BUNDLE_ONLY`; inputs written `../path` keep their repo path; `.env` is never packed; the exact notebook-1 and notebook-2 commands are in the remote README) | `remote/fetch_notebook.sh ID` → puts the executed notebook and every file it wrote back in place |
+| NPE training (GPU) | `Synthetic_domain/remote/submit_training.sh` (defaults: `EMBEDDINGS=mlp`, `SFH_MODEL=delayed` (set `dblplaw` for the DPL flow), `PATIENCE` (early-stopping patience; `PATIENCE=200` runs the whole 200-epoch schedule), 8 h; fails fast without a usable GPU; pass `--pause-llm` and `MEMORY_MB=7100`) | `hljob fetch ID -o /tmp/ml_job`, then copy `out/ml_runs/*` into `Synthetic_domain/ml_runs/` |
+| Execute a notebook | `Synthetic_domain/remote/submit_notebook.sh <notebook> <inputs…>` (defaults: 8 cores, 16000 MB, 4 h — the server now refuses more than 7168 MB, so set `MEMORY_MB=7100` and `HLJOB_OPTIONS="--pause-llm"`; `GPU=1`, `NEEDS_MULTINEST=1`, `FLOAT32_FILES` to halve big parquet uploads, `BUNDLE_ONLY`; inputs written `../path` keep their repo path; `.env` is never packed; the exact notebook-1 and notebook-2 commands are in the remote README) | `remote/fetch_notebook.sh ID` → puts the executed notebook and every file it wrote back in place |
 
 `python run_spectral_fits.py --status` (from `Synthetic_domain/`) counts finished fits. The details, server facts and benchmark are in [`Synthetic_domain/remote/README.md`](Synthetic_domain/remote/README.md).
 
@@ -377,14 +376,15 @@ One job at a time, all on the PC except step 2:
 
 ### Run order of the DPL model
 
-The delayed-τ results above are kept. After the local supersede step before each notebook-2 job:
+The delayed-τ results above are kept. Run the local supersede step before each notebook-2 job. Every job runs with `HLJOB_OPTIONS="--pause-llm"` and `MEMORY_MB=7100`, the server's limit. Job ids are given for the 2026-10-28 runs.
 
-1. `training_set.ipynb` (CPU): the DPL sets (the delayed-τ sets exist, so they are skipped).
-2. `SFH_MODEL=dblplaw remote/submit_training.sh` (GPU, `MEMORY_MB=7100`): the DPL MLP.
-3. `spectroscopic_reference.ipynb` (CPU, a small bundle with only the fitted spectra, plus `spectral_fits`, `photometric_fits` and, once it exists, `photometric_fits_dblplaw`): exports the DPL jobs, the DPL mocks and the cross-fits. The fit folders must travel: without their mock files the notebook would draw new mocks, and fetching those would pair the stored fits with truths they were never fitted on (`fetch_notebook.sh` refuses to overwrite a differing mock file).
-4. `FITS_SUBDIR=photometric_fits_dblplaw remote/submit_fits.sh` (16 cores, 15 workers), then `FITS_SUBDIR=photometric_fits` for the 33 cross-fits of the DPL mocks.
-5. The notebook again, with the same inputs and `photometric_fits_dblplaw`: reads all fits.
-6. `ml_model.ipynb` (`GPU=1 CORES=16 MEMORY_MB=7100 TIME_LIMIT=12:00:00 HLJOB_OPTIONS=--pause-llm`; inputs as its Inputs line, including `photometric_cross_fits.csv`): both models and the comparison.
+1. `training_set.ipynb` (CPU, add `-e N_JOBS=15` to `HLJOB_OPTIONS` for 16 workers): builds the DPL sets; the delayed-τ sets exist, so they are skipped. Done, job `2af348`, commit `623cd5c`.
+2. `SFH_MODEL=dblplaw PATIENCE=200 remote/submit_training.sh --pause-llm` (GPU, `MEMORY_MB=7100`): the DPL MLP. Done, job `04f71e`, commit `a825485`. `PATIENCE=200` is needed: with the default patience of 15, the noisy DPL validation loss stopped the run at epoch 114 (validation −3.83), while the full schedule reaches −6.22.
+3. `spectroscopic_reference.ipynb` (CPU, `TIME_LIMIT=08:00:00`): exports the DPL jobs, the DPL mocks and the cross-fits. Use a small bundle with only the fitted spectra, plus `spectral_fits`, `photometric_fits` and, once it exists, `photometric_fits_dblplaw`. Done, job `3b8055`, commit `cd905f9`.
+   - The fit folders must travel. Without their mock files the notebook would draw new mocks, and fetching those would pair the stored fits with truths they were never fitted on. `fetch_notebook.sh` refuses to overwrite a differing mock file.
+4. `FITS_SUBDIR=photometric_fits_dblplaw remote/submit_fits.sh` (16 cores, 15 workers), then `FITS_SUBDIR=photometric_fits` for the 32 cross-fits of the DPL mocks. Done, jobs `1c1690` and `bac0cd`: 446 of 446 fits in each folder.
+5. The notebook again, with the same inputs and `photometric_fits_dblplaw`: reads all fits. Running, job `f55243`.
+6. `ml_model.ipynb` (`GPU=1 CORES=16 MEMORY_MB=7100 TIME_LIMIT=12:00:00 HLJOB_OPTIONS=--pause-llm`; inputs as its Inputs line, including `photometric_cross_fits.csv`): evaluates both models and runs the comparison. Pending.
 
 ### Typical cycle
 
@@ -398,27 +398,81 @@ The delayed-τ results above are kept. After the local supersede step before eac
 
 ## 8. Current status and results
 
-As of 2026-10-26. The code is rebuilt and unit-tested (159 tests), and **Part 1 has been run on the PC** (commit `0d6316d`: the executed `training_set.ipynb` and the regenerated `color_color.png` and `coverage_criterion.png`). **There are no results yet for Parts 2 and 3**: the fits, the training and the evaluation are pending the PC runs listed in §7. The committed outputs of notebooks 2 and 3, their CSVs and the part-2 figures still describe the 16-bin model and are replaced as those runs finish; the 16-bin ML runs are kept in `ml_runs/superseded/` (`mlp_16bin`, `cnn_16bin`).
+As of 2026-10-29. The code for both SFH models is built and unit-tested (267 tests).
+- **Delayed-τ:** has its sets, spectral and photometric fits, flow and a validation run on the PC (the 2026-10-27 results below).
+- **DPL:** has its sets, photometric fits and flow. Reading its fits (notebook 2) and the comparison of the two models (`ml_model.ipynb`) are running on the PC.
+- **Locked test:** not run, for either model.
 
-### Part 1 results (delayed-τ, from the committed outputs of `training_set.ipynb`)
+### Part 1 — synthetic sets
 
-- **Sets:** 524,288 training models, and 16,384 each in the validation and test sets (`synthetic_validation.parquet`, `synthetic_test.parquet`), none without a magnitude offset.
-- **Detected bands:** the held-out sets have 9.2 (validation) and 9.1 (test) detected bands on average, against 8.7 for DR3 (the mean over all galaxies with `PROB_GAL` above the cut, as the notebook prints it). The 51,456 DR3 galaxies kept for the coverage test have 8.9 on average; 4,632 of them have `zml` outside the prior range.
-- **Coverage of DR3 by the training domain** (coverage v2, p > 0.01): **91.2% of the 51,456 DR3 galaxies**, and 93.0% of the 46,824 with `zml` inside the redshift range. The 16-bin domain covered 92.1%. The old geometric test (K = 2) gives 99.1%.
-- **Synthetic validation galaxies covered:** 96.2% (the expected value is about 99%).
-- **Where coverage is lowest:** `zml` in (0.7, 1.0] (72.2%, outside the prior range) and the bright end (r ≤ 17: 77.4%; 17–18: 84.1%), then the faintest bin (21.0–21.5: 86.7%). It is 89–96% for `zml` up to 0.7 and 90–94% for r between 18 and 21, and it does not depend on the number of detected bands (90–92%).
+| | delayed-τ (commit `0d6316d`) | DPL (commit `623cd5c`) |
+|---|---|---|
+| Training / validation / test models | 524,288 / 16,384 / 16,384 | 524,288 / 16,384 / 16,384 |
+| Detected bands, held-out sets (DR3: 8.7) | 9.2 (validation), 9.1 (test) | 8.6 (both) |
+| DR3 covered (coverage v2, p > 0.01, 51,456 galaxies) | **91.2%** (93.0% with `zml` inside the prior) | **90.3%** (92.2%) |
+| Synthetic validation galaxies covered (expected about 99%) | 96.2% | 96.6% |
 
-### What exists for the delayed-τ model
+- **Delayed-τ coverage by region:** coverage is lowest for `zml` in (0.7, 1.0] (72.2%, outside the prior range) and at the bright end (r ≤ 17: 77.4%; 17–18: 84.1%). It is 89–96% for `zml` up to 0.7 and does not depend on the number of detected bands.
+- **DPL against delayed-τ:** the DPL domain covers the real colours about as well as delayed-τ does.
 
-- The prior, components and analytic labels (`synthetic_model.py` §1–2), the 8-dimensional spectral and 6-dimensional photometric fit priors, `sfh_model` metadata and the superseding of old fits (§6–8).
-- `training_set.ipynb`, `spectroscopic_reference.ipynb` and `ml_model.ipynb` rewritten for the new labels and targets, and checked only for valid JSON and compiling code (notebook 1 has since been executed on the PC, see Part 1 results above; notebooks 2 and 3 are pending).
-- `ml_data.py` / `ml_networks.py` / `train_ml_model.py` with 9 targets, analytic decoding and `target_names` checkpoints.
-- Literature tables (MPA-JHU, Gallazzi) refetched for all 168 galaxies.
+### Part 2 — reference set (delayed-τ fits, 2026-10-27)
 
-### What the PC runs will answer
+- **Galaxies:** 1362 S-PLUS × SDSS/BOSS galaxies are selected and 1359 spectra downloaded. Of these, 755 have converged spectral fits; the run was paused with 604 left, about 12 h of PC time.
+- **Split:** the hash-based split of the fitted, covered galaxies gives validation 382, test 357 and excluded 623.
+- **Calibration of the fitters** (33 mocks; a label passes at 95% coverage ≥ 0.85):
 
-- Part 2: whether the spectral and photometric fitters pass the calibration test (95% coverage ≥ 0.85 for `log_age`, `log_tau`, `log_metallicity`, `log_mstar`, with 68% reported), the new validation/test split, and the three validation layers.
-- Part 3: synthetic calibration of the MLP, the two "works" verdicts (against photometric and spectral Bagpipes) on the validation half, and the DR3 catalogue. The locked test runs once, after the validation results are inspected.
+  | Label | Spectral 68% / 95% | Photometric 68% / 95% |
+  |---|---|---|
+  | `log_age` | 0.73 / 0.94 | 0.67 / 0.91 |
+  | `log_tau` | 0.52 / 0.88 | 0.48 / 0.94 |
+  | `log_metallicity` | 0.58 / 0.85 | 0.55 / 0.85 |
+  | `log_mstar` | 0.76 / 0.91 | 0.61 / 0.94 |
+
+  - Both fitters miss the bar by one mock on metallicity (28/33 = 0.848).
+  - The spectral misses are within 0.015 dex of very narrow intervals.
+  - Most photometric misses are truths near the upper Z prior edge.
+  - The bar is kept as it is.
+  - Both fitters are overconfident at 1σ (68% coverage below 0.68).
+- **Validation rulers (755 fits):**
+  - Lick indices within 2σ of the data: 76–91% per index.
+  - Gallazzi ages: offset −0.13 dex, scatter 0.18.
+  - Hα SFR: offset +0.09 dex, scatter 0.32 (n = 284).
+  - The index code agrees with MPA-JHU to ≤ 0.017.
+- **Photometric fits:** all 381 validation galaxies with at least 6 detected bands converged.
+
+### Part 3 — delayed-τ ML posterior (2026-10-27)
+
+- **Synthetic calibration** (validation set): the 9 flow targets have 68% and 95% coverage within 0.005 of nominal. The point-mass labels `f_young`, `f_old` and `log_ssfr` are over-covered (ties at 0 or 1, report-only).
+- **"Works" test** (validation half; a label passes if at least 80% of reference medians fall inside the ML 95% interval and the median offset is at most 1σ):
+
+  | Label | vs photometric Bagpipes (381): inside 95% / offset | vs spectral Bagpipes (382): inside 95% / offset |
+  |---|---|---|
+  | `log_age` | 0.96 / −0.16σ ✅ | 0.77 / −0.79σ ❌ |
+  | `log_tau` | 1.00 / +0.16σ ✅ | 0.96 / −0.33σ ✅ |
+  | `log_metallicity` | 0.98 / −0.00σ ✅ | 0.86 / −0.78σ ✅ |
+  | `log_mstar` | 0.91 / −0.44σ ✅ | 0.70 / −0.01σ ❌ |
+  | `mw_age` (reported) | 0.95 / −0.37σ | 0.76 / −1.00σ |
+
+- **Against photometric Bagpipes,** the ML agrees on every label.
+- **Against spectral Bagpipes,** age misses mostly in star-forming galaxies: 0.93 of passive galaxies fall inside the interval, against 0.70 of star-forming ones. M* misses with no bias, because the intervals are too narrow.
+- **Photometric Bagpipes does no better** against the spectra. Its spectral values within ±2σ: `log_age` 0.85, `log_metallicity` 0.68 and `log_mstar` 0.51. The spectral disagreement is therefore mostly the limit of what 12 colours can tell, not an ML fault.
+- **DR3 catalogue:** 49,094 of 54,150 galaxies are predicted (`ml_sfh_catalogue.parquet`).
+
+### DPL model (2026-10-28 onwards)
+
+- **Photometric fits:** done for 446 jobs (381 validation galaxies, 32 DPL calibration mocks and 33 cross-fits of the delayed-τ mocks). The delayed-τ folder adds the 32 cross-fits of the DPL mocks. One of the 33 DPL mocks was left out because it has fewer than 6 detected bands. Convergence and the DPL calibration verdict come with the notebook-2 reading run.
+- **Flow:** the MLP is trained over the full 200-epoch schedule (`ml_runs/mlp_dblplaw`, validation loss −6.22). An early-stopped run (epoch 114, −3.83) is kept in `ml_runs/superseded/mlp_dblplaw_patience15`.
+- **Evidence:** the evidence errors of the delayed-τ photometric fits are recomputed (median √(H / n_live) = 0.12).
+- **Next on the PC:** notebook 2 reads all fits, then `ml_model.ipynb` evaluates both models and runs the four comparisons:
+  - each model's ML against its own photometric Bagpipes;
+  - delayed-τ against DPL on the shared labels;
+  - all four estimators against the spectra;
+  - the Bayesian evidence per galaxy, and the true-model recovery on the cross-fitted mocks.
+
+### Still open
+
+- **Remaining spectral fits:** 604 delayed-τ spectral fits (about 12 h). They would grow the validation and test halves, and both models' photometric fits would then follow.
+- **Locked test:** runs once, for both models, when the user asks. It needs `EXPORT_LOCKED_TEST_JOBS = True` in notebook 2 and `RUN_LOCKED_TEST = True` in `ml_model.ipynb`.
 
 ### The 16-bin model, for reference (tag `nonparametric-16bin`)
 
@@ -437,12 +491,12 @@ These results are superseded; they explain why the model changed.
 - **The spectral reference is delayed-τ only.** Its `mw_age` and mass fractions carry the delayed-τ SFH shape, so part of a DPL disagreement with the spectra is a model difference, not an ML error.
 - **The delayed-τ family is restrictive.** One smooth, single-peaked SFH with one metallicity cannot represent bursts, quenching, rejuvenation or chemical evolution. A galaxy whose true SFH is outside the family gets the closest delayed-τ posterior, and the calibration tests cannot detect that.
 - **Point masses in the derived labels.** About 20% of the prior has no star formation in the last 100 Myr, so `log_sfr` sits on its floor there, and `f_young` and `f_old` are often exactly 0 or 1. Coverage and rank statistics of these labels are inflated by ties; they are report-only.
-- **Degeneracies** between age, τ and metallicity are likely with 12 bands, and the wide log-uniform prior may leave parts of the posterior prior-dominated. Whether the new reference comparisons pass is open until the PC runs.
+- **Degeneracies** between age, τ and metallicity are likely with 12 bands, and the wide log-uniform prior may leave parts of the posterior prior-dominated. For delayed-τ, the ML matches photometric Bagpipes on every label but not the spectral ages and masses (§8); photometric Bagpipes matches the spectra no better.
 - **DR3 vs DR4 photometry.** The noise model and the coverage reference use DR3. The reference-set apertures are DR4 (`dr4_dual`), whose g band is about 0.07–0.1 mag fainter than DR3 for the same objects. This is an unresolved decision: move everything to DR4, or fetch DR3 apertures.
-- **Spectral-fit calibration.** In the 16-bin run the spectral fits were overconfident at 1σ (68% coverage ≈ 0.5–0.67). Whether the delayed-τ fits are is open.
+- **Fit calibration at 1σ.** The delayed-τ spectral and photometric fits are overconfident at 68% (coverage 0.48–0.76 over the four labels), as the 16-bin spectral fits were. At 95% both fitters miss the 0.85 bar by one mock on metallicity.
 - **[Mg/Fe] > 0** in passive galaxies cannot be modelled by solar-scaled BC03 (the Mgb excess seen in the 16-bin run).
 - **BOSS galaxies** have 2″ fibres against 3″ apertures. They are reported separately and have no MPA-JHU or Gallazzi values.
-- **Notebook outputs lag their source.** `training_set.ipynb` and its two figures (`color_color.png`, `coverage_criterion.png`) are delayed-τ. The saved outputs of notebooks 2 and 3, `spectroscopic_reference.csv`, `validation_summary.csv`, `ml_evaluation_summary.csv` and the part-2 figures still show the 16-bin pass until the PC re-runs replace them.
+- **Notebook outputs lag their source.** The executed `ml_model.ipynb` and `ml_evaluation_summary.csv` hold the 2026-10-27 delayed-τ run. The notebook's source now evaluates both models, so its saved outputs are replaced by the next PC run.
 - **Notebook 2 on the PC** needs network access (SDSS queries) and a large upload (the CSFD map alone is 289 MB); see the remote README.
 
 ---
