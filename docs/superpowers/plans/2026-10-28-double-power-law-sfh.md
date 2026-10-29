@@ -7930,3 +7930,3073 @@ GPU=1 CORES=16 MEMORY_MB=7100 TIME_LIMIT=12:00:00 FLOAT32_FILES="training_set.pa
   3. Commit and report.
 
 The remaining delayed-τ spectral fits (604 galaxies, about 12 h) are independent of this plan. They run only when the user asks (`WORKERS=15 CORES=16 FITS_SUBDIR=spectral_fits remote/submit_fits.sh`). Afterwards, notebook 2 grows the validation half, and both models' photometric jobs grow with it (Steps 4–6).
+
+---
+
+## Part 2 of the plan: DPL spectral fits and the locked test (spec Amendment 2, 2026-10-29)
+
+Tasks 1–12 are done. These tasks follow the contract in the ledger workspace (`contract2.md`). The delayed-τ spectral path must keep producing identical fits, because a PC job is fitting the remaining delayed-τ spectra from a bundle made at `9b4676e`.
+
+**Controller rulings on the plan review:**
+- **Spectral likelihood guard:** the try/except that returns LOG_ZERO where Bagpipes raises also covers delayed-τ. This is accepted: every value that computes is unchanged.
+- **Stub check:** Task 15 Step 8 runs notebook cells on fake posteriors for about 30 s on the CPU. This is accepted as a quick check; it runs no fits and no flow.
+- **Notebook-2 bundle:** when all spectra are fitted, the notebook-2 bundle sends only as many spectra as keep it under about 1 GB, and the notebook downloads the rest, as on 2026-10-27.
+
+
+### Task 13: Spectral fits of either SFH model (`synthetic_model.py`), the DPL spectral jobs and mocks, and the remote scripts for `spectral_fits_dblplaw`
+
+**Why:** Amendment 2 lifts decision 1. Every galaxy with a prepared spectrum is also fitted with the double power law, with the machinery of the delayed-τ spectral fits (calibration polynomial, likelihood, MultiNest settings). Today the spectral path is hard-wired to delayed-τ (`SPECTRAL_MODEL`, `SPECTRAL_DIMS`) and `fit_spectrum_job` refuses a DPL job. After this task every spectral function takes the model by name, as the photometric ones already do.
+
+**The delayed-τ spectral path must not change.** A PC job is fitting the remaining delayed-τ spectral fits from a bundle made at commit 9b4676e. Its fits are read by notebook 2 together with the 788 already fetched. So for delayed-τ:
+- the dims are the same 8 names in the same order (`spectral_dims("delayed")`);
+- the components, drawn labels, posterior labels and mock truths are the same numbers. Two new regression tests relabel a stored fit and the stored mocks and compare them with the files to 1e-10 (they skip on a machine without `spectral_fits/`);
+- the likelihood gives the same value at every point. The one change is that a point where Bagpipes raises now returns `LOG_ZERO`, as in the photometric fit, instead of killing the fit through PyMultiNest's `sys.exit`;
+- the delayed-τ mocks are drawn from the same uniforms (`rng.random((n, 8))`). New mock jobs also carry `kind` and `sfh_model` keys; `export_job` wrote both before too, so the job files are the same.
+
+**Existing tests (spec amendment 4).** They change only through the new `sfh_model` argument. Two tests stated the old decision and are replaced:
+- `test_spectral_dims_stay_the_delayed_photometric_dims_plus_the_nuisances` asserted `sm.SPECTRAL_MODEL == "delayed"`. That constant is removed. The new `test_spectral_dims_are_each_model_s_photometric_dims_plus_the_nuisances` keeps its delayed-τ assertions (the same dims, now also as the literal list of 8 names) and its `len(... photometric_dims) == 7`;
+- `test_fit_and_save_fails_a_spectral_job_of_the_dblplaw_model` asserted that a DPL spectral job fails. It becomes `test_fit_and_save_fits_each_spectral_job_with_its_own_model`.
+
+`sm.SPECTRAL_DIMS` in a test becomes `N_DELAYED_SPECTRAL_DIMS` (`= len(sm.spectral_dims("delayed"))`) in `tests/test_synthetic_model.py` and a module constant `SPECTRAL_DIMS = sm.spectral_dims("delayed")` in `tests/test_spectral_validation.py`. Both have the old value, and the short names keep the lines under 110 characters.
+
+**Files:**
+- Modify: `Synthetic_domain/synthetic_model.py`:
+  - section 5: `SPECTRAL_MODEL` and `SPECTRAL_DIMS` (today lines 607–613) become `SPECTRAL_NUISANCE_DIMS` and `spectral_dims()`; `spectral_components` (636–656);
+  - section 6: `fit_spectrum` (736–769), `posterior_labels` (823–845), `make_mock_spectrum` (1130–1161), the `save_fit` docstring (1172), `fit_spectrum_job` (1245–1258);
+  - section 7: `SPECTRAL_PREFIXES` after `PHOTOMETRIC_PREFIXES` (1377), `draw_calibration_cubes` and `draw_calibration_mocks` (1439–1468), new `dblplaw_spectral_jobs` after them;
+  - section 8: `FIT_FOLDER_MODELS` (1681–1682) and the `supersede_outdated_fits` docstring (1754–1755).
+- Modify: `Synthetic_domain/spectral_validation.py`: new constant `RULER_SFH_MODEL = "delayed"` and the three `sm.spectral_components` calls (lines 193, 211, 343) with their docstrings (204–205, 333). The rulers stay on the delayed-τ fits (amendment 2, item 3).
+- Modify: `Synthetic_domain/run_spectral_fits.py` (module docstring, lines 7–10).
+- Modify: `Synthetic_domain/spectroscopic_reference.ipynb`, names only: in cells 11, 14, 16 and 18 the changed functions get `"delayed"`, and `sm.SPECTRAL_MODEL` / `sm.SPECTRAL_DIMS` give way to their values. Without this step `tests/test_notebooks.py` fails, and cell 11 would call `draw_calibration_mocks` without its model. Task 14 then builds on this version.
+- Modify: `Synthetic_domain/remote/submit_fits.sh` (header lines 8–12, `SKIP_LIST` help lines 24–25, the `SKIP_LIST` branch lines 44–48), `Synthetic_domain/remote/fit_job.sh` (lines 13–14), `Synthetic_domain/remote/fetch_fits.sh` (lines 6–8), `Synthetic_domain/remote/README.md` (after line 40, and lines 45–46), `.gitignore` (repo root, after line 21).
+- Create: `Synthetic_domain/skipped_fit_jobs_dblplaw.txt` (comments only).
+- Test: `Synthetic_domain/tests/test_synthetic_model.py`, `Synthetic_domain/tests/test_spectral_validation.py`; `tests/test_notebooks.py` must stay green.
+
+**Interfaces:**
+- **Consumes:** `MODELS[...]` (`photometric_dims`, `components`, `training_labels`, `drawn_labels`, `calibration_labels`), `training_unit_vector`, `summary_labels` through `sample_label_row`, `run_multinest`, `job_kind`, `job_model`, `SPECTRUM_JOB`, `CALIBRATION_ID_PREFIX`, `calibration_mocks_are_current`, `supersede_outdated_fits`, `model_file`.
+- **Produces (`synthetic_model`):**
+  - `SPECTRAL_NUISANCE_DIMS = ["veldisp", "noise_scale"]`;
+  - `spectral_dims(sfh_model) -> list`: `MODELS[sfh_model].photometric_dims + SPECTRAL_NUISANCE_DIMS` (8 names for delayed-τ, 9 for DPL);
+  - `spectral_components(cube, redshift, sfh_model) -> (bagpipes_components, drawn, noise_scale)`;
+  - `fit_spectrum(spectrum, redshift, sfh_model, output_basename, max_iterations, n_live_points=N_LIVE_POINTS) -> dict` (the model comes before `output_basename`, as in `fit_photometry`);
+  - `posterior_labels(unit_cube_samples, redshift, sfh_model) -> DataFrame`;
+  - `make_mock_spectrum(cube, redshift, template_spectrum, rng, sfh_model) -> (spectrum, truth)`;
+  - `draw_calibration_cubes(n_mocks, rng, sfh_model) -> ndarray (n_mocks, len(spectral_dims(sfh_model)))`;
+  - `draw_calibration_mocks(n_mocks, templates, rng, sfh_model) -> (jobs, truths)`; the jobs now carry `kind = SPECTRUM_JOB` and `sfh_model`;
+  - `dblplaw_spectral_jobs(delayed_jobs) -> list`: one new job per galaxy, with the same `job_id`, `spectrum` and `redshift`, `kind = SPECTRUM_JOB` and `sfh_model = "dblplaw"`. Calibration mocks (`calib_*`) are left out, and anything but a delayed-τ spectrum job raises `ValueError`;
+  - `fit_spectrum_job(job, ...)` fits with `job_model(job)`; a DPL spectrum job is no longer refused;
+  - `SPECTRAL_PREFIXES = {"delayed": "", "dblplaw": "spec_dblplaw_"}`: the reference-CSV prefix of each model's spectral columns. Task 14 uses it, and Task 15 must use it too, not define it again;
+  - `FIT_FOLDER_MODELS["spectral_fits_dblplaw"] = "dblplaw"`; `fit_is_current` and `supersede_outdated_fits` work for that folder unchanged;
+  - removed: `SPECTRAL_MODEL` and `SPECTRAL_DIMS` (the notebooks, modules and tests no longer use them).
+- **Produces (`spectral_validation`):** `RULER_SFH_MODEL = "delayed"`; every ruler reads the delayed-τ spectral fits.
+- **Produces (remote):** `FITS_SUBDIR=spectral_fits_dblplaw remote/submit_fits.sh` bundles `spectral_fits_dblplaw/jobs/` and the finished `spectral_fits_dblplaw/*.h5`. Its `SKIP_LIST` default is the new `skipped_fit_jobs_dblplaw.txt` (comments only, so no job is left out). Each model gets its own list because the DPL mocks reuse the `calib_<k>` ids of the delayed-τ mocks: the delayed-τ list would drop DPL mocks, and the reverse. The photometric folders keep having no list. `fit_job.sh` records the folder in `out/fits_subdir.txt`, and `fetch_fits.sh` copies into the recorded folder (and stops if a `FITS_SUBDIR` you set differs from it). Neither needs a logic change, because neither has a branch on the folder name; only their comments name the new folder.
+
+**Running the scripts.** Steps 1, 3, 4, 5 and 7 are Python scripts. Save each one in your scratchpad, not in the repository, under the name the step gives. Each replacement asserts that its old text occurs exactly as often as stated, so a script stops without writing the file in hand when that file differs from what this plan expects. Files it patched before that one stay patched: restore them with `git checkout -- <file>` before running it again. Set `SCRATCH` to your scratchpad directory first. Every command runs from `Synthetic_domain/` unless the step says otherwise.
+
+- [ ] **Step 1: Write the failing tests**
+
+Save as `$SCRATCH/task13_tests.py` and run `../.venv/bin/python "$SCRATCH/task13_tests.py" .`:
+
+```python
+"""Task 13, step 1: the tests of the spectral fits of either SFH model. Argument: the Synthetic_domain folder."""
+import sys
+
+root = sys.argv[1]
+
+
+def patch(path, pairs):
+    text = open(path).read()
+    for old, new, count in pairs:
+        assert text.count(old) == count, (path, text.count(old), old[:80])
+        text = text.replace(old, new)
+    open(path, "w").write(text)
+    print(path, "patched")
+
+
+# =============================================================================================================
+# tests/test_spectral_validation.py: only the new sfh_model argument (the rulers read delayed-tau fits)
+# =============================================================================================================
+patch(root + "/tests/test_spectral_validation.py", [
+    ("sm.spectral_components(cube, redshift)", "sm.spectral_components(cube, redshift, \"delayed\")", 2),
+    ("sm.spectral_components(cube, 0.1)", "sm.spectral_components(cube, 0.1, \"delayed\")", 1),
+    ("sm.SPECTRAL_DIMS", "SPECTRAL_DIMS", 6),
+    ("""GRID = np.arange(3700.0, 5600.0, 1.0)      # rest-frame air Angstrom, 1 A pixels
+""", """GRID = np.arange(3700.0, 5600.0, 1.0)      # rest-frame air Angstrom, 1 A pixels
+SPECTRAL_DIMS = sm.spectral_dims("delayed")  # unit-cube dims of the delayed-tau fits the rulers read
+""", 1),
+])
+
+# =============================================================================================================
+# tests/test_synthetic_model.py
+# =============================================================================================================
+NEW_SPECTRAL_COMPONENT_TESTS = '''
+
+def test_dblplaw_spectral_components_are_its_photometric_components_plus_the_nuisances():
+    """A DPL spectral point is the DPL photometric point at fixed redshift, plus veldisp and noise_scale."""
+    dims = sm.spectral_dims("dblplaw")
+    cube = np.random.default_rng(50).random(len(dims))
+    photometric_part = cube[:len(sm.MODELS["dblplaw"].photometric_dims)]
+    expected_components, expected_drawn = sm.photometric_components(photometric_part, 0.08, "dblplaw")
+
+    bagpipes_components, drawn, noise_scale = sm.spectral_components(cube, 0.08, "dblplaw")
+
+    veldisp = sm.uniform(cube[dims.index("veldisp")], *sm.VELDISP_RANGE)
+    assert bagpipes_components["veldisp"] == veldisp
+    assert drawn["veldisp"] == veldisp
+    assert noise_scale == 10 ** sm.uniform(cube[dims.index("noise_scale")], *sm.LOG_NOISE_SCALE_RANGE)
+    del bagpipes_components["veldisp"]
+    del drawn["veldisp"]
+    assert bagpipes_components == expected_components
+    assert drawn == expected_drawn
+    assert "dblplaw" in bagpipes_components and "delayed" not in bagpipes_components
+'''
+
+NEW_FIT_FILE_TESTS = '''
+
+def test_spectral_dims_are_each_model_s_photometric_dims_plus_the_nuisances():
+    """Each SFH model has its own spectral fits (DPL spec, amendment 2); delayed-tau keeps its 8 dims."""
+    assert sm.spectral_dims("delayed") == [*sm.MODELS["delayed"].photometric_dims, "veldisp", "noise_scale"]
+    assert sm.spectral_dims("delayed") == ["log_age_fraction", "log_tau", "log_metallicity", "av_ism",
+                                           "log_tau_bc", "logU", "veldisp", "noise_scale"]
+    assert sm.spectral_dims("dblplaw") == [*sm.MODELS["dblplaw"].photometric_dims, "veldisp", "noise_scale"]
+    assert len(sm.MODELS["dblplaw"].photometric_dims) == 7
+    assert not hasattr(sm, "SPECTRAL_DIMS") and not hasattr(sm, "SPECTRAL_MODEL")
+
+
+STORED_SPECTRAL_FITS = "spectral_fits"          # the delayed-tau spectral fits (git-ignored; on this machine)
+N_REGRESSION_SAMPLES = 3                        # samples relabelled from the stored fit (~0.1 s each)
+STORED_LABEL_RTOL = 1e-10                       # "exactly", up to floating-point rounding
+
+
+def stored_spectral_fit_files():
+    """Fit files of galaxies (not mocks) in STORED_SPECTRAL_FITS, sorted; empty when the folder is missing."""
+    if not os.path.isdir(STORED_SPECTRAL_FITS):
+        return []
+    names = sorted(name for name in os.listdir(STORED_SPECTRAL_FITS)
+                   if name.endswith(".h5") and not name.startswith(sm.CALIBRATION_ID_PREFIX))
+    return [os.path.join(STORED_SPECTRAL_FITS, name) for name in names]
+
+
+@pytest.mark.skipif(len(stored_spectral_fit_files()) == 0, reason="no stored delayed-tau spectral fit here")
+def test_delayed_spectral_labels_reproduce_a_stored_spectral_fit():
+    """The refactored delayed-tau spectral path labels a stored fit's samples exactly as its fit did."""
+    fit_file = stored_spectral_fit_files()[0]
+    stored_posterior, metadata = sm.load_fit(fit_file)
+    assert metadata["sfh_model"] == "delayed"
+    # The stored rows are the labels of the thinned samples, in order
+    kept_samples = sm.thinned_samples(sm.load_unit_cube_samples(fit_file))
+    assert kept_samples.shape[1] == len(sm.spectral_dims("delayed"))
+
+    relabelled = sm.posterior_labels(kept_samples[:N_REGRESSION_SAMPLES], metadata["redshift"], "delayed")
+
+    assert set(relabelled.columns) == set(stored_posterior.columns)
+    for column in stored_posterior.columns:
+        assert np.allclose(relabelled[column], stored_posterior[column].iloc[:N_REGRESSION_SAMPLES],
+                           rtol=STORED_LABEL_RTOL, atol=0, equal_nan=True), column
+
+
+STORED_MOCK_FILE = os.path.join(STORED_SPECTRAL_FITS, sm.CALIBRATION_MOCK_FILE)
+NOTEBOOK_SEED = 0                               # SEED of spectroscopic_reference.ipynb, which drew the mocks
+
+
+@pytest.mark.skipif(not os.path.exists(STORED_MOCK_FILE), reason="no stored delayed-tau spectral mocks here")
+def test_delayed_calibration_mock_truths_reproduce_the_stored_mocks():
+    """The delayed-tau mock points, redrawn from the notebook's seed, give the stored truths exactly."""
+    mock_jobs, truths = joblib.load(STORED_MOCK_FILE)
+    cubes = sm.draw_calibration_cubes(len(mock_jobs), np.random.default_rng(NOTEBOOK_SEED), "delayed")
+    noise_index = sm.spectral_dims("delayed").index("noise_scale")
+    for mock_index in (0, len(mock_jobs) - 1):
+        cube = cubes[mock_index].copy()
+        cube[noise_index] = sm.UNIT_NOISE_CUBE_VALUE       # as make_mock_spectrum sets it
+        mock_job = mock_jobs[mock_index]
+        truth = sm.posterior_labels(cube[np.newaxis, :], mock_job["redshift"], "delayed").iloc[0]
+        stored_truth = truths[mock_job["job_id"]]
+        assert list(truth.index) == list(stored_truth.index)
+        assert np.allclose(truth.to_numpy(dtype=float), stored_truth.to_numpy(dtype=float),
+                           rtol=STORED_LABEL_RTOL, atol=0)
+
+
+def test_dblplaw_posterior_labels_give_every_dblplaw_training_label():
+    """Three DPL spectral samples: one row each, every DPL training label finite and as the prior maps it."""
+    cubes = np.random.default_rng(51).random((3, len(sm.spectral_dims("dblplaw"))))
+    posterior = sm.posterior_labels(cubes, 0.1, "dblplaw")
+
+    training_labels = sm.MODELS["dblplaw"].training_labels
+    assert len(posterior) == 3
+    assert list(posterior.columns[:len(training_labels)]) == training_labels
+    for column in (*training_labels, "veldisp", "noise_scale", "model_r"):
+        assert np.isfinite(posterior[column]).all(), column
+    for row_index, cube in enumerate(cubes):
+        _, drawn, noise_scale = sm.spectral_components(cube, 0.1, "dblplaw")
+        for label in sm.MODELS["dblplaw"].drawn_labels:
+            assert posterior[label].iloc[row_index] == drawn[label], label
+        assert posterior["noise_scale"].iloc[row_index] == noise_scale
+    fractions = posterior[["f_young", "f_mid", "f_old"]].sum(axis=1)
+    assert np.allclose(fractions, 1.0)
+
+
+def test_make_mock_spectrum_of_the_dblplaw_model_returns_its_truth_labels():
+    """A DPL mock spectrum is finite and its truth carries every DPL training and calibration label."""
+    job, truth = mock_job("mock_dblplaw", np.random.default_rng(52), "dblplaw")
+    assert job["sfh_model"] == "dblplaw"
+    assert np.isfinite(job["spectrum"]["flux"]).all()
+    for column in (*sm.MODELS["dblplaw"].training_labels, "veldisp", "noise_scale", "model_r"):
+        assert np.isfinite(truth[column]), column
+    assert set(sm.MODELS["dblplaw"].calibration_labels) <= set(truth.index)
+    assert truth["noise_scale"] == 1.0    # the mock noise is the template's own
+'''
+
+NEW_JOB_TESTS = '''
+
+def test_calibration_cubes_of_each_model_fill_its_spectral_cube():
+    """Delayed-tau cubes are the same uniforms as before; DPL cubes have the 9 DPL spectral dimensions."""
+    delayed_cubes = sm.draw_calibration_cubes(33, np.random.default_rng(0), "delayed")
+    assert np.array_equal(delayed_cubes, np.random.default_rng(0).random((33, 8)))
+    dblplaw_cubes = sm.draw_calibration_cubes(33, np.random.default_rng(0), "dblplaw")
+    assert dblplaw_cubes.shape == (33, len(sm.spectral_dims("dblplaw"))) == (33, 9)
+    assert np.all((dblplaw_cubes >= 0) & (dblplaw_cubes < 1))
+
+
+def test_draw_dblplaw_calibration_mocks_are_dblplaw_spectrum_jobs_with_current_truths(tmp_path):
+    """DPL mocks are DPL spectrum jobs, and a mock file of them is current in a DPL folder only."""
+    wavelength_vacuum = 10 ** np.arange(np.log10(3700), np.log10(9300), 1e-4)
+    template = sm.prepare_spectrum(wavelength_vacuum, np.ones_like(wavelength_vacuum),
+                                   np.full_like(wavelength_vacuum, 100.0), ebv=0.0)
+
+    jobs, truths = sm.draw_calibration_mocks(2, [(template, 0.1)], np.random.default_rng(53), "dblplaw")
+
+    assert [job["job_id"] for job in jobs] == ["calib_000", "calib_001"]
+    for job in jobs:
+        assert job["kind"] == sm.SPECTRUM_JOB
+        assert sm.job_model(job) == "dblplaw"
+        assert set(sm.MODELS["dblplaw"].calibration_labels) <= set(truths[job["job_id"]].index)
+    mock_file = str(tmp_path / sm.CALIBRATION_MOCK_FILE)
+    joblib.dump((jobs, truths), mock_file)
+    assert sm.calibration_mocks_are_current(mock_file, "dblplaw")
+    assert not sm.calibration_mocks_are_current(mock_file, "delayed")
+
+
+def test_dblplaw_spectral_jobs_copy_the_galaxies_and_leave_out_the_mocks():
+    """The galaxies' delayed-tau spectral jobs become DPL jobs with the same id, spectrum and redshift."""
+    spectrum = {"wavelength": np.arange(4000.0, 4010.0), "flux": np.ones(10), "ivar": np.ones(10)}
+    delayed_jobs = [{"job_id": "calib_000", "spectrum": spectrum, "redshift": 0.2},
+                    {"job_id": "1105771463723476992", "spectrum": spectrum, "redshift": 0.1},
+                    {"job_id": "10311134961714089984", "kind": "spectrum", "sfh_model": "delayed",
+                     "spectrum": spectrum, "redshift": 0.3}]
+
+    jobs = sm.dblplaw_spectral_jobs(delayed_jobs)
+
+    assert [job["job_id"] for job in jobs] == ["1105771463723476992", "10311134961714089984"]
+    for job, delayed_job in zip(jobs, delayed_jobs[1:]):
+        assert job["kind"] == sm.SPECTRUM_JOB
+        assert job["sfh_model"] == "dblplaw"
+        assert job["redshift"] == delayed_job["redshift"]
+        assert job["spectrum"] is delayed_job["spectrum"]
+    assert "sfh_model" not in delayed_jobs[1]          # the delayed-tau jobs are left alone
+    assert delayed_jobs[2]["sfh_model"] == "delayed"
+
+
+def test_dblplaw_spectral_jobs_refuse_a_job_that_is_not_a_delayed_spectrum_job():
+    spectrum = {"wavelength": np.arange(4000.0, 4010.0), "flux": np.ones(10), "ivar": np.ones(10)}
+    photometry = {"job_id": "123", "kind": "photometry", "magnitudes": np.full(12, 20.0),
+                  "errors": np.full(12, 0.05), "redshift": 0.1}
+    dblplaw_spectrum = {"job_id": "456", "sfh_model": "dblplaw", "spectrum": spectrum, "redshift": 0.1}
+
+    for job in (photometry, dblplaw_spectrum):
+        with pytest.raises(ValueError, match="not a delayed-tau spectrum job"):
+            sm.dblplaw_spectral_jobs([job])
+'''
+
+NEW_FIT_ROUTING_TESTS = '''def test_fit_and_save_fits_each_spectral_job_with_its_own_model(tmp_path, monkeypatch):
+    """A DPL spectral job is fitted and labelled as DPL (DPL spec, amendment 2), a job without sfh_model as
+    delayed-tau; both store their model."""
+    fitted_models = []
+    labelled_models = []
+
+    def capturing_fit_spectrum(spectrum, redshift, sfh_model, output_basename, max_iterations, n_live_points):
+        fitted_models.append(sfh_model)
+        return fake_fit(len(sm.spectral_dims(sfh_model)))
+
+    def capturing_labels(unit_cube_samples, redshift, sfh_model):
+        labelled_models.append(sfh_model)
+        return pd.DataFrame({"mw_age": [1.0, 2.0]})
+
+    monkeypatch.setattr(sm, "fit_spectrum", capturing_fit_spectrum)
+    monkeypatch.setattr(sm, "posterior_labels", capturing_labels)
+    spectrum = {"wavelength": np.arange(4000.0, 4010.0), "flux": np.ones(10), "ivar": np.ones(10)}
+    dblplaw_job = {"job_id": "spectral_dpl", "kind": "spectrum", "sfh_model": "dblplaw", "redshift": 0.1,
+                   "spectrum": spectrum}
+    old_job = {"job_id": "spectral_old", "redshift": 0.1, "spectrum": spectrum}   # as every delayed-tau job
+
+    for job in (dblplaw_job, old_job):
+        summary = sm.fit_and_save(job, str(tmp_path), max_iterations=10, n_live_points=25)
+        assert summary["status"] == "fitted", summary["error"]
+
+    assert fitted_models == ["dblplaw", "delayed"]
+    assert labelled_models == ["dblplaw", "delayed"]
+    _, dblplaw_metadata = sm.load_fit(str(tmp_path / "spectral_dpl.h5"))
+    assert dblplaw_metadata["sfh_model"] == "dblplaw"
+    assert dblplaw_metadata["kind"] == "spectrum"
+    assert dblplaw_metadata["log_evidence_error"] == 0.1
+    assert sm.load_unit_cube_samples(str(tmp_path / "spectral_dpl.h5")).shape[1] == 9
+    _, old_metadata = sm.load_fit(str(tmp_path / "spectral_old.h5"))
+    assert old_metadata["sfh_model"] == "delayed"
+
+
+class ZeroNoise:
+    """Stands in for the numpy Generator of make_mock_spectrum: no noise, so the mock is the model itself."""
+
+    def normal(self, mean, sigma, size):
+        """Zeros of the requested length (dimensionless), whatever mean and sigma are."""
+        return np.zeros(size)
+
+
+@pytest.mark.skipif(not multinest_available(), reason="pymultinest cannot import (LD_LIBRARY_PATH?)")
+def test_fit_and_save_dblplaw_spectral_smoke_run_on_a_noiseless_mock(tmp_path):
+    """A short MultiNest run of a DPL spectrum job (noiseless mock) is saved with DPL labels and model."""
+    wavelength_vacuum = 10 ** np.arange(np.log10(3700), np.log10(9300), 1e-4)
+    template = sm.prepare_spectrum(wavelength_vacuum, np.ones_like(wavelength_vacuum),
+                                   np.full_like(wavelength_vacuum, 100.0), ebv=0.0)
+    cube = np.random.default_rng(54).random(len(sm.spectral_dims("dblplaw")))
+    spectrum, _ = sm.make_mock_spectrum(cube, 0.1, template, ZeroNoise(), "dblplaw")
+    job = {"job_id": "dpl_spectral_smoke", "kind": "spectrum", "sfh_model": "dblplaw", "spectrum": spectrum,
+           "redshift": 0.1}
+
+    summary = sm.fit_and_save(job, str(tmp_path), max_iterations=100, n_live_points=40)
+
+    assert summary["status"] == "fitted", summary["error"]
+    posterior, metadata = sm.load_fit(str(tmp_path / "dpl_spectral_smoke.h5"))
+    assert metadata["sfh_model"] == "dblplaw"
+    assert metadata["kind"] == "spectrum"
+    assert "log_evidence_error" in metadata
+    assert sm.load_unit_cube_samples(str(tmp_path / "dpl_spectral_smoke.h5")).shape[1] == 9
+    for column in (*sm.MODELS["dblplaw"].training_labels, "veldisp", "noise_scale", "model_r"):
+        assert column in posterior.columns, column
+        assert np.isfinite(posterior[column]).all(), column
+'''
+
+NEW_SUPERSEDE_TESTS = '''
+
+def test_supersede_keeps_dblplaw_spectral_fits_only_in_their_folder(tmp_path):
+    """spectral_fits_dblplaw is a DPL folder: a delayed-tau fit leaves it; spectral_fits does the reverse."""
+    dblplaw_folder = tmp_path / "spectral_fits_dblplaw"
+    delayed_folder = tmp_path / "spectral_fits"
+    for folder in (dblplaw_folder, delayed_folder):
+        folder.mkdir()
+        write_fit(folder / "dpl.h5", sfh_model="dblplaw")
+        write_fit(folder / "delayed.h5", sfh_model="delayed")
+
+    assert sm.supersede_outdated_fits(str(dblplaw_folder), "dblplaw") == ["delayed.h5"]
+    assert sm.supersede_outdated_fits(str(delayed_folder), "delayed") == ["dpl.h5"]
+    assert (dblplaw_folder / "dpl.h5").exists() and (delayed_folder / "delayed.h5").exists()
+    with pytest.raises(ValueError, match="dblplaw"):
+        sm.supersede_outdated_fits(str(dblplaw_folder), "delayed")
+'''
+
+patch(root + "/tests/test_synthetic_model.py", [
+    # --- Spectra: the new sfh_model argument, and the DPL spectral components
+    ('''def test_spectral_components_fix_redshift_and_add_veldisp():
+    cube = np.full(len(sm.SPECTRAL_DIMS), 0.5)
+    bagpipes_components, drawn, noise_scale = sm.spectral_components(cube, redshift=0.08)
+
+    assert "z" not in sm.SPECTRAL_DIMS
+''', '''def test_spectral_components_fix_redshift_and_add_veldisp():
+    cube = np.full(len(sm.spectral_dims("delayed")), 0.5)
+    bagpipes_components, drawn, noise_scale = sm.spectral_components(cube, redshift=0.08, sfh_model="delayed")
+
+    assert "z" not in sm.spectral_dims("delayed")
+''', 1),
+    ('''    assert bagpipes_components["delayed"]["age"] == drawn["age"] <= sm.maximum_age(0.08)
+''', '''    assert bagpipes_components["delayed"]["age"] == drawn["age"] <= sm.maximum_age(0.08)
+''' + NEW_SPECTRAL_COMPONENT_TESTS, 1),
+    # --- mock_job of either model
+    ('''def mock_job(job_id, rng):
+    """A small mock spectrum job at z = 0.1.
+
+    Inputs: job_id: identifier (str); rng: numpy Generator.
+    Returns: (job dict with job_id, spectrum and redshift, truth labels as a Series).
+    """''', '''def mock_job(job_id, rng, sfh_model="delayed"):
+    """A small mock spectrum job of sfh_model at z = 0.1.
+
+    Inputs: job_id: identifier (str); rng: numpy Generator; sfh_model: "delayed" or "dblplaw".
+    Returns: (job dict with job_id, spectrum and redshift, and sfh_model for a DPL job (a delayed-tau job has
+             no sfh_model, as every job exported before the DPL spectral fits), truth labels as a Series).
+    """''', 1),
+    ('''    cube = rng.random(len(sm.SPECTRAL_DIMS))
+    spectrum, truth = sm.make_mock_spectrum(cube, 0.1, template, rng)
+    return {"job_id": job_id, "spectrum": spectrum, "redshift": 0.1}, truth''',
+     '''    cube = rng.random(len(sm.spectral_dims(sfh_model)))
+    spectrum, truth = sm.make_mock_spectrum(cube, 0.1, template, rng, sfh_model)
+    job = {"job_id": job_id, "spectrum": spectrum, "redshift": 0.1}
+    if sfh_model != "delayed":
+        job["sfh_model"] = sfh_model
+    return job, truth''', 1),
+    ("sm.MODELS[sm.SPECTRAL_MODEL]", 'sm.MODELS["delayed"]', 5),
+    ("len(sm.SPECTRAL_DIMS)", "N_DELAYED_SPECTRAL_DIMS", 13),
+    ('''LOW_REDSHIFT = 0.002             # Bagpipes needs z > 0 to build a star formation history
+''', '''LOW_REDSHIFT = 0.002             # Bagpipes needs z > 0 to build a star formation history
+N_DELAYED_SPECTRAL_DIMS = len(sm.spectral_dims("delayed"))   # dims of a delayed-tau spectral fit (8)
+''', 1),
+    # --- the fit folders
+    ('''    assert sm.FIT_FOLDER_MODELS == {"spectral_fits": "delayed", "photometric_fits": "delayed",
+                                    "photometric_fits_dblplaw": "dblplaw"}''',
+     '''    assert sm.FIT_FOLDER_MODELS == {"spectral_fits": "delayed", "photometric_fits": "delayed",
+                                    "photometric_fits_dblplaw": "dblplaw", "spectral_fits_dblplaw": "dblplaw"}''',
+     1),
+    # --- spectral dims, stored-fit regression and DPL labels and mocks
+    ('''def test_spectral_dims_stay_the_delayed_photometric_dims_plus_the_nuisances():
+    """Spectral fits are delayed-tau only (DPL spec, decision 1); the DPL photometric fit has 7 dimensions."""
+    assert sm.SPECTRAL_MODEL == "delayed"
+    assert sm.SPECTRAL_DIMS == [*sm.MODELS["delayed"].photometric_dims, "veldisp", "noise_scale"]
+    assert len(sm.MODELS["dblplaw"].photometric_dims) == 7
+''', NEW_FIT_FILE_TESTS.lstrip("\n"), 1),
+    ('''    posterior = sm.posterior_labels(cubes, 0.1)
+
+    training_labels = sm.MODELS["delayed"].training_labels''',
+     '''    posterior = sm.posterior_labels(cubes, 0.1, "delayed")
+
+    training_labels = sm.MODELS["delayed"].training_labels''', 1),
+    ('''    _, drawn, _ = sm.spectral_components(cubes[0], 0.1)''',
+     '''    _, drawn, _ = sm.spectral_components(cubes[0], 0.1, "delayed")''', 1),
+    # --- the fake fitters take the model
+    ('''    def fake_fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_points):
+        called.append("spectrum")
+        return fake_fit(N_DELAYED_SPECTRAL_DIMS)''',
+     '''    def fake_fit_spectrum(spectrum, redshift, sfh_model, output_basename, max_iterations, n_live_points):
+        called.append("spectrum")
+        return fake_fit(len(sm.spectral_dims(sfh_model)))''', 1),
+    ('''    def fake_spectral_labels(unit_cube_samples, redshift):''',
+     '''    def fake_spectral_labels(unit_cube_samples, redshift, sfh_model):''', 1),
+    # --- a DPL spectral job is now fitted (amendment 2 lifts decision 1)
+    ('''def test_fit_and_save_fails_a_spectral_job_of_the_dblplaw_model(tmp_path, fake_fitters):
+    """Spectral fits are delayed-tau only (DPL spec, decision 1)."""
+    job = {"job_id": "spectral_dpl", "kind": "spectrum", "sfh_model": "dblplaw", "redshift": 0.1,
+           "spectrum": {"wavelength": np.arange(4000.0, 4010.0), "flux": np.ones(10), "ivar": np.ones(10)}}
+
+    summary = sm.fit_and_save(job, str(tmp_path), max_iterations=10, n_live_points=25)
+
+    assert summary["status"] == "failed"
+    assert "delayed only" in summary["error"]
+    assert fake_fitters == []
+''', NEW_FIT_ROUTING_TESTS, 1),
+    # --- calibration mocks of each model, and the DPL spectral jobs
+    ('''    first = sm.draw_calibration_cubes(60, np.random.default_rng(0))
+    second = sm.draw_calibration_cubes(60, np.random.default_rng(0))''',
+     '''    first = sm.draw_calibration_cubes(60, np.random.default_rng(0), "delayed")
+    second = sm.draw_calibration_cubes(60, np.random.default_rng(0), "delayed")''', 1),
+    ('''    posterior = sm.posterior_labels(cubes, 0.1)
+    truth = posterior.iloc[1]''', '''    posterior = sm.posterior_labels(cubes, 0.1, "delayed")
+    truth = posterior.iloc[1]''', 1),
+    ('''    jobs, truths = sm.draw_calibration_mocks(3, templates, np.random.default_rng(4))
+    repeat_jobs, _ = sm.draw_calibration_mocks(3, templates, np.random.default_rng(4))''',
+     '''    jobs, truths = sm.draw_calibration_mocks(3, templates, np.random.default_rng(4), "delayed")
+    repeat_jobs, _ = sm.draw_calibration_mocks(3, templates, np.random.default_rng(4), "delayed")''', 1),
+    ('''        assert np.array_equal(job["spectrum"]["flux"], repeat["spectrum"]["flux"])
+        assert job["redshift"] == repeat["redshift"]
+''', '''        assert np.array_equal(job["spectrum"]["flux"], repeat["spectrum"]["flux"])
+        assert job["redshift"] == repeat["redshift"]
+''' + NEW_JOB_TESTS, 1),
+    # --- the spectral columns of the reference CSV
+    ('''    assert sm.PHOTOMETRIC_PREFIXES == {"delayed": "phot_", "dblplaw": "phot_dblplaw_"}
+''', '''    assert sm.PHOTOMETRIC_PREFIXES == {"delayed": "phot_", "dblplaw": "phot_dblplaw_"}
+
+
+def test_spectral_prefixes_keep_the_delayed_names_plain():
+    """The delayed-tau spectral columns keep the names of the first fits; the DPL ones are spec_dblplaw_*."""
+    assert sm.SPECTRAL_PREFIXES == {"delayed": "", "dblplaw": "spec_dblplaw_"}
+    assert set(sm.SPECTRAL_PREFIXES) == set(sm.MODELS)
+''', 1),
+    # --- superseding: the DPL spectral folder
+    ('''    with pytest.raises(ValueError, match="dblplaw"):
+        sm.supersede_outdated_fits(str(folder), "delayed")
+    assert (folder / "dpl.h5").exists()
+''', '''    with pytest.raises(ValueError, match="dblplaw"):
+        sm.supersede_outdated_fits(str(folder), "delayed")
+    assert (folder / "dpl.h5").exists()
+''' + NEW_SUPERSEDE_TESTS, 1),
+])
+```
+
+Expected output: `./tests/test_spectral_validation.py patched` and `./tests/test_synthetic_model.py patched`.
+
+- [ ] **Step 2: Run the tests and watch them fail**
+
+Run: `LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python -m pytest tests/test_synthetic_model.py tests/test_spectral_validation.py -q`
+
+Expected: two collection errors, `AttributeError: module 'synthetic_model' has no attribute 'spectral_dims'` (both files call it at import).
+
+- [ ] **Step 3: `synthetic_model.py`: spectral dims, components, fit, labels and mocks per SFH model; the DPL spectral jobs; the new folder**
+
+Save as `$SCRATCH/task13_synthetic_model.py` and run `../.venv/bin/python "$SCRATCH/task13_synthetic_model.py" synthetic_model.py`:
+
+```python
+"""Task 13, step 3: synthetic_model.py fits, labels and mocks spectra of either SFH model. Argument: the file."""
+import sys
+
+PATH = sys.argv[1]
+text = open(PATH).read()
+
+
+def replace(old, new):
+    global text
+    assert text.count(old) == 1, (text.count(old), old[:80])
+    text = text.replace(old, new)
+
+
+# 1. spectral_dims instead of SPECTRAL_MODEL / SPECTRAL_DIMS
+replace('''# Spectral fits are delayed-tau only (DPL spec, decision 1): the DPL model is fitted to the photometry alone
+SPECTRAL_MODEL = "delayed"
+
+# Redshift is fixed to the spectroscopic value, so it leaves the list; veldisp and noise_scale join it
+SPECTRAL_DIMS = list(MODELS[SPECTRAL_MODEL].photometric_dims)
+SPECTRAL_DIMS.append("veldisp")
+SPECTRAL_DIMS.append("noise_scale")
+''', '''# The spectral fit's own nuisance parameters, after the SFH model's dims: velocity dispersion, noise scale
+SPECTRAL_NUISANCE_DIMS = ["veldisp", "noise_scale"]
+
+
+def spectral_dims(sfh_model):
+    """Unit-cube dimensions of a spectral fit of one SFH model, in order.
+
+    Why: the redshift is fixed to the spectroscopic value, so it leaves the model's dims, and the spectral
+    nuisance parameters join them. Each SFH model has its own spectral fits (DPL spec, amendment 2).
+    Inputs: sfh_model: "delayed" or "dblplaw".
+    Returns: new list of names: MODELS[sfh_model].photometric_dims, then SPECTRAL_NUISANCE_DIMS (8 names for
+             delayed-tau, 9 for the double power law).
+    """
+    return [*MODELS[sfh_model].photometric_dims, *SPECTRAL_NUISANCE_DIMS]
+''')
+
+replace('''def spectral_components(cube, redshift):
+    """Bagpipes components, drawn parameters and noise scale for one spectral-fit unit-cube point.
+
+    The SFH, metallicity, dust and nebular part is the delayed-tau training prior (MODELS[SPECTRAL_MODEL]) at
+    the fixed spectroscopic redshift, which also sets the oldest allowed age; veldisp and noise_scale are the
+    spectral nuisance parameters.
+    Inputs: cube: unit-cube values (dimensionless, in [0, 1)) ordered as SPECTRAL_DIMS;
+            redshift: spectroscopic redshift (dimensionless).
+    Returns: (bagpipes_components, drawn, noise_scale). The components are the delayed-tau model's plus
+             veldisp [km/s]; drawn holds the model's drawn labels plus veldisp [km/s]; noise_scale is the
+             error multiplier (dimensionless, 1 to 5).
+    """
+    cube_by_name = dict(zip(SPECTRAL_DIMS, cube))
+    unit_vector = training_unit_vector(cube_by_name, SPECTRAL_MODEL)
+    bagpipes_components, drawn = MODELS[SPECTRAL_MODEL].components(unit_vector, fixed_redshift=redshift)
+''', '''def spectral_components(cube, redshift, sfh_model):
+    """Bagpipes components, drawn parameters and noise scale for one spectral-fit point of an SFH model.
+
+    The SFH, metallicity, dust and nebular part is the model's training prior (MODELS[sfh_model]) at the fixed
+    spectroscopic redshift, which also sets the oldest allowed age (delayed-tau) or turnover (double power
+    law); veldisp and noise_scale are the spectral nuisance parameters, the same for every model.
+    Inputs: cube: unit-cube values (dimensionless, in [0, 1)) ordered as spectral_dims(sfh_model);
+            redshift: spectroscopic redshift (dimensionless); sfh_model: "delayed" or "dblplaw".
+    Returns: (bagpipes_components, drawn, noise_scale). The components are the model's plus veldisp [km/s];
+             drawn holds the model's drawn labels plus veldisp [km/s]; noise_scale is the error multiplier
+             (dimensionless, 1 to 5).
+    """
+    cube_by_name = dict(zip(spectral_dims(sfh_model), cube))
+    unit_vector = training_unit_vector(cube_by_name, sfh_model)
+    bagpipes_components, drawn = MODELS[sfh_model].components(unit_vector, fixed_redshift=redshift)
+''')
+
+# 2. fit_spectrum
+replace('''def fit_spectrum(spectrum, redshift, output_basename, max_iterations, n_live_points=N_LIVE_POINTS):
+    """MultiNest fit of one prepared spectrum under the training prior at a fixed redshift.
+
+    The sampler works directly on the unit cube (SPECTRAL_DIMS): spectral_components maps each point
+    to physical values, exactly as the training set does. output_basename must be short (MultiNest
+    limit of 100 characters), e.g. "spectral_fits/<id>/".
+    Inputs: spectrum: dict with wavelength [Angstrom, observed], flux and ivar, as from prepare_spectrum;
+            redshift: spectroscopic redshift (dimensionless); output_basename: directory prefix for the
+            MultiNest files (str); max_iterations: MultiNest iteration limit (count);
+            n_live_points: live points (count).
+    Returns: dict with samples (unit-cube points, shape (n_samples, len(SPECTRAL_DIMS))), log_evidence
+             (dimensionless ln Z), log_evidence_error (MultiNest's uncertainty of ln Z, sqrt(H / n_live)),
+             n_iterations (count, from multinest_iterations), converged (bool: the run certainly stopped
+             before max_iterations, judged by the upper bound of the count) and run_time [s].
+    """
+    # 1. Bagpipes model built once; each likelihood call updates it in place, which is much faster
+    midpoint_cube = np.full(len(SPECTRAL_DIMS), MIDPOINT_DRAW)
+    starting_components, _, _ = spectral_components(midpoint_cube, redshift)
+    model = pipes.model_galaxy(starting_components, spec_wavs=spectrum["wavelength"])
+
+    # 2. Likelihood of one unit-cube point: model spectrum vs data, with the S/N-scaling noise multiplier
+    def log_likelihood(cube):
+        """Log-likelihood of the spectrum for one unit-cube point.
+
+        Inputs: cube: unit-cube point (dimensionless, SPECTRAL_DIMS order).
+        Returns: log-likelihood (dimensionless), LOG_ZERO for an impossible model.
+        """
+        bagpipes_components, _, noise_scale = spectral_components(cube, redshift)
+        model.update(bagpipes_components)
+        model_flux = model.spectrum[:, 1]
+        return safe_spectral_log_likelihood(model_flux, spectrum["flux"], spectrum["ivar"], noise_scale)
+
+    # 3. MultiNest over the unit cube
+    return run_multinest(log_likelihood, len(SPECTRAL_DIMS), output_basename, max_iterations, n_live_points)
+''', '''def fit_spectrum(spectrum, redshift, sfh_model, output_basename, max_iterations, n_live_points=N_LIVE_POINTS):
+    """MultiNest fit of one prepared spectrum under an SFH model's training prior at a fixed redshift.
+
+    The sampler works directly on the unit cube (spectral_dims(sfh_model)): spectral_components maps each
+    point to physical values, exactly as the training set does. Every SFH model gets the same likelihood
+    (calibration polynomial, noise scale) and MultiNest settings, so their evidences can be compared.
+    output_basename must be short (MultiNest limit of 100 characters), e.g. "spectral_fits/<id>/".
+    Inputs: spectrum: dict with wavelength [Angstrom, observed], flux and ivar, as from prepare_spectrum;
+            redshift: spectroscopic redshift (dimensionless); sfh_model: "delayed" or "dblplaw";
+            output_basename: directory prefix for the MultiNest files (str); max_iterations: MultiNest
+            iteration limit (count); n_live_points: live points (count).
+    Returns: dict with samples (unit-cube points, shape (n_samples, len(spectral_dims(sfh_model)))),
+             log_evidence (dimensionless ln Z), log_evidence_error (MultiNest's uncertainty of ln Z,
+             sqrt(H / n_live)), n_iterations (count, from multinest_iterations), converged (bool: the run
+             certainly stopped before max_iterations, judged by the upper bound of the count) and
+             run_time [s].
+    """
+    n_dims = len(spectral_dims(sfh_model))
+
+    # 1. Bagpipes model built once; each likelihood call updates it in place, which is much faster
+    midpoint_cube = np.full(n_dims, MIDPOINT_DRAW)
+    starting_components, _, _ = spectral_components(midpoint_cube, redshift, sfh_model)
+    model = pipes.model_galaxy(starting_components, spec_wavs=spectrum["wavelength"])
+
+    # 2. Likelihood of one unit-cube point: model spectrum vs data, with the S/N-scaling noise multiplier
+    def log_likelihood(cube):
+        """Log-likelihood of the spectrum for one unit-cube point.
+
+        Inputs: cube: unit-cube point (dimensionless, spectral_dims(sfh_model) order).
+        Returns: log-likelihood (dimensionless), LOG_ZERO for an impossible model.
+        """
+        bagpipes_components, _, noise_scale = spectral_components(cube, redshift, sfh_model)
+        # PyMultiNest calls sys.exit if the likelihood raises: a model Bagpipes cannot compute is impossible
+        # (as in photometric_point_log_likelihood; a point that computes gets the same value as before)
+        try:
+            model.update(bagpipes_components)
+            model_flux = model.spectrum[:, 1]
+        except Exception:
+            return LOG_ZERO
+        return safe_spectral_log_likelihood(model_flux, spectrum["flux"], spectrum["ivar"], noise_scale)
+
+    # 3. MultiNest over the unit cube
+    return run_multinest(log_likelihood, n_dims, output_basename, max_iterations, n_live_points)
+''')
+
+# 3. posterior_labels
+replace('''def posterior_labels(unit_cube_samples, redshift):
+    """Labels of each spectral-fit posterior sample, from a Bagpipes model that also gives S-PLUS photometry.
+
+    Keeps at most MAX_POSTERIOR_SAMPLES evenly spaced samples, because building labels is the slow part.
+    model_r is the model r magnitude for 10^10 M_sun formed, used later to rescale mass-like labels.
+    Inputs: unit_cube_samples: unit-cube points (dimensionless, shape (n_samples, len(SPECTRAL_DIMS)));
+            redshift: spectroscopic redshift (dimensionless).
+    Returns: DataFrame with one row per kept sample: the delayed-tau training labels (mass-like ones for
+             10^10 M_sun formed), then veldisp [km/s], noise_scale (dimensionless) and model_r [mag].
+    """''', '''def posterior_labels(unit_cube_samples, redshift, sfh_model):
+    """Labels of each spectral-fit posterior sample, from a Bagpipes model that also gives S-PLUS photometry.
+
+    Keeps at most MAX_POSTERIOR_SAMPLES evenly spaced samples, because building labels is the slow part.
+    model_r is the model r magnitude for 10^10 M_sun formed, used later to rescale mass-like labels.
+    Inputs: unit_cube_samples: unit-cube points (dimensionless, shape (n_samples,
+            len(spectral_dims(sfh_model)))); redshift: spectroscopic redshift (dimensionless);
+            sfh_model: the fit's model, "delayed" or "dblplaw".
+    Returns: DataFrame with one row per kept sample: the model's training labels (mass-like ones for
+             10^10 M_sun formed), then veldisp [km/s], noise_scale (dimensionless) and model_r [mag].
+    """''')
+replace('''        bagpipes_components, drawn, noise_scale = spectral_components(cube, redshift)
+        model = updated_photometry_model(model, bagpipes_components)
+        drawn_with_noise = dict(drawn)
+        drawn_with_noise["noise_scale"] = noise_scale
+        rows.append(sample_label_row(model, bagpipes_components, drawn_with_noise, SPECTRAL_MODEL))''',
+        '''        bagpipes_components, drawn, noise_scale = spectral_components(cube, redshift, sfh_model)
+        model = updated_photometry_model(model, bagpipes_components)
+        drawn_with_noise = dict(drawn)
+        drawn_with_noise["noise_scale"] = noise_scale
+        rows.append(sample_label_row(model, bagpipes_components, drawn_with_noise, sfh_model))''')
+
+# 4. make_mock_spectrum
+replace('''def make_mock_spectrum(cube, redshift, template_spectrum, rng):
+    """Mock spectrum from a known unit-cube point, with the wavelengths, mask and errors of a real one.
+
+    The model is scaled to the template's median flux so the mock has the template's S/N. The
+    noise_scale coordinate is set to UNIT_NOISE_CUBE_VALUE (error multiplier 1) because the mock
+    noise is the template's own.
+    Inputs: cube: unit-cube point (dimensionless, SPECTRAL_DIMS order); redshift: dimensionless;
+            template_spectrum: dict from prepare_spectrum (wavelength [Angstrom], flux, ivar);
+            rng: numpy Generator.
+    Returns: (spectrum dict with wavelength, flux and ivar, truth labels as a pandas Series with the
+             same labels as posterior_labels).
+    """
+    # 1. Known model on the template's wavelength grid (copied, so the caller's point is not changed)
+    cube = np.array(cube, dtype=float)
+    cube[SPECTRAL_DIMS.index("noise_scale")] = UNIT_NOISE_CUBE_VALUE
+    bagpipes_components, _, _ = spectral_components(cube, redshift)''', '''def make_mock_spectrum(cube, redshift, template_spectrum, rng, sfh_model):
+    """Mock spectrum of a known point of an SFH model, with the wavelengths, mask and errors of a real one.
+
+    The model is scaled to the template's median flux so the mock has the template's S/N. The
+    noise_scale coordinate is set to UNIT_NOISE_CUBE_VALUE (error multiplier 1) because the mock
+    noise is the template's own.
+    Inputs: cube: unit-cube point (dimensionless, spectral_dims(sfh_model) order); redshift: dimensionless;
+            template_spectrum: dict from prepare_spectrum (wavelength [Angstrom], flux, ivar);
+            rng: numpy Generator (only its normal() is used, once); sfh_model: "delayed" or "dblplaw".
+    Returns: (spectrum dict with wavelength, flux and ivar, truth labels as a pandas Series with the
+             same labels as posterior_labels of sfh_model).
+    """
+    # 1. Known model on the template's wavelength grid (copied, so the caller's point is not changed)
+    cube = np.array(cube, dtype=float)
+    cube[spectral_dims(sfh_model).index("noise_scale")] = UNIT_NOISE_CUBE_VALUE
+    bagpipes_components, _, _ = spectral_components(cube, redshift, sfh_model)''')
+replace('''    truth = posterior_labels(cube[np.newaxis, :], redshift).iloc[0]''',
+        '''    truth = posterior_labels(cube[np.newaxis, :], redshift, sfh_model).iloc[0]''')
+
+# 5. save_fit docstring
+replace('''            fit: len(SPECTRAL_DIMS) or the model's photometric_dims);''',
+        '''            fit: len(spectral_dims(sfh_model)) or the model's photometric_dims);''')
+
+# 6. fit_spectrum_job
+replace('''def fit_spectrum_job(job, multinest_basename, max_iterations, n_live_points):
+    """Fit a spectrum job and label its posterior samples.
+
+    Inputs: job: dict with spectrum (as from prepare_spectrum) and redshift (dimensionless); multinest_basename:
+            directory prefix for the MultiNest files (str); max_iterations, n_live_points: counts.
+    Returns: (fit dict from fit_spectrum, posterior DataFrame from posterior_labels).
+    Raises: ValueError for a job of a model other than SPECTRAL_MODEL (spectral fits are delayed-tau only).
+    """
+    if job_model(job) != SPECTRAL_MODEL:
+        raise ValueError(f"spectral fits are {SPECTRAL_MODEL} only, not {job_model(job)} "
+                         "(DPL spec, decision 1)")
+    fit = fit_spectrum(job["spectrum"], job["redshift"], multinest_basename, max_iterations, n_live_points)
+    posterior = posterior_labels(fit["samples"], job["redshift"])
+    return fit, posterior''', '''def fit_spectrum_job(job, multinest_basename, max_iterations, n_live_points):
+    """Fit a spectrum job with its SFH model and label its posterior samples.
+
+    Inputs: job: dict with spectrum (as from prepare_spectrum), redshift (dimensionless) and sfh_model
+            (job_model: "delayed" for a job without one, as every job exported before the DPL spectral fits);
+            multinest_basename: directory prefix for the MultiNest files (str); max_iterations, n_live_points:
+            counts.
+    Returns: (fit dict from fit_spectrum, posterior DataFrame from posterior_labels).
+    """
+    sfh_model = job_model(job)
+    fit = fit_spectrum(job["spectrum"], job["redshift"], sfh_model, multinest_basename, max_iterations,
+                       n_live_points)
+    posterior = posterior_labels(fit["samples"], job["redshift"], sfh_model)
+    return fit, posterior''')
+
+# 7. Reference-CSV prefixes of the spectral fits
+replace('''PHOTOMETRIC_PREFIXES = {"delayed": "phot_", "dblplaw": "phot_dblplaw_"}
+''', '''PHOTOMETRIC_PREFIXES = {"delayed": "phot_", "dblplaw": "phot_dblplaw_"}
+# ... and of each model's spectral fits: <prefix><label>_p16, <prefix>converged, ...; delayed-tau keeps the
+# plain names of the first spectral fits (only its ln Z columns are named spec_log_evidence(_error))
+SPECTRAL_PREFIXES = {"delayed": "", "dblplaw": "spec_dblplaw_"}
+''')
+
+# 8. Calibration mocks per model, and the DPL spectral jobs
+replace('''def draw_calibration_cubes(n_mocks, rng):
+    """Unit-cube points of the calibration mocks: uniform over every SPECTRAL_DIMS coordinate.
+
+    Uniform on the unit cube is the training prior at the template's redshift (log-uniform age, tau and Z).
+    draw_calibration_mocks calls this first on its rng, so the cubes can be redrawn from the same seed.
+    Inputs: n_mocks: number of points (count); rng: numpy Generator.
+    Returns: array of shape (n_mocks, len(SPECTRAL_DIMS)), values in [0, 1) (dimensionless).
+    """
+    return rng.random((n_mocks, len(SPECTRAL_DIMS)))
+
+
+def draw_calibration_mocks(n_mocks, templates, rng):
+    """Mock spectra with known labels, each on the wavelengths, mask and errors of a random real galaxy.
+
+    Inputs: n_mocks: number of mocks (count); templates: list of (spectrum dict from prepare_spectrum,
+            redshift (dimensionless)); rng: numpy Generator.
+    Returns: (jobs, truths): jobs is a list of dicts as fit_and_save takes (job_id calib_000, calib_001, ...);
+             truths maps each job_id to its true labels (Series, as posterior_labels columns: the
+             spectral model's training_labels, veldisp, noise_scale and model_r).
+    """
+    cubes = draw_calibration_cubes(n_mocks, rng)
+    jobs = []
+    truths = {}
+    for mock_index, cube in enumerate(cubes):
+        job_id = f"{CALIBRATION_ID_PREFIX}{mock_index:03d}"
+        template_spectrum, redshift = templates[rng.integers(len(templates))]
+        spectrum, truth = make_mock_spectrum(cube, redshift, template_spectrum, rng)
+        jobs.append({"job_id": job_id, "spectrum": spectrum, "redshift": redshift})
+        truths[job_id] = truth
+    return jobs, truths
+''', '''def draw_calibration_cubes(n_mocks, rng, sfh_model):
+    """Unit-cube points of an SFH model's spectral calibration mocks: uniform over its spectral_dims.
+
+    Uniform on the unit cube is the model's training prior at the template's redshift (log-uniform age, tau
+    and Z for delayed-tau; log-uniform turnover lookback, alpha, beta and Z for the double power law).
+    draw_calibration_mocks calls this first on its rng, so the cubes can be redrawn from the same seed.
+    Inputs: n_mocks: number of points (count); rng: numpy Generator; sfh_model: "delayed" or "dblplaw".
+    Returns: array of shape (n_mocks, len(spectral_dims(sfh_model))), values in [0, 1) (dimensionless).
+    """
+    return rng.random((n_mocks, len(spectral_dims(sfh_model))))
+
+
+def draw_calibration_mocks(n_mocks, templates, rng, sfh_model):
+    """Mock spectra of an SFH model with known labels, each with the wavelengths, mask and errors of a galaxy.
+
+    Inputs: n_mocks: number of mocks (count); templates: list of (spectrum dict from prepare_spectrum,
+            redshift (dimensionless)); rng: numpy Generator; sfh_model: "delayed" or "dblplaw".
+    Returns: (jobs, truths): jobs is a list of spectrum job dicts as fit_and_save takes (job_id calib_000,
+             calib_001, ..., kind SPECTRUM_JOB, sfh_model, spectrum, redshift); truths maps each job_id to its
+             true labels (Series, as posterior_labels columns: the model's training_labels, veldisp,
+             noise_scale and model_r).
+    """
+    cubes = draw_calibration_cubes(n_mocks, rng, sfh_model)
+    jobs = []
+    truths = {}
+    for mock_index, cube in enumerate(cubes):
+        job_id = f"{CALIBRATION_ID_PREFIX}{mock_index:03d}"
+        template_spectrum, redshift = templates[rng.integers(len(templates))]
+        spectrum, truth = make_mock_spectrum(cube, redshift, template_spectrum, rng, sfh_model)
+        jobs.append({"job_id": job_id, "kind": SPECTRUM_JOB, "sfh_model": sfh_model, "spectrum": spectrum,
+                     "redshift": redshift})
+        truths[job_id] = truth
+    return jobs, truths
+
+
+def dblplaw_spectral_jobs(delayed_jobs):
+    """The galaxies' prepared spectra as spectral jobs of the double power law (DPL spec, amendment 2).
+
+    Why the calibration mocks are left out: they were drawn from the delayed-tau prior, so their truths have
+    no DPL labels; the DPL fitter gets its own mocks (draw_calibration_mocks with "dblplaw").
+    Inputs: delayed_jobs: delayed-tau spectral jobs, as notebook 2 exports them to spectral_fits/jobs/ (a job
+            without kind is a spectrum job, one without sfh_model is delayed-tau): galaxies, and possibly
+            calibration mocks (job ids starting with CALIBRATION_ID_PREFIX).
+    Returns: list of new job dicts, one per galaxy, in input order: the same job_id, spectrum and redshift,
+             with kind SPECTRUM_JOB and sfh_model "dblplaw". The input jobs are not changed; their spectrum
+             dicts are shared, not copied (nothing writes to them).
+    Raises: ValueError for a job that is not a delayed-tau spectrum job.
+    """
+    jobs = []
+    for delayed_job in delayed_jobs:
+        if job_kind(delayed_job) != SPECTRUM_JOB or job_model(delayed_job) != "delayed":
+            raise ValueError(f"{delayed_job['job_id']} is not a delayed-tau spectrum job "
+                             f"({job_kind(delayed_job)}, {job_model(delayed_job)})")
+        if str(delayed_job["job_id"]).startswith(CALIBRATION_ID_PREFIX):
+            continue
+        job = dict(delayed_job)
+        job["kind"] = SPECTRUM_JOB
+        job["sfh_model"] = "dblplaw"
+        jobs.append(job)
+    return jobs
+''')
+
+# 9. Fit folders
+replace('''FIT_FOLDER_MODELS = {"spectral_fits": "delayed", "photometric_fits": "delayed",
+                     "photometric_fits_dblplaw": "dblplaw"}''', '''FIT_FOLDER_MODELS = {"spectral_fits": "delayed", "photometric_fits": "delayed",
+                     "photometric_fits_dblplaw": "dblplaw", "spectral_fits_dblplaw": "dblplaw"}''')
+replace('''    is judged against its own SFH model (FIT_FOLDER_MODELS): a DPL fit stays in photometric_fits_dblplaw and
+    leaves photometric_fits, and the reverse.''', '''    is judged against its own SFH model (FIT_FOLDER_MODELS): a DPL fit stays in photometric_fits_dblplaw or
+    spectral_fits_dblplaw and leaves photometric_fits or spectral_fits, and the reverse.''')
+
+open(PATH, "w").write(text)
+print("synthetic_model.py patched")
+```
+
+Expected output: `synthetic_model.py patched`.
+
+- [ ] **Step 4: `spectral_validation.py` names its model; `run_spectral_fits.py` names the new folder**
+
+Save as `$SCRATCH/task13_validation.py` and run `../.venv/bin/python "$SCRATCH/task13_validation.py" .`:
+
+```python
+"""Task 13, step 4: spectral_validation.py names its model, run_spectral_fits.py names the new folder."""
+import sys
+
+root = sys.argv[1]
+
+
+def patch(path, pairs):
+    text = open(path).read()
+    for old, new in pairs:
+        assert text.count(old) == 1, (path, text.count(old), old[:80])
+        text = text.replace(old, new)
+    open(path, "w").write(text)
+    print(path, "patched")
+
+
+patch(root + "/spectral_validation.py", [
+    ('''N_PREDICTIVE_SAMPLES = 100     # posterior samples per galaxy for the model indices
+MAX_Z_SCORE = 2.0              # an index agrees when |z| < MAX_Z_SCORE
+''', '''N_PREDICTIVE_SAMPLES = 100     # posterior samples per galaxy for the model indices
+MAX_Z_SCORE = 2.0              # an index agrees when |z| < MAX_Z_SCORE
+# The rulers read the delayed-tau spectral fits: the validation stays on them (DPL spec, amendment 2)
+RULER_SFH_MODEL = "delayed"
+'''),
+    ('''    components, _, _ = sm.spectral_components(cube, redshift)
+    model.update(components)''', '''    components, _, _ = sm.spectral_components(cube, redshift, RULER_SFH_MODEL)
+    model.update(components)'''),
+    ('''    Inputs: unit-cube posterior samples (n, SPECTRAL_DIMS); redshift; the galaxy's native observed air
+            wavelength grid [Angstrom] and its flux/ivar on that grid (restricted to sm.OBSERVED_RANGE by the caller).''',
+     '''    Inputs: unit-cube posterior samples of a delayed-tau spectral fit (n, sm.spectral_dims(RULER_SFH_MODEL));
+            redshift; the galaxy's native observed air wavelength grid [Angstrom] and its flux/ivar on that
+            grid (restricted to sm.OBSERVED_RANGE by the caller).'''),
+    ('''    first_components, _, _ = sm.spectral_components(kept[0], redshift)''',
+     '''    first_components, _, _ = sm.spectral_components(kept[0], redshift, RULER_SFH_MODEL)'''),
+    ('''    Inputs: unit_cube_samples: unit-cube posterior samples (dimensionless, shape (n, len(SPECTRAL_DIMS)));''',
+     '''    Inputs: unit_cube_samples: unit-cube posterior samples of a delayed-tau spectral fit (dimensionless,
+            shape (n, len(sm.spectral_dims(RULER_SFH_MODEL))));'''),
+    ('''        components, drawn, _ = sm.spectral_components(cube, redshift)''',
+     '''        components, drawn, _ = sm.spectral_components(cube, redshift, RULER_SFH_MODEL)'''),
+])
+
+patch(root + "/run_spectral_fits.py", [
+    ('''its true model (truth_model). The two kinds share job ids (the specobjid), so they live in separate folders:
+spectral_fits/, photometric_fits/ (delayed-tau) and photometric_fits_dblplaw/ (double power law); pass e.g.
+--jobs-dir photometric_fits_dblplaw/jobs --output-dir photometric_fits_dblplaw.''',
+     '''its true model (truth_model). The kinds and models share job ids (the specobjid, calib_<k>), so each has its
+own folder: spectral_fits/ and photometric_fits/ (delayed-tau), spectral_fits_dblplaw/ and
+photometric_fits_dblplaw/ (double power law); pass e.g. --jobs-dir spectral_fits_dblplaw/jobs --output-dir
+spectral_fits_dblplaw.'''),
+])
+```
+
+Expected output: `./spectral_validation.py patched` and `./run_spectral_fits.py patched`.
+
+- [ ] **Step 5: Notebook 2 passes `"delayed"` to the changed functions (names only)**
+
+Save as `$SCRATCH/task13_notebook.py` and run `../.venv/bin/python "$SCRATCH/task13_notebook.py"`:
+
+```python
+"""Task 13, step 5: notebook 2 calls the changed spectral functions with the delayed-tau model (names only)."""
+import json
+
+NOTEBOOK = "spectroscopic_reference.ipynb"
+with open(NOTEBOOK) as notebook_file:
+    notebook = json.load(notebook_file)
+
+# (old text, new text, expected number of occurrences in the notebook's code cells)
+REPLACEMENTS = [
+    ("sm.N_CALIBRATION_MOCKS, templates, np.random.default_rng(SEED))",
+     "sm.N_CALIBRATION_MOCKS, templates, np.random.default_rng(SEED), \"delayed\")", 1),
+    ("sm.MODELS[sm.SPECTRAL_MODEL]", "sm.MODELS[\"delayed\"]", 2),
+    ("sm.draw_calibration_cubes(len(calibration_jobs), np.random.default_rng(SEED))",
+     "sm.draw_calibration_cubes(len(calibration_jobs), np.random.default_rng(SEED), \"delayed\")", 1),
+    ("dict(zip(sm.SPECTRAL_DIMS, spectral_cubes[mock_index]))",
+     "dict(zip(sm.spectral_dims(\"delayed\"), spectral_cubes[mock_index]))", 1),
+]
+
+for old, new, expected_count in REPLACEMENTS:
+    found = 0
+    for cell in notebook["cells"]:
+        if cell["cell_type"] != "code":
+            continue
+        source = "".join(cell["source"])
+        if old in source:
+            found += source.count(old)
+            cell["source"] = source.replace(old, new).splitlines(keepends=True)
+    assert found == expected_count, (old, found)
+
+with open(NOTEBOOK, "w") as notebook_file:
+    json.dump(notebook, notebook_file, indent=1, ensure_ascii=False)
+    notebook_file.write("\n")
+print("notebook 2 updated")
+```
+
+Expected output: `notebook 2 updated`. The cells keep their outputs: only names change, and the PC run of Task 14 replaces them. Check it (never execute the notebook on the laptop):
+
+```bash
+../.venv/bin/python -c "
+import nbformat
+nb = nbformat.read('spectroscopic_reference.ipynb', as_version=4); nbformat.validate(nb)
+for i, c in enumerate(nb.cells):
+    if c.cell_type == 'code': compile(c.source, f'cell {i}', 'exec')
+print('ok', len(nb.cells))"
+grep -rn "SPECTRAL_DIMS\|SPECTRAL_MODEL" --include=*.py --include=*.ipynb . | grep -v "^./pipes/" | grep -v "tests/"
+```
+
+Expected: `ok 36`, and the `grep` prints nothing. The tests still use the names: `hasattr(sm, "SPECTRAL_DIMS")` in the new dims test, and the test constants `SPECTRAL_DIMS` / `N_DELAYED_SPECTRAL_DIMS`.
+
+- [ ] **Step 6: Run the tests and watch them pass**
+
+Run: `LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python -m pytest tests/test_synthetic_model.py tests/test_spectral_validation.py tests/test_notebooks.py -q`
+
+Expected: `168 passed` (156 before this task: 12 new tests, and 2 replaced). The run takes about 2.5 minutes. The DPL spectral smoke run takes about 11 s, and the two regression tests against the stored delayed-τ fit and mocks about 1 s. On a machine without `spectral_fits/`, those two skip (`166 passed, 2 skipped`). The DPL smoke run skips when pymultinest cannot import.
+
+Then run the whole suite: `LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python -m pytest -q`. Expected: `282 passed` (270 + 12), with the Bagpipes overflow warnings as before. It is `281 passed, 1 skipped` when the short MultiNest run of `test_recomputed_evidence_error_agrees_with_multinest` does not converge (it skips itself then).
+
+- [ ] **Step 7: Remote scripts, README, the DPL skip list and `.gitignore`**
+
+Save as `$SCRATCH/task13_remote.py` and run it from the repository root: `.venv/bin/python "$SCRATCH/task13_remote.py" .`
+
+```python
+"""Task 13, step 7: remote scripts, README, skip list and .gitignore. Argument: the repository root."""
+import sys
+
+root = sys.argv[1]
+
+
+def patch(path, pairs):
+    text = open(path).read()
+    for old, new in pairs:
+        assert text.count(old) == 1, (path, text.count(old), old[:80])
+        text = text.replace(old, new)
+    open(path, "w").write(text)
+    print(path, "patched")
+
+
+patch(root + "/Synthetic_domain/remote/submit_fits.sh", [
+    ('''# FITS_SUBDIR picks the set of fits: spectral_fits (the spectral fits), photometric_fits (the delayed-tau
+# photometric fits of spec amendment A) or photometric_fits_dblplaw (the double-power-law photometric fits and
+# the cross-fits of the delayed-tau mocks). They share job ids (specobjids, calib_<k>), so their jobs and
+# results never mix:
+#     FITS_SUBDIR=photometric_fits_dblplaw Synthetic_domain/remote/submit_fits.sh''',
+     '''# FITS_SUBDIR picks the set of fits: spectral_fits (the delayed-tau spectral fits), spectral_fits_dblplaw (the
+# double-power-law spectral fits), photometric_fits (the delayed-tau photometric fits of spec amendment A) or
+# photometric_fits_dblplaw (the double-power-law photometric fits and the cross-fits of the delayed-tau mocks).
+# They share job ids (specobjids, calib_<k>), so their jobs and results never mix:
+#     FITS_SUBDIR=spectral_fits_dblplaw Synthetic_domain/remote/submit_fits.sh'''),
+    ('''#   SKIP_LIST        file of job ids left out of the bundle   [default skipped_fit_jobs.txt for spectral_fits, none
+#                    otherwise: the photometric calibration mocks reuse the ids calib_<k> of the spectral ones]''',
+     '''#   SKIP_LIST        file of job ids left out of the bundle   [default skipped_fit_jobs.txt for spectral_fits,
+#                    skipped_fit_jobs_dblplaw.txt for spectral_fits_dblplaw, none for the photometric folders:
+#                    every folder's calibration mocks reuse the ids calib_<k>, so each needs its own list]'''),
+    ('''if [[ "$FITS_SUBDIR" == "spectral_fits" ]]; then
+    SKIP_LIST="${SKIP_LIST-$SYNTHETIC_DIR/skipped_fit_jobs.txt}"
+else''', '''if [[ "$FITS_SUBDIR" == "spectral_fits" ]]; then
+    SKIP_LIST="${SKIP_LIST-$SYNTHETIC_DIR/skipped_fit_jobs.txt}"
+elif [[ "$FITS_SUBDIR" == "spectral_fits_dblplaw" ]]; then
+    SKIP_LIST="${SKIP_LIST-$SYNTHETIC_DIR/skipped_fit_jobs_dblplaw.txt}"
+else'''),
+])
+
+patch(root + "/Synthetic_domain/remote/fit_job.sh", [
+    ('''#   FITS_SUBDIR      folder of the jobs and results: spectral_fits, photometric_fits or
+#                    photometric_fits_dblplaw   [default spectral_fits]''',
+     '''#   FITS_SUBDIR      folder of the jobs and results: spectral_fits, spectral_fits_dblplaw, photometric_fits
+#                    or photometric_fits_dblplaw   [default spectral_fits]'''),
+])
+
+patch(root + "/Synthetic_domain/remote/fetch_fits.sh", [
+    ('''# The fits folder is the one the job recorded in out/fits_subdir.txt (spectral_fits, photometric_fits or
+# photometric_fits_dblplaw). Jobs made before it was recorded are spectral fits; for them FITS_SUBDIR may name
+# the folder [default spectral_fits].''',
+     '''# The fits folder is the one the job recorded in out/fits_subdir.txt (spectral_fits, spectral_fits_dblplaw,
+# photometric_fits or photometric_fits_dblplaw). Jobs made before it was recorded are delayed-tau spectral fits;
+# for them FITS_SUBDIR may name the folder [default spectral_fits].'''),
+])
+
+patch(root + "/Synthetic_domain/remote/README.md", [
+    ('''The DPL mocks' cross-fits (fitted with delayed-tau) are exported to `photometric_fits/jobs/`, so a
+`FITS_SUBDIR=photometric_fits` run after it fits only those: the finished delayed-tau fits travel in its bundle.
+''', '''The DPL mocks' cross-fits (fitted with delayed-tau) are exported to `photometric_fits/jobs/`, so a
+`FITS_SUBDIR=photometric_fits` run after it fits only those: the finished delayed-tau fits travel in its bundle.
+
+The double-power-law spectral fits (section 6d of notebook 2: every galaxy with a prepared spectrum, refitted
+with the DPL prior, and 33 DPL calibration mocks, about 1400 fits) have their own folder too:
+
+    FITS_SUBDIR=spectral_fits_dblplaw Synthetic_domain/remote/submit_fits.sh
+
+They take about 30 h, so two 24 h jobs: fetch the first (`fetch_fits.sh ID`) and submit again; the second fits
+only the rest, because the finished fits travel in its bundle.
+'''),
+    ('''`skipped_fit_jobs.txt` applies to the spectral fits only (`SKIP_LIST` overrides it). It is empty for the delayed-tau
+model: the ids it listed named 16-bin mocks, and the new mocks reuse the `calib_<k>` ids. `BUNDLE_ONLY=<folder>`''',
+     '''`skipped_fit_jobs.txt` applies to the delayed-tau spectral fits and `skipped_fit_jobs_dblplaw.txt` to the DPL
+spectral fits (`SKIP_LIST` overrides either; the photometric folders have none). Each folder needs its own list,
+because every folder's mocks reuse the `calib_<k>` ids. Both are empty: the ids `skipped_fit_jobs.txt` listed
+named 16-bin mocks. `BUNDLE_ONLY=<folder>`'''),
+])
+
+patch(root + "/.gitignore", [
+    ('''Synthetic_domain/photometric_fits_dblplaw/
+''', '''Synthetic_domain/photometric_fits_dblplaw/
+Synthetic_domain/spectral_fits_dblplaw/
+'''),
+])
+
+with open(root + "/Synthetic_domain/skipped_fit_jobs_dblplaw.txt", "w") as skip_file:
+    skip_file.write(
+        "# DPL spectral fit jobs deliberately left unfitted, one job_id per line ('#' starts a comment).\n"
+        "# remote/submit_fits.sh does not send them (FITS_SUBDIR=spectral_fits_dblplaw), and the DPL spectral\n"
+        "# calibration test of spectroscopic_reference.ipynb (section 6d) gives its verdict on the other mocks,\n"
+        "# listing these as skipped. The DPL mocks reuse the calib_<k> ids of the delayed-tau mocks, so the two\n"
+        "# models keep separate lists (skipped_fit_jobs.txt is the delayed-tau one).\n")
+print("skipped_fit_jobs_dblplaw.txt written")
+```
+
+Expected output: five `patched` lines and `skipped_fit_jobs_dblplaw.txt written`.
+
+The resulting `SKIP_LIST` branch of `submit_fits.sh` (lines 45–51) is:
+
+```bash
+if [[ "$FITS_SUBDIR" == "spectral_fits" ]]; then
+    SKIP_LIST="${SKIP_LIST-$SYNTHETIC_DIR/skipped_fit_jobs.txt}"
+elif [[ "$FITS_SUBDIR" == "spectral_fits_dblplaw" ]]; then
+    SKIP_LIST="${SKIP_LIST-$SYNTHETIC_DIR/skipped_fit_jobs_dblplaw.txt}"
+else
+    SKIP_LIST="${SKIP_LIST-}"
+fi
+```
+
+- [ ] **Step 8: Check the scripts on a mirror, never in the repository's fit folders**
+
+`submit_fits.sh` needs `$FITS_SUBDIR/jobs/` next to itself, and `spectral_fits_dblplaw/` must not be created in the repository by hand: notebook 2 makes it on the PC. So the check runs on a copy of the scripts and modules in the scratchpad. Run from the repository root:
+
+```bash
+bash -n Synthetic_domain/remote/submit_fits.sh && bash -n Synthetic_domain/remote/fit_job.sh \
+  && bash -n Synthetic_domain/remote/fetch_fits.sh && echo syntax-ok
+MIRROR="$SCRATCH/mirror/Synthetic_domain"
+rm -rf "$SCRATCH/mirror" && mkdir -p "$MIRROR/spectral_fits_dblplaw/jobs"
+cp -r Synthetic_domain/remote Synthetic_domain/*.py Synthetic_domain/skipped_fit_jobs*.txt "$MIRROR/"
+cp -rL Synthetic_domain/splus-filters "$MIRROR/"
+touch "$MIRROR/spectral_fits_dblplaw/jobs/calib_000.npz" "$MIRROR/spectral_fits_dblplaw/jobs/1105771463723476992.npz"
+BUNDLE_ONLY="$SCRATCH/bundle_check" FITS_SUBDIR=spectral_fits_dblplaw "$MIRROR/remote/submit_fits.sh" | grep Bundle
+tar -tzf "$SCRATCH/bundle_check/bundle.tar.gz" | grep -E 'spectral_fits_dblplaw/jobs/.|^\./(sfh_models|synthetic_model|run_spectral_fits)\.py$'
+echo "calib_000" >> "$MIRROR/skipped_fit_jobs_dblplaw.txt"
+BUNDLE_ONLY="$SCRATCH/bundle_check" FITS_SUBDIR=spectral_fits_dblplaw "$MIRROR/remote/submit_fits.sh" | grep Bundle
+BUNDLE_ONLY="$SCRATCH/bundle_check" FITS_SUBDIR=spectral_fits_dblplaw SKIP_LIST= "$MIRROR/remote/submit_fits.sh" | grep Bundle
+git check-ignore Synthetic_domain/spectral_fits_dblplaw/jobs/x.npz
+git status --short Synthetic_domain/skipped_fit_jobs_dblplaw.txt
+```
+
+Expected:
+- `syntax-ok`;
+- `Bundle (spectral_fits_dblplaw): ..., with 0 finished fit(s), 0 skipped job(s) left out`;
+- the three module paths and the two job files;
+- after `calib_000` is added to the mirror's list, `1 skipped job(s) left out`: the default list is the DPL one;
+- with `SKIP_LIST=` (empty), `0 skipped job(s)`;
+- the ignored path printed, and `?? Synthetic_domain/skipped_fit_jobs_dblplaw.txt` (a new file, tracked like `skipped_fit_jobs.txt`).
+
+The mirror only exists in the scratchpad. If `~/Programs/MultiNest` is missing on this machine, skip the `BUNDLE_ONLY` lines and rely on `bash -n`.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add Synthetic_domain/synthetic_model.py Synthetic_domain/spectral_validation.py Synthetic_domain/run_spectral_fits.py \
+        Synthetic_domain/spectroscopic_reference.ipynb Synthetic_domain/tests/test_synthetic_model.py \
+        Synthetic_domain/tests/test_spectral_validation.py Synthetic_domain/remote/submit_fits.sh \
+        Synthetic_domain/remote/fit_job.sh Synthetic_domain/remote/fetch_fits.sh Synthetic_domain/remote/README.md \
+        Synthetic_domain/skipped_fit_jobs_dblplaw.txt .gitignore
+git commit -m "feat: spectral fits of either SFH model; DPL spectral jobs and mocks; spectral_fits_dblplaw
+
+spectral_dims, spectral_components, fit_spectrum, posterior_labels, make_mock_spectrum and the
+calibration mocks take the SFH model; fit_spectrum_job fits a job with its own model, so a DPL
+spectrum job is fitted (amendment 2 lifts decision 1). dblplaw_spectral_jobs copies the galaxy
+jobs; SPECTRAL_PREFIXES names the reference columns; FIT_FOLDER_MODELS gains spectral_fits_dblplaw.
+The delayed-tau spectral path is unchanged: regression tests relabel a stored fit and the stored
+mocks exactly. The spectral likelihood returns LOG_ZERO where Bagpipes raises, as the photometric
+one does; values elsewhere unchanged. submit_fits.sh skips the jobs of skipped_fit_jobs_dblplaw.txt
+for the new folder.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 14: Notebook 2 exports and reads the DPL spectral fits (section 6d), with the calibration verdict and the spectral evidence of both models
+
+**Why:** Amendment 2, items 2 and 3. The jobs of Task 13 must reach the PC, and their fits must reach `spectroscopic_reference.csv`, where `ml_model.ipynb` (Task 15) reads them. The new section 6d follows the delayed-τ path step by step:
+- section 4 exports the jobs and draws the mocks;
+- section 5 gives the calibration verdict;
+- section 6 summarises the labels at the aperture brightness.
+
+**What changes in the notebook:**
+- **Section 5** (cell 14): the delayed-τ calibration test becomes the function `spectral_calibration(sfh_model, fits_directory, truths, skipped_jobs_file)`, and section 6d calls it for DPL. The delayed-τ verdict, table and printout stay the same. Two things differ: the lines name the model, and a missing skip file now counts as an empty list, with a printed `WARNING` that names the file to add to the notebook-2 inputs, instead of raising (a listed mock then counts as unfitted, so the verdict stays empty, never a false PASS). `converged_from_multinest` gains `fits_directory=FITS_DIRECTORY`, so the delayed-τ calls do not change.
+- **Section 6** (cell 16): the delayed-τ rows gain `spec_log_evidence` and `spec_log_evidence_error`. The error is NaN for the 788 fits made before it was stored; the 604 fits of the running PC job store it. It is not recomputed: the photometric `sm.fit_evidence` recomputes errors with the photometric likelihood only, and the difference between two spectral ln Z values is expected to dwarf errors of about 0.1–0.3.
+- **Section 6d** (new, four cells after the cross-fit table of section 6c):
+  - export: `spectral_fits_dblplaw/calibration_mocks.joblib` (33 DPL mocks, drawn once with `DBLPLAW_SPECTRAL_MOCK_SEED = 3` on the templates of the selected galaxies, then reused) and `spectral_fits_dblplaw/jobs/*.npz` (the mocks and `sm.dblplaw_spectral_jobs(real_jobs)`). This happens on every run, without waiting for the split;
+  - the calibration verdict (`spectral_calibration("dblplaw", ...)` with `skipped_fit_jobs_dblplaw.txt`);
+  - the reading of the fits.
+- **Markdown:** the title cell, sections 4, 5, 6 and 6c, and "Next pass" mention the new section. Two stale names in the markdown are fixed: `sm.CALIBRATION_LABELS` and `sm.TRAINING_LABELS`.
+- **Superseding** (cell 10) loops over `sm.FIT_FOLDER_MODELS`, so it covers `spectral_fits_dblplaw/` through Task 13 without a code change. Only the section-4 markdown names the new folder.
+
+**Interfaces:**
+- **Consumes (Task 13):** `sm.spectral_dims`, `sm.draw_calibration_mocks(..., "dblplaw")`, `sm.dblplaw_spectral_jobs`, `sm.SPECTRAL_PREFIXES`, `sm.FIT_FOLDER_MODELS`, `sm.model_file`, `sm.fit_is_current`, `sm.SPECTRUM_JOB`, `skipped_fit_jobs_dblplaw.txt`. From the notebook itself: `real_jobs` (cell 11), `reference` with `r_aper` and `converged` (cell 16), `FITS_DIRECTORY` and `SKIPPED_JOBS_FILE` (cell 1).
+- **Produces (notebook functions and variables):**
+  - `converged_from_multinest(job_id, metadata, fits_directory=FITS_DIRECTORY)`, `skipped_job_ids(skipped_jobs_file) -> set`;
+  - `spectral_calibration(sfh_model, fits_directory, truths, skipped_jobs_file) -> (verdict, table)`;
+  - `dblplaw_spectral_summary(galaxies) -> DataFrame`;
+  - `DBLPLAW_SPECTRAL_FITS_DIRECTORY = "spectral_fits_dblplaw"`, `DBLPLAW_SKIPPED_JOBS_FILE = "skipped_fit_jobs_dblplaw.txt"`, `DBLPLAW_SPECTRAL_LABELS`, `dblplaw_spectral_fitter_calibrated`.
+- **Produces (files, written by notebook 2 on the PC):** `spectral_fits_dblplaw/jobs/*.npz` (33 `calib_<k>` DPL mocks, and one job per prepared spectrum, named by its specobjid as in `spectral_fits/jobs/`) and `spectral_fits_dblplaw/calibration_mocks.joblib`.
+- **Produces (`spectroscopic_reference.csv` columns):**
+  - delayed-τ: `spec_log_evidence`, `spec_log_evidence_error`; the existing plain columns (`<label>_p16/_median/_p84`, `converged`, `fitter_calibrated`, `split`) do not change;
+  - DPL: `spec_dblplaw_<label>_p16/_median/_p84` for `[*sm.MODELS["dblplaw"].training_labels, "veldisp", "noise_scale"]`. That is the label set the delayed-τ spectral columns have (`LABEL_COLUMNS`), with mass-like labels at the aperture r brightness;
+  - DPL: `spec_dblplaw_converged`, `spec_dblplaw_log_evidence`, `spec_dblplaw_log_evidence_error`, and `spec_dblplaw_fitter_calibrated` on every row;
+  - galaxies without a DPL fit have NaN. Like the delayed-τ spectral columns, the DPL ones cover both halves of the split. The split stays the delayed-τ one, so `ml_model.ipynb` must use the test half only under `RUN_LOCKED_TEST`.
+
+- [ ] **Step 1: Edit the notebook**
+
+Save as `$SCRATCH/task14_notebook.py` and run `../.venv/bin/python "$SCRATCH/task14_notebook.py"` from `Synthetic_domain/`:
+
+```python
+"""Task 14: notebook 2 exports and reads the DPL spectral fits (section 6d), gives the DPL spectral calibration
+verdict and the spectral evidence columns of both models."""
+import json
+import uuid
+
+NOTEBOOK = "spectroscopic_reference.ipynb"
+with open(NOTEBOOK) as notebook_file:
+    notebook = json.load(notebook_file)
+cells = notebook["cells"]
+
+
+def source_of(cell):
+    return "".join(cell["source"])
+
+
+def find_cell(first_line):
+    """Index of the one cell whose source starts with first_line."""
+    matches = [index for index, cell in enumerate(cells) if source_of(cell).startswith(first_line)]
+    assert len(matches) == 1, (first_line, matches)
+    return matches[0]
+
+
+def set_source(cell, text):
+    cell["source"] = text.splitlines(keepends=True)
+    if cell["cell_type"] == "code":
+        cell["outputs"] = []
+        cell["execution_count"] = None
+
+
+def replace_in_cell(index, old, new):
+    """Replace the one occurrence of old in cell index (markdown keeps its rendering; code loses its outputs)."""
+    text = source_of(cells[index])
+    assert text.count(old) == 1, (index, old[:60], text.count(old))
+    set_source(cells[index], text.replace(old, new))
+
+
+def new_cell(cell_type, text):
+    cell = {"cell_type": cell_type, "id": uuid.uuid4().hex[:8], "metadata": {}, "source": []}
+    if cell_type == "code":
+        cell["execution_count"] = None
+        cell["outputs"] = []
+    set_source(cell, text)
+    return cell
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Section 5: the calibration test as a function of the model, so section 6d runs it for the DPL fits
+CALIBRATION_CELL = r'''def converged_from_multinest(job_id, metadata, fits_directory=FITS_DIRECTORY):
+    """Whether a fit certainly stopped before its iteration limit, judged from its MultiNest folder.
+
+    Uses the upper bound of the outer-loop iteration count (sm.multinest_iteration_bounds), so a capped
+    run is never called converged. The limit is the one stored in the fit's metadata. A fit saved before
+    the limit was stored (or without its MultiNest folder) keeps the flag stored when it ran: that flag
+    came from the ev.dat row count, which overcounts iterations, so a stored True is already safe and a
+    stored False is never upgraded against a limit that may differ from the one the fit used.
+    Inputs: job_id: fit identifier, the name of its .h5 file and MultiNest folder (str); metadata: dict from
+            sm.load_fit; fits_directory: the fit's folder (str; by default the delayed-tau spectral fits).
+    Returns: True if the run converged, else False (bool).
+    """
+    iteration_limit = metadata.get("max_iterations")
+    multinest_basename = os.path.join(fits_directory, job_id) + "/"
+    if iteration_limit is None or not os.path.exists(multinest_basename + "ev.dat"):
+        return bool(metadata["converged"])
+    return sm.multinest_iteration_bounds(multinest_basename)[1] < iteration_limit
+
+
+def skipped_job_ids(skipped_jobs_file):
+    """Job ids listed in a skip file: one per line, '#' starts a comment.
+
+    Why a missing file lists none: a skipped mock then counts as unfitted, so the verdict stays empty instead
+    of passing on fewer mocks.
+    Inputs: skipped_jobs_file: path of the list (str).
+    Returns: set of job ids (str); empty, with a printed warning, when the file does not exist.
+    """
+    if not os.path.exists(skipped_jobs_file):
+        print(f"WARNING: {skipped_jobs_file} not found (add it to the notebook-2 inputs): no mock counts "
+              "as skipped")
+        return set()
+    with open(skipped_jobs_file) as skipped_file:
+        return {line.split("#")[0].strip() for line in skipped_file} - {""}
+
+
+def spectral_calibration(sfh_model, fits_directory, truths, skipped_jobs_file):
+    """Calibration test of one model's spectral fitter on its stored mocks; prints the table and the verdict.
+
+    Inputs: sfh_model: "delayed" or "dblplaw"; fits_directory: the model's spectral fits folder (str);
+            truths: dict mock job_id -> Series of the true labels (from the model's mock file);
+            skipped_jobs_file: the model's list of mocks deliberately left unfitted (str).
+    Returns: (fitter_calibrated, coverage table from sm.calibration_coverage). fitter_calibrated is True when
+             the 95% coverage of every calibration label of the model reaches sm.MIN_COVERAGE_95, False
+             otherwise, and pd.NA while a mock is neither fitted nor skipped, or when there are no mocks.
+    """
+    # 1. Posteriors of the calibration mocks that have finished
+    posteriors = {}
+    n_converged = 0
+    for job_id in truths:
+        fit_file = os.path.join(fits_directory, f"{job_id}.h5")
+        if os.path.exists(fit_file):
+            posteriors[job_id], metadata = sm.load_fit(fit_file)
+            assert sm.fit_is_current(metadata, sfh_model), (
+                f"{fit_file} is from an earlier model or run: run section 4")
+            n_converged += int(converged_from_multinest(job_id, metadata, fits_directory))
+
+    # 2. Coverage per label and interval
+    n_finished = len(posteriors)
+    table = sm.calibration_coverage(posteriors, truths, sm.MODELS[sfh_model].calibration_labels)
+    display(table.pivot(index="label", columns="level", values=["coverage", "n_jobs"]).round(2))
+
+    # 3. Verdict: every mock must be fitted or deliberately skipped (listed in skipped_jobs_file)
+    skipped_mocks = sorted(skipped_job_ids(skipped_jobs_file) & set(truths) - set(posteriors))
+    coverage_95 = table[table["level"] == 0.95].set_index("label")["coverage"]
+    if skipped_mocks:
+        # Worst case: every skipped mock would have fallen outside its 95% interval
+        worst_case_95 = coverage_95 * n_finished / (n_finished + len(skipped_mocks))
+        print(f"Skipped mocks ({sfh_model}): {', '.join(skipped_mocks)}; 95% coverage if all of them had "
+              f"missed: {worst_case_95.round(2).to_dict()}")
+    if len(truths) == 0 or n_finished + len(skipped_mocks) < len(truths):
+        print(f"INCOMPLETE ({sfh_model}): {n_finished} of {len(truths)} calibration mocks fitted "
+              f"({n_converged} converged); the verdict stays empty until all are done")
+        return pd.NA, table
+    fitter_calibrated = bool((coverage_95 >= sm.MIN_COVERAGE_95).all())
+    verdict = "PASS" if fitter_calibrated else "FAIL"
+    print(f"{verdict} ({sfh_model}): 95% coverage {coverage_95.round(2).to_dict()} against the required "
+          f"{sm.MIN_COVERAGE_95} ({n_finished} mocks, {n_converged} converged, {len(skipped_mocks)} skipped)")
+    return fitter_calibrated, table
+
+
+# The delayed-tau spectral fitter, on the mocks of section 4
+fitter_calibrated, calibration_table = spectral_calibration("delayed", FITS_DIRECTORY, calibration_truths,
+                                                            SKIPPED_JOBS_FILE)
+'''
+
+# ---------------------------------------------------------------------------------------------------------------
+# Section 6d: the DPL spectral fits
+SECTION_6D_MARKDOWN = r'''## 6d. Double-power-law spectral fits (DPL spec, amendment 2)
+Every galaxy with a prepared spectrum is fitted again under the double-power-law prior. The spectrum, redshift, calibration polynomial, likelihood and MultiNest settings are those of section 4; only the SFH model changes, so the unit cube is `sm.spectral_dims("dblplaw")` (the DPL photometric dimensions plus `veldisp` and `noise_scale`). The jobs (`sm.dblplaw_spectral_jobs`: the galaxy jobs of section 4, same ids) go to their own folder, `spectral_fits_dblplaw/jobs/`. This section does not wait for the split: it fits every prepared spectrum.
+
+**Calibration:** 33 mocks drawn from the DPL prior (`sm.draw_calibration_mocks(..., "dblplaw")`), each with the wavelengths, mask and errors of a random selected galaxy, as for the delayed-τ mocks. They are stored in `spectral_fits_dblplaw/calibration_mocks.joblib` and reused. The fitter passes when at least `sm.MIN_COVERAGE_95` of the truths lie inside the 95% intervals of `log_turnover_lookback`, `log_alpha`, `log_beta`, `log_metallicity` and `log_mstar` (`sm.MODELS["dblplaw"].calibration_labels`); mocks listed in `skipped_fit_jobs_dblplaw.txt` are handled as in section 5.
+
+**Results:** `spec_dblplaw_<label>_p16/_median/_p84` for the DPL training labels plus `veldisp` and `noise_scale` (mass-like labels at the aperture r brightness, as in section 6), `spec_dblplaw_converged`, `spec_dblplaw_log_evidence`, `spec_dblplaw_log_evidence_error` and `spec_dblplaw_fitter_calibrated`. With `spec_log_evidence` of section 6, they give the spectral Bayes factor of the two models in `ml_model.ipynb`. The delayed-τ spectral columns keep their plain names; the split, the photometric fits and the validation rulers of section 7 stay on the delayed-τ fits.
+
+**Running:** `FITS_SUBDIR=spectral_fits_dblplaw remote/submit_fits.sh` (about 1400 fits, about 30 h: two 24 h jobs, the second resuming from the fetched fits), and `remote/fetch_fits.sh <job-id>` after each. From the first export on, every notebook-2 run must bundle `spectral_fits_dblplaw` and `skipped_fit_jobs_dblplaw.txt` (see `remote/README.md`).'''
+
+SECTION_6D_JOBS = r'''DBLPLAW_SPECTRAL_FITS_DIRECTORY = sm.model_file(FITS_DIRECTORY, "dblplaw")    # spectral_fits_dblplaw
+DBLPLAW_SPECTRAL_JOBS_DIRECTORY = os.path.join(DBLPLAW_SPECTRAL_FITS_DIRECTORY, sm.JOBS_SUBDIRECTORY)
+DBLPLAW_SPECTRAL_MOCK_FILE = os.path.join(DBLPLAW_SPECTRAL_FITS_DIRECTORY, sm.CALIBRATION_MOCK_FILE)
+DBLPLAW_SKIPPED_JOBS_FILE = sm.model_file(SKIPPED_JOBS_FILE, "dblplaw")      # skipped_fit_jobs_dblplaw.txt
+DBLPLAW_SPECTRAL_MOCK_SEED = 3   # templates and noise of the DPL spectral mocks (SEED: delayed-tau)
+os.makedirs(DBLPLAW_SPECTRAL_FITS_DIRECTORY, exist_ok=True)
+
+# 1. DPL spectral calibration mocks: drawn once and stored with their true labels, as the delayed-tau mocks of
+# section 4, because their fits are cached on disk and must be compared with the mocks they were made from
+if os.path.exists(DBLPLAW_SPECTRAL_MOCK_FILE):
+    dblplaw_spectral_mock_jobs, dblplaw_spectral_truths = joblib.load(DBLPLAW_SPECTRAL_MOCK_FILE)
+    print(f"Reusing {len(dblplaw_spectral_mock_jobs)} stored DPL spectral calibration mocks from "
+          f"{DBLPLAW_SPECTRAL_MOCK_FILE}")
+else:
+    # Why refuse: old calib_*.h5 fits would be scored against the new truths without any error. calib_* also
+    # matches the fits' MultiNest folders
+    stale_fits = glob.glob(os.path.join(DBLPLAW_SPECTRAL_FITS_DIRECTORY, f"{sm.CALIBRATION_ID_PREFIX}*"))
+    assert len(stale_fits) == 0, (f"{len(stale_fits)} calib_* fits or MultiNest folders exist but "
+                                  f"{DBLPLAW_SPECTRAL_MOCK_FILE} is missing: bundle it (with the fits), or "
+                                  "move the fits to superseded/ to draw new mocks")
+    templates = [(job["spectrum"], job["redshift"]) for job in real_jobs]
+    dblplaw_spectral_mock_jobs, dblplaw_spectral_truths = sm.draw_calibration_mocks(
+        sm.N_CALIBRATION_MOCKS, templates, np.random.default_rng(DBLPLAW_SPECTRAL_MOCK_SEED), "dblplaw")
+    joblib.dump((dblplaw_spectral_mock_jobs, dblplaw_spectral_truths), DBLPLAW_SPECTRAL_MOCK_FILE)
+    print(f"Drew {len(dblplaw_spectral_mock_jobs)} DPL spectral calibration mocks from the DPL prior, stored "
+          f"in {DBLPLAW_SPECTRAL_MOCK_FILE}")
+
+# 2. The galaxies of section 4, each fitted again with the DPL prior (same job id, spectrum and redshift)
+dblplaw_spectral_galaxy_jobs = sm.dblplaw_spectral_jobs(real_jobs)
+
+# 3. Job files, and how to run them
+for job in [*dblplaw_spectral_mock_jobs, *dblplaw_spectral_galaxy_jobs]:
+    sm.export_job(job, DBLPLAW_SPECTRAL_JOBS_DIRECTORY)
+print(f"Exported {len(dblplaw_spectral_mock_jobs)} DPL calibration mocks and "
+      f"{len(dblplaw_spectral_galaxy_jobs)} galaxies to {DBLPLAW_SPECTRAL_JOBS_DIRECTORY}/")
+print("Run them on the PC:  FITS_SUBDIR=spectral_fits_dblplaw remote/submit_fits.sh   (about 30 h: two 24 h "
+      "jobs, the second resuming from the fetched fits)")
+print("and fetch each:      remote/fetch_fits.sh <job-id>")
+'''
+
+SECTION_6D_CALIBRATION = r'''# The DPL spectral fitter, on its own mocks: section 5's test with the DPL calibration labels
+dblplaw_spectral_fitter_calibrated, dblplaw_spectral_calibration_table = spectral_calibration(
+    "dblplaw", DBLPLAW_SPECTRAL_FITS_DIRECTORY, dblplaw_spectral_truths, DBLPLAW_SKIPPED_JOBS_FILE)
+'''
+
+SECTION_6D_READ = r'''# Summaries of every DPL training label, then the spectral fit's own parameters (as LABEL_COLUMNS, section 6)
+DBLPLAW_SPECTRAL_LABELS = [*sm.MODELS["dblplaw"].training_labels, "veldisp", "noise_scale"]
+DBLPLAW_SPECTRAL_PREFIX = sm.SPECTRAL_PREFIXES["dblplaw"]       # spec_dblplaw_
+
+
+def dblplaw_spectral_summary(galaxies):
+    """One row per galaxy with a DPL spectral fit: label summaries, convergence and evidence.
+
+    The mass-like labels are moved to the aperture brightness first, as for the delayed-tau fits.
+    Inputs: galaxies: the reference table (specobjid, and r_aper [mag]: the dereddened 3" r magnitude).
+    Returns: DataFrame with specobjid, then spec_dblplaw_<label>_p16/_median/_p84 for DBLPLAW_SPECTRAL_LABELS,
+             spec_dblplaw_converged (bool), spec_dblplaw_log_evidence and spec_dblplaw_log_evidence_error
+             (dimensionless ln Z and MultiNest's uncertainty of it); galaxies without a fit have no row.
+    """
+    empty_summary = pd.DataFrame(np.zeros((1, len(DBLPLAW_SPECTRAL_LABELS))), columns=DBLPLAW_SPECTRAL_LABELS)
+    columns = ["specobjid"]
+    for name in sm.summarise_posterior(empty_summary, DBLPLAW_SPECTRAL_LABELS):
+        columns.append(f"{DBLPLAW_SPECTRAL_PREFIX}{name}")
+    for name in ("converged", "log_evidence", "log_evidence_error"):
+        columns.append(f"{DBLPLAW_SPECTRAL_PREFIX}{name}")
+
+    rows = []
+    for galaxy in galaxies.itertuples():
+        fit_file = os.path.join(DBLPLAW_SPECTRAL_FITS_DIRECTORY, f"{galaxy.specobjid}.h5")
+        if not os.path.exists(fit_file):
+            continue
+        posterior, metadata = sm.load_fit(fit_file)
+        assert metadata.get("kind", sm.SPECTRUM_JOB) == sm.SPECTRUM_JOB, f"{fit_file} is not a spectral fit"
+        assert sm.fit_is_current(metadata, "dblplaw"), (
+            f"{fit_file} is from an earlier model or run: run section 4")
+
+        # Mass-like labels follow the aperture r magnitude, as for the delayed-tau fits (section 6)
+        posterior = sm.rescale_mass_labels(posterior, galaxy.r_aper - posterior["model_r"])
+
+        converged = converged_from_multinest(galaxy.specobjid, metadata, DBLPLAW_SPECTRAL_FITS_DIRECTORY)
+        row = {"specobjid": galaxy.specobjid, f"{DBLPLAW_SPECTRAL_PREFIX}converged": converged,
+               f"{DBLPLAW_SPECTRAL_PREFIX}log_evidence": metadata["log_evidence"],
+               f"{DBLPLAW_SPECTRAL_PREFIX}log_evidence_error": metadata.get("log_evidence_error", np.nan)}
+        for name, value in sm.summarise_posterior(posterior, DBLPLAW_SPECTRAL_LABELS).items():
+            row[f"{DBLPLAW_SPECTRAL_PREFIX}{name}"] = value
+        rows.append(row)
+    return pd.DataFrame(rows, columns=columns)
+
+
+# The DPL spectral columns replace any earlier ones (re-running the cell adds no copies); the verdict goes on
+# every row
+dblplaw_spectral = dblplaw_spectral_summary(reference)
+earlier_columns = [column for column in reference.columns if column.startswith(DBLPLAW_SPECTRAL_PREFIX)]
+reference = reference.drop(columns=earlier_columns).merge(dblplaw_spectral, on="specobjid", how="left")
+reference[f"{DBLPLAW_SPECTRAL_PREFIX}fitter_calibrated"] = dblplaw_spectral_fitter_calibrated
+n_dblplaw_spectral_converged = int(dblplaw_spectral[f"{DBLPLAW_SPECTRAL_PREFIX}converged"].sum())
+both_converged = reference["converged"].eq(True) & reference[f"{DBLPLAW_SPECTRAL_PREFIX}converged"].eq(True)
+print(f"DPL spectral fits read for {len(dblplaw_spectral)} of {len(dblplaw_spectral_galaxy_jobs)} exported "
+      f"galaxies ({n_dblplaw_spectral_converged} converged; {int(both_converged.sum())} galaxies with both "
+      f"spectral fits converged); spec_dblplaw_fitter_calibrated = {dblplaw_spectral_fitter_calibrated}")
+'''
+
+# ---------------------------------------------------------------------------------------------------------------
+title_index = find_cell("# Spectroscopic reference set (part 2)")
+section_4_index = find_cell("## 4. Fits (outside the notebook)")
+section_5_index = find_cell("## 5. Calibration test")
+calibration_index = find_cell("def converged_from_multinest(job_id, metadata):")
+section_6_index = find_cell("## 6. Labels, coverage and split")
+labels_index = find_cell("# Summaries of every training-set label, then the spectral fit's own parameters")
+section_6c_index = find_cell("## 6c. Double-power-law photometric fits and cross-fits (DPL spec, part 2)")
+cross_table_index = find_cell("# Every mock of either model under both models")
+next_pass_index = find_cell("## Next pass")
+
+# Title cell: the DPL spectral fits and their outputs, and the label list by its registry name
+replace_in_cell(title_index, "(`sm.TRAINING_LABELS`)", "(`sm.MODELS[\"delayed\"].training_labels`)")
+replace_in_cell(title_index, "between 0.1 and 1 Gyr and older.",
+                "between 0.1 and 1 Gyr and older. Section 6d fits the same spectra again with Bagpipes' double "
+                "power law (`dblplaw`, DPL spec, amendment 2), into the `spec_dblplaw_*` columns; the split and "
+                "the validation stay on the delayed-τ fits.")
+replace_in_cell(title_index,
+                "(double-power-law photometric fits, section 6c), ",
+                "(double-power-law photometric fits, section 6c), `spectral_fits_dblplaw/jobs/` and "
+                "`spectral_fits_dblplaw/calibration_mocks.joblib` (double-power-law spectral fits, section 6d), ")
+
+# Section 4: the superseding covers the DPL spectral folder (it loops over sm.FIT_FOLDER_MODELS)
+replace_in_cell(section_4_index, "(`spectral_fits/`, `photometric_fits/`, `photometric_fits_dblplaw/`)",
+                "(`spectral_fits/`, `photometric_fits/`, `photometric_fits_dblplaw/`, `spectral_fits_dblplaw/`)")
+
+# Section 5: the label list by its registry name, and the DPL test of section 6d
+replace_in_cell(section_5_index, "(`sm.CALIBRATION_LABELS`; age, τ and Z in log",
+                "(`sm.MODELS[\"delayed\"].calibration_labels`; age, τ and Z in log")
+replace_in_cell(section_5_index, "A failure is a finding about the prior or the model, not a crash.",
+                "A failure is a finding about the prior or the model, not a crash. Section 6d runs the same test "
+                "(`spectral_calibration`) on the DPL spectral fits, with their own mocks and "
+                "`skipped_fit_jobs_dblplaw.txt`.")
+set_source(cells[calibration_index], CALIBRATION_CELL)
+
+# Section 6: the delayed-tau spectral evidence
+replace_in_cell(section_6_index,
+                "Each posterior sample carries the training set's labels (`sm.TRAINING_LABELS`) plus the fit's "
+                "velocity dispersion and noise scale.",
+                "Each posterior sample carries the delayed-τ training labels (`sm.MODELS[\"delayed\"]"
+                ".training_labels`) plus the fit's velocity dispersion and noise scale. The fit's ln Z and "
+                "MultiNest's error of it become `spec_log_evidence` and `spec_log_evidence_error` (the error is "
+                "empty for the fits saved before it was stored, and is not recomputed).")
+replace_in_cell(labels_index, '''    row["fit_hours"] = metadata["run_time"] / 3600
+''', '''    row["fit_hours"] = metadata["run_time"] / 3600
+    # ln Z of the fit and MultiNest's error of it, stored by the fits made since the DPL model; earlier fits
+    # have no error, and it is not recomputed (the ln Z difference to the DPL fits is expected to dwarf it)
+    row["spec_log_evidence"] = metadata["log_evidence"]
+    row["spec_log_evidence_error"] = metadata.get("log_evidence_error", np.nan)
+''')
+replace_in_cell(labels_index,
+                'expected_columns = ["converged", "fit_hours", *sm.summarise_posterior(empty_summary, LABEL_COLUMNS)]',
+                'expected_columns = ["converged", "fit_hours", "spec_log_evidence", "spec_log_evidence_error",\n'
+                '                    *sm.summarise_posterior(empty_summary, LABEL_COLUMNS)]')
+
+# Section 6c: its mocks predate the DPL spectral fits
+replace_in_cell(section_6c_index,
+                "There are no DPL spectral mocks, so its **calibration mocks** are 33 points",
+                "Its **calibration mocks** (drawn before the DPL spectral fits of section 6d existed, and kept) "
+                "are 33 points")
+
+# Next pass: the DPL spectral jobs follow
+replace_in_cell(next_pass_index, "Add DR4 Stripe 82 galaxies",
+                "Section 6d exports the DPL spectral jobs of the same prepared spectra, so a new pass adds their DPL "
+                "jobs too, and its stored mocks are reused likewise. Add DR4 Stripe 82 galaxies")
+
+# Section 6d, after the cross-fit table and before section 7
+new_cells = [new_cell("markdown", SECTION_6D_MARKDOWN), new_cell("code", SECTION_6D_JOBS),
+             new_cell("code", SECTION_6D_CALIBRATION), new_cell("code", SECTION_6D_READ)]
+cells[cross_table_index + 1:cross_table_index + 1] = new_cells
+
+with open(NOTEBOOK, "w") as notebook_file:
+    json.dump(notebook, notebook_file, indent=1, ensure_ascii=False)
+    notebook_file.write("\n")
+print("notebook updated:", len(cells), "cells")
+```
+
+Expected output: `notebook updated: 40 cells`.
+
+- [ ] **Step 2: Check the notebook (never execute it on the laptop)**
+
+```bash
+../.venv/bin/python -c "
+import nbformat
+nb = nbformat.read('spectroscopic_reference.ipynb', as_version=4); nbformat.validate(nb)
+for i, c in enumerate(nb.cells):
+    if c.cell_type == 'code': compile(c.source, f'cell {i}', 'exec')
+print('ok', len(nb.cells))
+print([c.source.splitlines()[0] for c in nb.cells if c.cell_type == 'markdown' and c.source.startswith('## ')])"
+grep -c 'SPECTRAL_DIMS\|SPECTRAL_MODEL\|sm.CALIBRATION_LABELS\|sm.TRAINING_LABELS' spectroscopic_reference.ipynb
+grep -c 'spectral_calibration(' spectroscopic_reference.ipynb
+LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python -m pytest tests/test_notebooks.py -q
+```
+
+Expected:
+- `ok 40`;
+- the headings list has `## 6c. Double-power-law photometric fits and cross-fits (DPL spec, part 2)`, then `## 6d. Double-power-law spectral fits (DPL spec, amendment 2)`, then `## 7. Validation of the spectral fits`;
+- the first `grep` prints `0`;
+- the second prints `3` (the definition, the delayed-τ call and the DPL call: they are in three different cells, and `grep -c` counts lines);
+- `3 passed` (every `sm.` name the notebooks use exists).
+
+- [ ] **Step 3: `remote/README.md`: the notebook-2 runs carry the DPL spectral folder**
+
+Save as `$SCRATCH/task14_readme.py` and run `../.venv/bin/python "$SCRATCH/task14_readme.py"` from `Synthetic_domain/`:
+
+```python
+"""Task 14, step 3: remote/README.md says how the notebook-2 runs carry the DPL spectral folder."""
+
+README = "remote/README.md"
+text = open(README).read()
+# The new text is a raw string: its shell command ends lines with a backslash
+pairs = [
+    ('''`phot_*` and `phot_dblplaw_*` columns. Leave it True afterwards: with False, the next reading run leaves those
+columns empty for the test half again.
+''', r'''`phot_*` and `phot_dblplaw_*` columns. Leave it True afterwards: with False, the next reading run leaves those
+columns empty for the test half again.
+
+**DPL spectral runs (DPL spec, amendment 2).** Section 6d of notebook 2 exports `spectral_fits_dblplaw/jobs/`
+and `spectral_fits_dblplaw/calibration_mocks.joblib` in every run; the first run that has it draws the mocks.
+From then on, every notebook-2 run must bundle `spectral_fits_dblplaw` (the mock file and the fits) and
+`skipped_fit_jobs_dblplaw.txt`. A run without them does not fail: section 6d draws throw-away mocks
+(`fetch_notebook.sh` keeps the local ones) and leaves the `spec_dblplaw_*` columns empty. Between the export and
+the reading run, fit `spectral_fits_dblplaw` (above) and fetch it. The reading run writes the `spec_dblplaw_*`
+columns, and section 6 writes `spec_log_evidence` and `spec_log_evidence_error` of the delayed-tau spectral fits.
+Before the first export, make the empty folder (`mkdir -p spectral_fits_dblplaw`): the bundle stops on a missing
+input. From then on every notebook-2 run uses this command, with all four fit folders and both skip lists:
+
+    cd Synthetic_domain
+    EXCLUDE_NAMES="superseded pilot jobs" FLOAT32_FILES=training_set.parquet remote/submit_notebook.sh \
+        spectroscopic_reference.ipynb dr3_corrected.csv ../Data/sdss_eboss_firefly-dr16_slim.fits \
+        ../dustMaps/csfd training_set.parquet spectra spectral_fits spectral_fits_dblplaw photometric_fits \
+        photometric_fits_dblplaw skipped_fit_jobs.txt skipped_fit_jobs_dblplaw.txt splus_aperture_photometry.csv \
+        splus_noise_model.csv spectroscopic_reference.csv literature
+    remote/fetch_notebook.sh ID
+
+Notebook 2 reads no `jobs/` folder (it exports every job again), so `jobs` in `EXCLUDE_NAMES` keeps all the
+`jobs/` folders out of the bundle (about 80 MB: 39 MB per spectral jobs folder); `fetch_notebook.sh` brings back
+the jobs the run exported and still keeps the local `calib_*.npz`. The bundle is still large: 1.5 GB on
+2026-10-29 with 788 delayed-tau spectral fits and no DPL spectral folder (`spectra/` 1.4 GB, the CSFD map
+289 MB), and about 2 GB once both spectral folders are finished (about 300 MB of fits each). That is close to
+hljobd's 3 GB limit, so check it first with `BUNDLE_ONLY=<folder>` in front of the same command.
+'''),
+]
+for old, new in pairs:
+    assert text.count(old) == 1, old[:80]
+    text = text.replace(old, new)
+open(README, "w").write(text)
+print(README, "updated")
+```
+
+Expected output: `remote/README.md updated`.
+
+- [ ] **Step 4: Run the whole suite**
+
+Run: `LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python -m pytest -q`
+
+Expected: `282 passed` (or `281 passed, 1 skipped`, as in Task 13), the same as after Task 13, because this task adds no test. On a checkout that lacks git-ignored data, more tests skip themselves (a review copy without the data gave `275 passed, 7 skipped`); compare passed + skipped, which is 282.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add Synthetic_domain/spectroscopic_reference.ipynb Synthetic_domain/remote/README.md
+git commit -m "feat: notebook 2 exports and reads the DPL spectral fits, with their calibration and evidence
+
+New section 6d exports spectral_fits_dblplaw/jobs (every prepared spectrum and 33 DPL mocks),
+runs the spectral calibration test for DPL (section 5's test, now a function of the model) and
+reads the fits into spec_dblplaw_* columns, with the DPL ln Z and its error. Section 6 adds
+spec_log_evidence(_error) of the delayed-tau spectral fits; the split stays on them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+**PC order after Task 14 (for Task 16, the controller).** This is Amendment 2, item 6, step by step; Task 15's handoff continues it with the locked run of `ml_model.ipynb`. Every command runs from `Synthetic_domain/`. Rules for every notebook-2 run:
+- supersede locally first (`remote/README.md`, "Notebook 2");
+- use the command of `remote/README.md`, "DPL spectral runs" (all four fit folders, both skip lists, `EXCLUDE_NAMES="superseded pilot jobs"`), and check its size with `BUNDLE_ONLY=<folder>` first;
+- fetch it with `remote/fetch_notebook.sh <id>`.
+
+**(a) The remaining delayed-τ spectral fits.** Wait for the running delayed-τ job (bundle of 9b4676e) to finish, fetch it with `remote/fetch_fits.sh <id>`, then supersede locally. Its fits grow both halves of the split (no galaxy changes half). If it stopped at its time limit before every job was fitted, run `remote/submit_fits.sh` again and fetch that job too: it resumes from the fetched fits.
+
+**(b) Unlock the test half's photometric jobs.** Set `EXPORT_LOCKED_TEST_JOBS = True` in notebook 2's parameter cell, keeping the JSON layout, and commit the change:
+
+```bash
+LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python - <<'PYTHON'
+import json
+
+with open("spectroscopic_reference.ipynb", encoding="utf-8") as notebook_file:
+    notebook = json.load(notebook_file)
+cell = next(cell for cell in notebook["cells"] if cell["id"] == "2f7e52ed")
+old_line = "EXPORT_LOCKED_TEST_JOBS = False\n"
+new_line = "EXPORT_LOCKED_TEST_JOBS = True\n"
+assert cell["source"].count(old_line) == 1, "the EXPORT_LOCKED_TEST_JOBS line is not the expected one"
+cell["source"][cell["source"].index(old_line)] = new_line
+with open("spectroscopic_reference.ipynb", "w", encoding="utf-8") as notebook_file:
+    json.dump(notebook, notebook_file, indent=1, ensure_ascii=False)
+    notebook_file.write("\n")
+print("EXPORT_LOCKED_TEST_JOBS = True")
+PYTHON
+git diff --stat
+git add spectroscopic_reference.ipynb
+git commit -m "run: notebook 2 exports and reads the test half's photometric jobs (EXPORT_LOCKED_TEST_JOBS = True)
+
+Set once for the locked test of both SFH models (DPL spec, amendment 2, item 5); it stays True.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+Expected: `EXPORT_LOCKED_TEST_JOBS = True`, and `git diff --stat` shows one file with 1 insertion and 1 deletion.
+
+**(c) The export run.** First `mkdir -p spectral_fits_dblplaw` (the bundle stops on a missing input), then the notebook-2 run and its fetch. With the grown split and `EXPORT_LOCKED_TEST_JOBS = True`, this one run exports:
+- the DPL spectral jobs of every prepared spectrum, and draws and stores the 33 DPL spectral mocks (section 6d);
+- the photometric jobs of both models for the validation half (its new galaxies are the ones not yet fitted) and the whole test half (sections 6b and 6c);
+- the cross-fits (section 6c; they are fitted already, so the fit runs skip them).
+
+Check in the fetched notebook: "Exported 33 DPL calibration mocks and <n> galaxies to spectral_fits_dblplaw/jobs/" (about 1360 galaxies), and "(validation and test halves)" in the export lines of `photometric_fits/jobs/` and `photometric_fits_dblplaw/jobs/`. A line with "(validation halves)" means the flag of (b) did not reach the run: stop there.
+
+**(d) The fits, each run followed by `remote/fetch_fits.sh <id>`:**
+1. `FITS_SUBDIR=spectral_fits_dblplaw remote/submit_fits.sh` (about 1400 fits, about 30 h), fetch, then the same command again for the rest, fetch. The second job resumes from the fetched fits.
+2. `FITS_SUBDIR=photometric_fits_dblplaw remote/submit_fits.sh`, fetch.
+3. `FITS_SUBDIR=photometric_fits remote/submit_fits.sh`, fetch.
+
+Any run that stops at its 24 h limit is submitted again the same way after its fetch.
+
+**(e) The reading run:** the same notebook-2 command, after the fits of (d) are fetched. Check in the fetched notebook:
+- the DPL spectral verdict is `PASS (dblplaw)` or `FAIL (dblplaw)`, not `INCOMPLETE (dblplaw)`;
+- "DPL spectral fits read for <n> of <n> exported galaxies" has nearly equal numbers;
+- the photometric readings of both models cover the validation and the test half.
+
+Then go on with the pre-flight check of Task 15's handoff, and the locked run of `ml_model.ipynb`.
+
+**Optional overlap.** The DPL spectral jobs do not depend on the split, so an extra export run during (a) could start step (d) 1 before the delayed-τ fits are done. That run keeps `EXPORT_LOCKED_TEST_JOBS = False` and bundles the 788 fetched delayed-τ fits; its photometric exports and its CSV are replaced by (c) and (e). It saves time only if the job server runs two 16-core jobs side by side; otherwise the two fit jobs queue anyway. The user asked for the delayed-τ fits first, so the default is the order above.
+
+### Task 15: `ml_model.ipynb` compares both models with both spectral references, adds the spectral evidence, and runs the locked test for both models
+
+**Files:**
+- Modify: `Synthetic_domain/ml_evaluation.py`:
+  - a new constant `FAVOURED_MODEL_ORDER` (section 1);
+  - two new functions `log_bayes_sign_agreement` and `favoured_model_crosstab` (section 6, before `true_model_recovery`);
+  - two docstrings name the spectral prefixes.
+- Test: `Synthetic_domain/tests/test_ml_evaluation.py` (3 tests appended; 31 → 34 tests in the file).
+- Modify: `Synthetic_domain/ml_model.ipynb`:
+  - 13 cells are rewritten in place, by cell id: `55011031`, `fe480605`, `e81a48b9`, `e05c91f8`, `74230b0e`, `2e021085`, `3e17feaa`, `2887477a`, `b051ebb0`, `89339c2d`, `79e11a83`, `10a86e1d`, `0267e995`;
+  - 2 new cells (section 5.5: markdown `a7c3e5d1`, code `b8d4f6e2`) are inserted after the cross-fit cell `fc196542`, before the last cell `3dfd5bb5` (which writes `COMPARISON_FILE`);
+  - 25 → 27 cells. Cells not listed keep their source and outputs; the edited code cells lose their outputs (they are stale).
+- Temporary, deleted in Step 10: `Synthetic_domain/task15_cells/` (the new cell sources and the script that puts them into the notebook).
+- Unchanged: every cell not listed, among them cell 1 (`b6229f82`, the parameters), sections 1, 2 and 4, the photometric evidence (`b1c2a26c`), the cross-fits (`fc196542`) and the last cell (`3dfd5bb5`).
+
+**Do not execute the notebook on the laptop.** It runs on the PC as a GPU notebook job (handoff at the end of this task). Step 8 runs the changed cells' table code with stubbed posteriors: no notebook is executed with nbconvert, and there is no Bagpipes or flow work (no sampling, no fit, about 30 s on the CPU). **Controller approval needed:** Step 8 `exec()`s code cells of `ml_model.ipynb` on the laptop, which the rule "never execute notebooks on the laptop" could be read to forbid. It is the only check that the delayed-τ tables stay unchanged, so this plan keeps it, with the controller's explicit approval. Without that approval, skip Step 8: Step 7 (nbformat, compile, flake8 F821, `tests/test_notebooks.py`) still runs, and the equality of the delayed-τ tables is then checked on the PC output against the previous run's CSVs instead.
+
+**Interfaces:**
+- **Consumes:**
+  - `sm.SPECTRAL_PREFIXES = {"delayed": "", "dblplaw": "spec_dblplaw_"}` (Task 13), next to `sm.PHOTOMETRIC_PREFIXES`. With prefix `""` the delayed-τ spectral columns keep their plain names: `<label>_p16/_median/_p84`, `converged`, `fitter_calibrated`;
+  - **the reference-CSV columns of Task 14** (`spectroscopic_reference.csv`):
+    - `spec_dblplaw_<label>_p16/_median/_p84` for `sfh_models.MODELS["dblplaw"].training_labels`;
+    - `spec_dblplaw_converged`, `spec_dblplaw_fitter_calibrated`;
+    - `spec_log_evidence`, `spec_log_evidence_error` (delayed-τ spectral fits; the error is NaN for the fits made before it was stored) and `spec_dblplaw_log_evidence`, `spec_dblplaw_log_evidence_error`;
+    - the `split` column stays the delayed-τ spectral split: every galaxy of a half has a converged delayed-τ spectral fit;
+  - the existing `ev.*` helpers (`reference_comparison_rows`, `agreement_verdict`, `side_by_side_verdicts`, `summary_comparison_rows`, `model_comparison_rows`, `log_bayes_factor`, `log_bayes_factor_error`, `evidence_category_fractions`, `favoured_model`) and the notebook's own helpers (`available_labels`, `converged_fits`, `spectral_galaxy_types`, `labelled_posteriors`).
+- **Produces:**
+  - `ev.FAVOURED_MODEL_ORDER = [ev.DELAYED_MODEL, ev.NO_MODEL, ev.DBLPLAW_MODEL]`;
+  - `ev.log_bayes_sign_agreement(first_log_bayes, second_log_bayes) -> dict(n_galaxies, same_sign, same_favoured_model)`;
+  - `ev.favoured_model_crosstab(first_log_bayes, second_log_bayes) -> DataFrame` (3 × 3 counts, index name `first`, columns name `second`, both in `FAVOURED_MODEL_ORDER`);
+  - notebook globals:
+    - `SPECTRAL_REFERENCES = list(sm.SPECTRAL_PREFIXES)`;
+    - `spectral_fits(galaxies, spectral_model) -> bool array`: fit_status `"fitted"` and the model's spectral `converged` flag;
+    - `agreements[(ml_model, spectral_model)]`: ML rows against one spectral reference, with a new `spectral_model` column (it was `agreements[sfh_model]`, against the delayed-τ spectra only);
+    - `verdicts[(sfh_model, reference_set, half)]`: the works-test verdicts (it was `verdicts[(sfh_model, reference_set)]`, validation only). `reference_set` "spectral" is now the model's **own** spectral fits;
+    - `spectral_evidence`: one row per galaxy with both spectral fits, `specobjid`, `half`, `galaxy_type`, `spectral_log_bayes`, `spectral_log_bayes_error`;
+  - outputs (written when the notebook runs on the PC):
+    - `ml_evaluation_summary[_dblplaw].csv`: the agreement rows gain a `half` column (test-half rows with `RUN_LOCKED_TEST`);
+    - `ml_model_comparison.csv`:
+      - `own_photometric` rows gain `half`; new section `own_spectral`;
+      - `model_pairs` gains the pair `spectral Bagpipes`;
+      - `against_spectra` gains `spectral_model` (rows against both references);
+      - new sections `spectral_evidence_distribution`, `spectral_evidence_categories`, `evidence_agreement`, `evidence_favoured_models`.
+
+**What stays identical.** For the same ML draws and the same reference CSV, every delayed-τ table the notebook printed before is unchanged: the photometric verdicts, the delayed-τ ML against the delayed-τ spectra, the DPL ML against the delayed-τ spectra, the model pairs, `against_spectra` against the delayed-τ reference, the photometric evidence and the cross-fit recovery. Step 8 checks this. The PC numbers still change, because the remaining delayed-τ spectral fits grow both halves (Amendment 2, item 1).
+
+**Design choices (why):**
+- **No extra sampling.** The ML draws of cell 8 (one pass per model and half) serve every reference, so the four (ML model, spectral model) comparisons cost only table work, and the memory rule (one model's synthetic posteriors at a time, GPU job cap 7.1 GB) is untouched.
+- **One galaxy type for both references.** The passive/star-forming split stays the delayed-τ spectral sSFR (as the validation rulers of notebook 2), so a galaxy is in the same group against both references.
+- **The `all` row without judged galaxies is empty.** Before notebook 2 has read the DPL spectral fits, the DPL own-spectral verdict has no judged label; `ev.agreement_verdict`'s `all` row would then say `True` (an `all()` over nothing). `verdict_table` sets it to `None` ("no verdict") whenever the judged labels hold no galaxy. Delayed-τ verdicts always have judged galaxies, so they do not change.
+- **Locked test.** With `RUN_LOCKED_TEST = True`, section 3b judges the `test` half too: against the model's own spectral fits always, against its own photometric fits only when notebook 2 has read the test-half photometric fits (`EXPORT_LOCKED_TEST_JOBS`); otherwise that verdict is skipped with a message. The spectral parts of section 5 (5.1 spectral, the 5.2 spectral pair, 5.3, 5.5) use `halves`; the photometric parts keep `photometric_halves`.
+- **The spectral pair in 5.2** (delayed-τ spectral against DPL spectral fits, shared labels) is not listed in Amendment 2. It costs one `ev.model_comparison_rows` call and shows how far apart the two spectral references are, which the 5.3 caveat needs.
+
+- [ ] **Step 1: Write the failing tests.** Append to `Synthetic_domain/tests/test_ml_evaluation.py`:
+
+```python
+
+
+def test_log_bayes_sign_agreement_of_a_hand_made_table():
+    photometric = np.array([2.0, -5.0, 0.5, 4.0, np.nan, -0.2])
+    spectral = np.array([10.0, -50.0, -30.0, -2.0, 1.0, 0.3])
+    agreement = ev.log_bayes_sign_agreement(photometric, spectral)
+    assert agreement["n_galaxies"] == 5                                     # the NaN galaxy is left out
+    assert np.isclose(agreement["same_sign"], 2 / 5)                        # galaxies 0 and 1
+    assert np.isclose(agreement["same_favoured_model"], 3 / 5)              # 0, 1, and 5 (both inconclusive)
+
+
+def test_favoured_model_crosstab_of_a_hand_made_table():
+    photometric = np.array([2.0, -5.0, 0.5, 4.0, np.nan, -0.2])
+    spectral = np.array([10.0, -50.0, -30.0, -2.0, 1.0, 0.3])
+    crosstab = ev.favoured_model_crosstab(photometric, spectral)
+    assert list(crosstab.index) == ["delayed", "neither", "dblplaw"]
+    assert list(crosstab.columns) == ["delayed", "neither", "dblplaw"]
+    assert (crosstab.index.name, crosstab.columns.name) == ("first", "second")
+    expected = np.array([[1, 0, 1],      # first favours delayed: second delayed (0), second DPL (3)
+                         [0, 1, 1],      # first inconclusive: second inconclusive (5), second DPL (2)
+                         [0, 0, 1]])     # first favours DPL: second DPL (1)
+    assert np.array_equal(crosstab.to_numpy(), expected)
+
+
+def test_evidence_agreement_without_galaxies_is_nan_and_zero():
+    agreement = ev.log_bayes_sign_agreement([np.nan, 1.0], [2.0, np.nan])
+    assert agreement["n_galaxies"] == 0
+    assert np.isnan(agreement["same_sign"]) and np.isnan(agreement["same_favoured_model"])
+    assert (ev.favoured_model_crosstab([np.nan], [np.nan]).to_numpy() == 0).all()
+```
+
+- [ ] **Step 2: Run them to check they fail.**
+  - Run: `cd Synthetic_domain && LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python -m pytest tests/test_ml_evaluation.py -q`
+  - Expected: `3 failed, 31 passed`, each failure an `AttributeError: module 'ml_evaluation' has no attribute 'log_bayes_sign_agreement'` (or `'favoured_model_crosstab'`).
+
+- [ ] **Step 3: Add the constant and the two functions to `ml_evaluation.py`.**
+  1. In section 1 (Constants), after the line `ALL_MOCKS_ROW = "all"                        # true_model_recovery row over every mock`, add:
+
+```python
+FAVOURED_MODEL_ORDER = [DELAYED_MODEL, NO_MODEL, DBLPLAW_MODEL]   # order of favoured_model_crosstab
+```
+
+  2. In section 6 (Bayesian evidence), between the end of `evidence_category_fractions` (its last line is `    return pd.DataFrame(rows)`) and `def true_model_recovery(cross_fits):`, insert (two blank lines before and after, as between the other functions):
+
+```python
+def log_bayes_sign_agreement(first_log_bayes, second_log_bayes):
+    """How often two ln B of the same galaxies point the same way (e.g. photometric against spectral).
+
+    Inputs: first_log_bayes, second_log_bayes: arrays (n,) of ln B [nats], paired by galaxy (positive favours
+            delayed-tau). A galaxy with either ln B NaN is left out.
+    Returns: dict with
+             - n_galaxies: galaxies with both ln B finite (count);
+             - same_sign: share of them whose two ln B have the same sign (a ln B of exactly 0 matches only
+               another 0);
+             - same_favoured_model: share of them whose two ln B favour the same model (favoured_model; two
+               inconclusive ln B both favour NO_MODEL, so they count as the same).
+             The shares are NaN without galaxies.
+    """
+    first = np.asarray(first_log_bayes, dtype=float)
+    second = np.asarray(second_log_bayes, dtype=float)
+    usable = np.isfinite(first) & np.isfinite(second)
+    n_galaxies = int(usable.sum())
+    if n_galaxies == 0:
+        return {"n_galaxies": 0, "same_sign": np.nan, "same_favoured_model": np.nan}
+    same_sign = np.sign(first[usable]) == np.sign(second[usable])
+    same_favoured_model = favoured_model(first[usable]) == favoured_model(second[usable])
+    return {"n_galaxies": n_galaxies, "same_sign": float(np.mean(same_sign)),
+            "same_favoured_model": float(np.mean(same_favoured_model))}
+
+
+def favoured_model_crosstab(first_log_bayes, second_log_bayes):
+    """Counts of galaxies by the model each of two ln B favours (e.g. photometric against spectral).
+
+    Inputs: first_log_bayes, second_log_bayes: arrays (n,) of ln B [nats], paired by galaxy. A galaxy with
+            either ln B NaN is left out.
+    Returns: DataFrame of counts, 3 x 3: rows (index name "first") are the model the first ln B favours,
+             columns (name "second") the model the second favours, both in FAVOURED_MODEL_ORDER
+             (favoured_model: DELAYED_MODEL, NO_MODEL for an inconclusive ln B, DBLPLAW_MODEL). An empty
+             cell is 0.
+    """
+    first = np.asarray(first_log_bayes, dtype=float)
+    second = np.asarray(second_log_bayes, dtype=float)
+    usable = np.isfinite(first) & np.isfinite(second)
+    first_models = favoured_model(first[usable])
+    second_models = favoured_model(second[usable])
+    counts = pd.DataFrame(0, index=pd.Index(FAVOURED_MODEL_ORDER, name="first"),
+                          columns=pd.Index(FAVOURED_MODEL_ORDER, name="second"))
+    for first_model, second_model in zip(first_models, second_models):
+        counts.loc[first_model, second_model] += 1
+    return counts
+```
+
+  3. Two docstrings name the spectral prefixes. In `reference_comparison_rows`, replace
+
+```text
+            labels: the labels to compare; prefix: "" (spectral fits) or "phot_" (photometric fits).
+```
+
+  with
+
+```text
+            labels: the labels to compare; prefix: a spectral prefix (sm.SPECTRAL_PREFIXES: "" for the
+            delayed-tau spectral fits, "spec_dblplaw_" for the DPL ones) or a photometric one
+            (sm.PHOTOMETRIC_PREFIXES: "phot_", "phot_dblplaw_").
+```
+
+  In `summary_comparison_rows`, replace
+
+```text
+            columns and the reference's {reference_prefix}<label>_* columns (by default the spectral fit's);
+```
+
+  with
+
+```text
+            columns and the reference's {reference_prefix}<label>_* columns (by default the delayed-tau
+            spectral fit's; "spec_dblplaw_" for the DPL spectral fit's);
+```
+
+- [ ] **Step 4: Run the tests; commit.**
+  - Run: `cd Synthetic_domain && LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python -m pytest tests/test_ml_evaluation.py -q`
+  - Expected: `34 passed`.
+
+```bash
+git add Synthetic_domain/ml_evaluation.py Synthetic_domain/tests/test_ml_evaluation.py
+git commit -m "feat: ml_evaluation compares two ln B per galaxy (sign agreement, favoured-model counts)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+- [ ] **Step 5: Write the new cell sources.** Create the folder `Synthetic_domain/task15_cells/` and write each block below, verbatim, to the file named in its heading (`.md` for markdown cells, `.py` for code cells). Each file is the complete new source of that cell. The files end with one newline; the script of Step 6 strips it.
+
+  **`task15_cells/55011031.md`** (cell 0, markdown, the notebook header):
+
+```markdown
+# SFH posterior from S-PLUS colours (part 3)
+
+Two SFH models, each with its own normalizing flow (trained by `train_ml_model.py --sfh-model <model>` on the 3090):
+- **delayed-τ** (`delayed`): 9 targets, which are log age, log τ, log metallicity, the dust (`av_ism`, `log_tau_bc`), `logU`, the formed and the surviving mass, and the redshift;
+- **double power law** (`dblplaw`): 10 targets, which are log turnover lookback time (the lookback time to τ, the turnover of the double power law), log α and log β, then the delayed-τ targets from log metallicity on.
+
+Every other label (`mw_age`, `f_young`, `f_mid`, `f_old`, `log_sfr`, `log_ssfr`, ...) is derived from the samples with the same functions as the training labels (`ml_data.decode_samples`). Inputs are the 11 colours against r, the r magnitude (only for the absolute masses), and z_obs with its uncertainty (0 for spectroscopic redshifts).
+
+Sections 1–4 run once per model in `SFH_MODELS`. Section 5 compares the two models and needs both.
+
+**Bagpipes references.** Each model has its own photometric fits (columns `sm.PHOTOMETRIC_PREFIXES[model]`) and its own spectral fits (columns `sm.SPECTRAL_PREFIXES[model]`: plain names for delayed-τ, `spec_dblplaw_` for DPL) in `spectroscopic_reference.csv`. The split into `validation` and `test` halves is the delayed-τ spectral split, for both models.
+
+**Inputs:** delayed-τ keeps the plain names; DPL adds `_dblplaw` (`sfh_models.model_file`).
+- Per model: `ml_runs/mlp[_dblplaw]/`, `synthetic_validation[_dblplaw].parquet`, `synthetic_test[_dblplaw].parquet`, `training_set[_dblplaw].parquet` (prior draws).
+- Shared: `spectroscopic_reference.csv`, `photometric_cross_fits.csv` (ln Z of the cross-fitted calibration mocks, notebook 2 section 6c; section 5.4), `dr3_corrected.csv`.
+
+**Outputs:** `ml_evaluation_summary[_dblplaw].csv`, `ml_sfh_catalogue[_dblplaw].parquet`, `ml_model_comparison.csv`.
+
+**Run:** top to bottom with the *Inference4ETGs (MultiNest)* kernel, on the PC, as a GPU notebook job with 16 cores and a 12 h limit (`GPU=1 CORES=16 MEMORY_MB=7100 TIME_LIMIT=12:00:00 HLJOB_OPTIONS=--pause-llm remote/submit_notebook.sh ml_model.ipynb <inputs>`, with the inputs listed above). Decoding a DPL sample sums Bagpipes' age grid (about 0.06 ms), so the decoding runs in `N_DECODE_JOBS` threads.
+
+**Locked test.** Sections marked **LOCKED** run only with `RUN_LOCKED_TEST = True`, once, for both models, after the user has inspected the validation results. They use the synthetic test sets and the reference set's test half:
+- the spectral comparisons (sections 3, 3b, 5.1, 5.3, 5.5) cover the test half whenever it is unlocked, since both models' spectral fits cover every galaxy with a spectrum;
+- the photometric Bagpipes fits of the test half exist only when notebook 2 exported and read them (`EXPORT_LOCKED_TEST_JOBS = True`); without them the photometric and photometric-evidence comparisons cover the validation half, and the notebook says so.
+
+Posterior samples for the same seed differ between CUDA and CPU (`DEVICE`): numbers are reproducible per device, not across devices. `ml_networks.load_run` refuses a checkpoint trained for another SFH model or other targets (e.g. the 16-bin runs): retrain it.
+```
+
+  **`task15_cells/fe480605.md`** (section 3 header, markdown):
+
+```markdown
+## 3. Agreement with the Bagpipes spectral posteriors
+
+For each SFH model: ML posteriors from the 3″ aperture colours and spectroscopic redshift, against each reference galaxy's spectral posterior. There are two spectral references, one per SFH model (`sm.SPECTRAL_PREFIXES`):
+- the **delayed-τ spectral fits** (plain column names) hold the shared labels and the delayed-τ parameters;
+- the **DPL spectral fits** (`spec_dblplaw_<label>`) hold the shared labels and the DPL parameters.
+
+Every ML model is compared with both references, on the labels each reference holds. A galaxy enters a reference's comparison when its spectral fit of that model converged. The galaxy type (passive or star-forming) comes from the delayed-τ spectral sSFR for both references, so a galaxy has the same type in every table. Development uses the `validation` half; the `test` half is LOCKED.
+```
+
+  **`task15_cells/e81a48b9.py`** (section 3, code: the ML draws and the ML against both spectral references). Changes against the current cell: `SPECTRAL_REFERENCES`, the new helper `spectral_fits`, `agreements` keyed by (ML model, spectral model) with a `spectral_model` column, the fitter flag read from the reference's own `fitter_calibrated` column; the sampling is unchanged.
+
+```python
+reference = pd.read_csv(REFERENCE_FILE, dtype={"specobjid": str})
+halves = ["validation", "test"] if RUN_LOCKED_TEST else ["validation"]
+SPECTRAL_REFERENCES = list(sm.SPECTRAL_PREFIXES)   # one spectral Bagpipes reference per SFH model
+aperture_columns = []
+aperture_error_columns = []
+for band in sm.BANDS:
+    aperture_columns.append(f"{band}_aper")
+    aperture_error_columns.append(f"e_{band}_aper")
+
+
+def available_labels(table, labels, prefix=""):
+    """The labels whose {prefix}<label>_median column the table holds (a reference set may lack some)."""
+    kept = []
+    for label in labels:
+        if f"{prefix}{label}_median" in table.columns:
+            kept.append(label)
+    return kept
+
+
+def spectral_galaxy_types(galaxies):
+    """'star-forming' where the delayed-tau spectral fit's log_ssfr_median exceeds PASSIVE_SSFR_LIMIT.
+
+    The other galaxies are 'passive'. Both spectral references use this one split, so a galaxy has the same
+    type in every comparison.
+    Returns: array of str, one per galaxy.
+    """
+    is_star_forming = galaxies["log_ssfr_median"].to_numpy(dtype=float) > PASSIVE_SSFR_LIMIT
+    return np.where(is_star_forming, "star-forming", "passive")
+
+
+def converged_fits(galaxies, prefix):
+    """True where the galaxy's Bagpipes fit with this column prefix exists and converged (array).
+
+    prefix: a photometric prefix (sm.PHOTOMETRIC_PREFIXES) or a spectral one (sm.SPECTRAL_PREFIXES; "" reads
+    the delayed-tau spectral column "converged"). A table without the {prefix}converged column (e.g. before
+    the DPL fits are read) gives False everywhere.
+    """
+    column = f"{prefix}converged"
+    if column not in galaxies.columns:
+        return np.zeros(len(galaxies), dtype=bool)
+    return galaxies[column].astype("boolean").fillna(False).to_numpy(dtype=bool)
+
+
+def spectral_fits(galaxies, spectral_model):
+    """True where the galaxy has a converged spectral fit of this SFH model (array).
+
+    The galaxy needs its delayed-tau spectral fit (fit_status "fitted"), which defines the split, and the
+    converged flag of the model's own spectral fit. Every galaxy of a half has a converged delayed-tau fit
+    (notebook 2 splits only those), so for delayed-tau this is every galaxy of the half.
+    """
+    has_delayed_fit = (galaxies["fit_status"] == "fitted").to_numpy()
+    return has_delayed_fit & converged_fits(galaxies, sm.SPECTRAL_PREFIXES[spectral_model])
+
+
+# Why one sampling pass per model and half: the spectral, photometric and cross-model comparisons must use
+# the same ML draws of each galaxy, so each model's posterior is drawn once for every galaxy with a
+# spectral fit or a photometric fit of that model
+has_spectral_fit = reference["fit_status"] == "fitted"
+# (sfh_model, half) -> (galaxies with an ML posterior, dict label -> (n, samples))
+ml_posteriors_by_half = {}
+# (ML model, spectral model) -> the ML of one model against the spectral fits of one model, one row per
+# (half, galaxy, label)
+agreements = {}
+for sfh_model in SFH_MODELS:
+    prefix = sm.PHOTOMETRIC_PREFIXES[sfh_model]
+    has_photometric_fit = pd.Series(False, index=reference.index)
+    if f"{prefix}mw_age_median" in reference.columns:
+        has_photometric_fit = reference[f"{prefix}mw_age_median"].notna()
+    n_targets = runs[sfh_model][1]["n_targets"]
+    agreement_rows = {}
+    for spectral_model in SPECTRAL_REFERENCES:
+        agreement_rows[spectral_model] = []
+    for half in halves:
+        galaxies = reference[(reference["split"] == half) & (has_spectral_fit | has_photometric_fit)]
+        galaxies = galaxies.reset_index(drop=True)
+        if len(galaxies) == 0:
+            print(f"{sfh_model}, {half}: no fitted galaxies yet")
+            continue
+        observations = ml_data.colour_inputs(galaxies[aperture_columns].to_numpy(),
+                                             galaxies[aperture_error_columns].to_numpy(),
+                                             galaxies["z"].to_numpy(), np.zeros(len(galaxies)))
+        if not observations["valid"].any():
+            print(f"{sfh_model}, {half}: no galaxy with a detected r band in the aperture photometry")
+            continue
+        observations["targets"] = np.zeros((len(galaxies), n_targets))   # unknown; not used
+        posteriors, _ = labelled_posteriors(runs[sfh_model], observations, N_POSTERIOR_SAMPLES, SAMPLING_SEED)
+        kept = galaxies[observations["valid"]].reset_index(drop=True)
+        ml_posteriors_by_half[(sfh_model, half)] = (kept, posteriors)
+
+        # The spectral comparisons: for each spectral reference, the galaxies whose fit of that model
+        # converged, on the labels that reference holds
+        for spectral_model in SPECTRAL_REFERENCES:
+            spectral_prefix = sm.SPECTRAL_PREFIXES[spectral_model]
+            spectral_labels = available_labels(reference, LABELS[sfh_model]["reference_labels"],
+                                               spectral_prefix)
+            spectral = spectral_fits(kept, spectral_model)
+            if not spectral.any() or not spectral_labels:
+                continue
+            spectral_galaxies = kept[spectral].reset_index(drop=True)
+            spectral_posteriors = {label: posteriors[label][spectral] for label in spectral_labels}
+            galaxy_types = dict(zip(spectral_galaxies["specobjid"], spectral_galaxy_types(spectral_galaxies)))
+            galaxy_details = spectral_galaxies.set_index("specobjid")
+            fitter_column = f"{spectral_prefix}fitter_calibrated"
+            for row in ev.reference_comparison_rows(spectral_posteriors, spectral_galaxies, spectral_labels,
+                                                    prefix=spectral_prefix):
+                details = galaxy_details.loc[row["specobjid"]]
+                agreement_rows[spectral_model].append({
+                    "sfh_model": sfh_model, "spectral_model": spectral_model, "half": half, **row,
+                    "galaxy_type": galaxy_types[row["specobjid"]], "fibre": details["fiber_diameter"],
+                    "calibrated_fitter": details.get(fitter_column, np.nan)})
+    for spectral_model in SPECTRAL_REFERENCES:
+        agreement = pd.DataFrame(agreement_rows[spectral_model])
+        agreements[(sfh_model, spectral_model)] = agreement
+        if len(agreement) == 0:
+            print(f"{sfh_model} ML: no converged {spectral_model} spectral fits to compare with in "
+                  f"{REFERENCE_FILE} yet")
+            continue
+        print(f"{sfh_model} ML against the {spectral_model} spectral Bagpipes posteriors")
+        display(agreement.groupby(["half", "label"]).agg(median_offset=("offset_in_widths", "median"),
+                                                          inside_68=("inside_68", "mean"),
+                                                          inside_95=("inside_95", "mean"),
+                                                          galaxies=("specobjid", "count")).round(3))
+        display(agreement.groupby(["half", "label", "galaxy_type"])["inside_95"].mean().unstack().round(3))
+```
+
+  **`task15_cells/e05c91f8.md`** (section 3b header, markdown):
+
+```markdown
+### 3b. The "works" test: the model's own photometric and spectral Bagpipes
+
+For each SFH model, the ML is compared with two Bagpipes references of the same model, and each answers a different question:
+
+- **Photometric Bagpipes (emulator check).** These are the model's own photometric fits (notebook 2, section 6b for delayed-τ and 6c for DPL): `phot_<label>` for delayed-τ, `phot_dblplaw_<label>` for DPL (`sm.PHOTOMETRIC_PREFIXES`). They fit the same 3″ photometry the ML sees, under that model's training prior and the simulator's likelihood, so a faithful emulator must agree with them.
+- **Spectral Bagpipes (physical check).** These are the model's own spectral fits to the SDSS spectra: plain `<label>` columns for delayed-τ, `spec_dblplaw_<label>` for DPL (`sm.SPECTRAL_PREFIXES`). Agreement tells whether the colours recover what the spectra say under the same SFH model. Section 5.3 compares every estimator with both spectral references on the shared labels.
+
+A label agrees with a reference set when two conditions hold:
+- at least `ev.MIN_INSIDE_95` (80%) of the reference medians lie inside the ML 95% interval;
+- the median offset is within ±`ev.MAX_ABS_MEDIAN_OFFSET` combined 1σ widths.
+
+The judged labels are the model's calibration labels. For delayed-τ they are `log_age`, `log_tau`, `log_metallicity` and `log_mstar`. For DPL they are `log_turnover_lookback`, `log_alpha`, `log_beta`, `log_metallicity` and `log_mstar`. Both of a model's references hold all of them. A judged label a reference set lacks (e.g. before notebook 2 has read the DPL spectral fits) is listed with the status "not in the reference" and stays out of the `all` row; without any judged label holding galaxies, the `all` row gives no verdict (empty).
+
+The other shared labels (`sfh_models.SHARED_LABELS`) are reported, not judged. A reported label a reference set does not hold has an empty row. The `validation` half is always judged. With `RUN_LOCKED_TEST`, the `test` half is judged too (LOCKED): against the spectral fits always, against the photometric fits only when notebook 2 has read the test-half photometric fits. The verdicts are printed side by side, and the notebook draws no conclusion beyond them.
+
+From Amendment 2 on, `agreement_spectral` in `ml_evaluation_summary_dblplaw.csv` is the DPL ML against the DPL spectral fits; the DPL ML against the delayed-τ spectra is in `ml_model_comparison.csv`, section `against_spectra`, `spectral_model` = `delayed`.
+```
+
+  **`task15_cells/74230b0e.py`** (section 3b, code: the works test against the model's own photometric and own spectral fits, per half). Changes: the loop over `halves`, `verdicts[(sfh_model, reference_set, half)]`, the own spectral reference (`agreements[(sfh_model, sfh_model)]`, `sm.SPECTRAL_PREFIXES`), the empty `all` row in `verdict_table`, and two helpers (`photometric_comparison_rows`, `fitter_calibration_flag`) that hold the old inline code.
+
+```python
+REFERENCE_SET_NAMES = {"photometric": "its own photometric Bagpipes (emulator check)",
+                       "spectral": "its own spectral Bagpipes (physical check)"}
+
+
+NOT_IN_REFERENCE = "not in the reference"   # status of a judged label the reference set does not hold
+# What gives a reference set fits in the test half (section 3b judges the test half only with RUN_LOCKED_TEST)
+TEST_HALF_HINTS = {
+    "photometric": "set EXPORT_LOCKED_TEST_JOBS = True in notebook 2, fit those jobs and read them",
+    "spectral": "run notebook 2 after the spectral fits of the test half"}
+
+
+def verdict_table(rows, judged_labels, reported_labels, not_in_reference=()):
+    """One verdict table with a status column.
+
+    Rows: agreement_verdict over the judged labels (status "judged", with its 'all' row, which covers only
+    them); then the reported labels (status "reported", without their 'all' row); then the labels the
+    reference set cannot judge (status NOT_IN_REFERENCE, no galaxies, agrees left empty).
+    Why the empty 'all' row: when no judged label holds a galaxy (no judged label in the reference, or no
+    fit read yet), agreement_verdict's 'all' row is no verdict, so its agrees is None rather than True or
+    False.
+    """
+    judged = ev.agreement_verdict(rows, judged_labels).assign(status="judged")
+    judged_label_rows = judged[judged["label"] != ev.ALL_LABELS_ROW]
+    if judged_label_rows["n_galaxies"].sum() == 0:
+        judged["agrees"] = judged["agrees"].astype(object)
+        judged.loc[judged["label"] == ev.ALL_LABELS_ROW, "agrees"] = None
+    tables = [judged, ev.agreement_verdict(rows, reported_labels).iloc[:-1].assign(status="reported")]
+    if not_in_reference:
+        missing_rows = []
+        for label in not_in_reference:
+            missing_rows.append({"label": label, "n_galaxies": 0, "inside_95": np.nan,
+                                 "median_offset": np.nan, "agrees": None, "status": NOT_IN_REFERENCE})
+        tables.append(pd.DataFrame(missing_rows))
+    return pd.concat(tables, ignore_index=True)
+
+
+def photometric_comparison_rows(sfh_model, half, labels):
+    """The ML of one model against its own photometric Bagpipes fits in one half, with the draws of cell 8.
+
+    Returns: (rows, n_fits, n_not_converged): reference_comparison_rows over the galaxies whose photometric
+    fit converged; the galaxies with a fit and an ML posterior; those of them whose fit did not converge
+    (left out).
+    """
+    prefix = sm.PHOTOMETRIC_PREFIXES[sfh_model]
+    if (sfh_model, half) not in ml_posteriors_by_half or f"{prefix}mw_age_median" not in reference.columns:
+        return [], 0, 0
+    half_galaxies, half_posteriors = ml_posteriors_by_half[(sfh_model, half)]
+    photometric = half_galaxies[f"{prefix}mw_age_median"].notna().to_numpy()
+    n_fits = int(photometric.sum())
+    if n_fits == 0:
+        return [], 0, 0
+    converged = converged_fits(half_galaxies, prefix)
+    n_not_converged = int((photometric & ~converged).sum())
+    compared = photometric & converged
+    photometric_galaxies = half_galaxies[compared].reset_index(drop=True)
+    photometric_posteriors = {label: half_posteriors[label][compared] for label in labels}
+    rows = ev.reference_comparison_rows(photometric_posteriors, photometric_galaxies, labels, prefix=prefix)
+    return rows, n_fits, n_not_converged
+
+
+def fitter_calibration_flag(column):
+    """The fitter_calibrated flag a reference set's column holds, or a note when it is empty or missing."""
+    if column in reference.columns:
+        flags = reference[column].dropna()
+        if len(flags) > 0:
+            return flags.iloc[0]
+    return "unknown (calibration mocks not all fitted, or fits not read)"
+
+
+verdicts = {}                      # (sfh_model, reference set, half) -> verdict table
+for sfh_model in SFH_MODELS:
+    prefixes = {"photometric": sm.PHOTOMETRIC_PREFIXES[sfh_model],
+                "spectral": sm.SPECTRAL_PREFIXES[sfh_model]}
+    judged_labels = LABELS[sfh_model]["judged_labels"]
+    reported_labels = LABELS[sfh_model]["reported_labels"]
+    reference_labels = LABELS[sfh_model]["reference_labels"]
+    labels_by_set = {}
+    for reference_set, prefix in prefixes.items():
+        labels_by_set[reference_set] = available_labels(reference, reference_labels, prefix)
+        missing_labels = [label for label in reference_labels if label not in labels_by_set[reference_set]]
+        if missing_labels:
+            print(f"{sfh_model}: {REFERENCE_FILE} has no {reference_set} {prefix}<label> columns for "
+                  f"{missing_labels}: their rows stay empty")
+    # The judged labels each reference set holds. The photometric set judges the full list: a missing
+    # column there means the fits are not read yet, so its labels stay judged and empty
+    judged_by_set = {"photometric": judged_labels,
+                     "spectral": available_labels(reference, judged_labels, prefixes["spectral"])}
+
+    for half in halves:
+        n_half = int((reference["split"] == half).sum())
+
+        # 1. The galaxies of this half with a converged photometric fit of this model
+        photometric_rows, n_photometric_fits, n_not_converged = photometric_comparison_rows(
+            sfh_model, half, labels_by_set["photometric"])
+        n_photometric_compared = len({row["specobjid"] for row in photometric_rows})
+        print(f"{sfh_model}, {half} half: photometric fits of {n_photometric_compared} of {n_half} galaxies "
+              f"compared ({n_photometric_fits} with a fit and an ML posterior, {n_not_converged} not "
+              "converged and left out)")
+
+        # 2. The galaxies of this half with a converged spectral fit of this model (cell 8)
+        spectral_rows = agreements[(sfh_model, sfh_model)]
+        if len(spectral_rows) > 0:
+            spectral_rows = spectral_rows[spectral_rows["half"] == half]
+        n_spectral_compared = 0
+        if len(spectral_rows) > 0:
+            n_spectral_compared = spectral_rows["specobjid"].nunique()
+        print(f"{sfh_model}, {half} half: spectral fits of {n_spectral_compared} of {n_half} galaxies "
+              "compared")
+        comparison_rows = {"photometric": photometric_rows, "spectral": spectral_rows}
+
+        # 3. Both verdicts side by side. Why the fitter flag: a reference whose fitter failed its calibration
+        # test (or whose calibration mocks are not all fitted) is a weaker reference, so it is shown next to
+        # the verdict
+        for reference_set, rows in comparison_rows.items():
+            if len(rows) == 0 and half != "validation":
+                # The test half has photometric fits only with EXPORT_LOCKED_TEST_JOBS in notebook 2
+                print(f"  {half} half: no {sfh_model} {reference_set} Bagpipes fits to compare with, so no "
+                      f"verdict ({TEST_HALF_HINTS[reference_set]})")
+                continue
+            if len(rows) == 0:
+                print(f"  no {sfh_model} {reference_set} Bagpipes fits in {REFERENCE_FILE} yet: "
+                      "run notebook 2 after the fits")
+            set_judged_labels = judged_by_set[reference_set]
+            not_in_reference = [label for label in judged_labels if label not in set_judged_labels]
+            verdict = verdict_table(rows, set_judged_labels, reported_labels, not_in_reference)
+            verdicts[(sfh_model, reference_set, half)] = verdict
+            fitter_calibrated = fitter_calibration_flag(f"{prefixes[reference_set]}fitter_calibrated")
+            print(f"{sfh_model}: agreement with {REFERENCE_SET_NAMES[reference_set]} ({half} half; "
+                  f"{', '.join(reported_labels)} reported, not judged); "
+                  f"fitter calibrated: {fitter_calibrated}")
+            display(verdict.round(3))
+            if not_in_reference:
+                print(f"  {', '.join(not_in_reference)}: {NOT_IN_REFERENCE}, so not judged here")
+            judged_rows = verdict[verdict["status"] == "judged"]
+            if judged_rows["n_galaxies"].sum() == 0:
+                print(f"  no galaxy for the judged labels {set_judged_labels} in this reference set")
+            else:
+                all_row = verdict[verdict["label"] == ev.ALL_LABELS_ROW]
+                print(f"  the ML agrees on {', '.join(set_judged_labels)}: {bool(all_row['agrees'].iloc[0])}")
+```
+
+  **`task15_cells/2e021085.py`** (end of section 4, code: the per-model summary files, now with `half`):
+
+```python
+for sfh_model in SFH_MODELS:
+    summary_tables = []
+    if RUN_LOCKED_TEST:
+        summary_tables.append(synthetic_test_summaries[sfh_model])
+    summary_tables.append(choices[sfh_model].assign(section="validation_choice"))
+    # The works-test verdicts of section 3b, in their order there: per half, photometric then spectral
+    for (verdict_model, reference_set, half), verdict in verdicts.items():
+        if verdict_model != sfh_model:
+            continue
+        summary_tables.append(verdict.assign(section=f"agreement_{reference_set}", half=half,
+                                             sfh_model=sfh_model))
+    summary_file = sfh_models.model_file(SUMMARY_FILE, sfh_model)
+    pd.concat(summary_tables, ignore_index=True).to_csv(summary_file, index=False)
+    print(f"wrote {summary_file}")
+```
+
+  **`task15_cells/3e17feaa.md`** (section 5 header, markdown):
+
+```markdown
+## 5. Delayed-τ against double power law
+
+The two SFH models side by side, in five parts (spec 2026-10-28, Part 4 and Amendment 2):
+1. each model's ML against its own photometric and its own spectral Bagpipes (the "works" tests of section 3b, side by side);
+2. delayed-τ against DPL on the shared labels:
+   - the ML of each model, on the validation galaxies and on DR3;
+   - the photometric Bagpipes fits of each model, on the validation galaxies;
+   - the spectral Bagpipes fits of each model, on the validation galaxies;
+3. four estimators against both spectral references (delayed-τ and DPL spectral Bagpipes), passive and star-forming galaxies apart;
+4. the photometric Bayesian evidence of each model, galaxy by galaxy and on the cross-fitted mocks;
+5. the spectral Bayesian evidence of each model, galaxy by galaxy, and how it relates to the photometric one.
+
+The shared labels are model-independent: `log_mstar`, `mw_age`, `log_metallicity`, `av_ism`, `log_ssfr`, `f_young`, `f_mid`, `f_old` (`sfh_models.SHARED_LABELS`).
+
+Every difference is delayed-τ minus DPL. Only the validation half is used, plus the test half with `RUN_LOCKED_TEST` (LOCKED):
+- the spectral comparisons (5.1 spectral, 5.2 spectral pair, 5.3, 5.5) take the test half whenever it is unlocked;
+- the photometric Bagpipes and photometric evidence comparisons (5.1 photometric, 5.2 photometric pair, the photometric estimators of 5.3, 5.4, and the photometric side of 5.5) use the test half only when notebook 2 has read its photometric fits (`EXPORT_LOCKED_TEST_JOBS = True` there); otherwise they cover the validation half, and the cell below says so.
+
+The section is report-only: the evidence is reported, not used to choose a model per galaxy.
+
+**Caveat on the DPL shape parameters.** In the DPL, τ is the turnover time of the double power law and `turnover_lookback` the lookback time to it; the SFR peaks there only when α = β (in general the maximum lies at t = τ (β/α)^{1/(α+β)}), so `log_turnover_lookback` is not the age of peak star formation and is not compared with the delayed-τ age.
+```
+
+  **`task15_cells/2887477a.md`** (section 5.1 header, markdown):
+
+```markdown
+### 5.1 ML against its own photometric and spectral Bagpipes
+
+The verdicts of section 3b, label × model, one table per reference kind and half: first each model against its own photometric fits, then each model against its own spectral fits (the DPL ML against the DPL spectral fits, beside the delayed-τ ML against the delayed-τ spectral fits). Each model's `all` row covers its own calibration labels. The shared labels are reported, and a label one model does not have is empty in its column.
+```
+
+  **`task15_cells/b051ebb0.py`** (section 5.1, code: own photometric and own spectral verdicts side by side, per half; `photometric_halves` unchanged):
+
+```python
+COMPARED_MODELS = ["delayed", "dblplaw"]   # ln B and every difference below: delayed-tau minus DPL
+SHARED_LABELS = sfh_models.SHARED_LABELS
+compare_models = set(COMPARED_MODELS) <= set(SFH_MODELS)
+# Long tables with a "section" column, written to COMPARISON_FILE at the end
+comparison_tables = []
+if not compare_models:
+    print(f"Section 5 needs both models in SFH_MODELS (now {SFH_MODELS}): skipped")
+else:
+    # Each model's works-test verdicts of section 3b, side by side: own photometric, then own spectral fits
+    for reference_set in ("photometric", "spectral"):
+        for half in halves:
+            own_verdicts = {}
+            for sfh_model in COMPARED_MODELS:
+                key = (sfh_model, reference_set, half)
+                if key not in verdicts:   # e.g. no test-half photometric fits (section 3b said so)
+                    continue
+                own_verdicts[sfh_model] = verdicts[key]
+                comparison_tables.append(verdicts[key].assign(section=f"own_{reference_set}", half=half,
+                                                              sfh_model=sfh_model))
+            if not own_verdicts:
+                continue
+            print(f"Each model's ML against its own {reference_set} Bagpipes ({half} half): n_galaxies, "
+                  "inside_95, median offset [combined 1-sigma widths], agrees")
+            display(ev.side_by_side_verdicts(own_verdicts).round(3))
+
+    # The halves of the photometric Bagpipes and evidence comparisons (5.2-5.5). The test half has photometric
+    # fits only when notebook 2 exported and read them (EXPORT_LOCKED_TEST_JOBS); the validation half always
+    # takes part, so its tables exist even before the fits are read
+    photometric_halves = ["validation"]
+    if RUN_LOCKED_TEST:
+        test_galaxies = reference[reference["split"] == "test"]
+        test_has_both_fits = (converged_fits(test_galaxies, sm.PHOTOMETRIC_PREFIXES["delayed"])
+                              & converged_fits(test_galaxies, sm.PHOTOMETRIC_PREFIXES["dblplaw"]))
+        if test_has_both_fits.any():
+            photometric_halves.append("test")
+            print(f"Photometric Bagpipes and evidence comparisons: validation and test halves "
+                  f"({int(test_has_both_fits.sum())} test galaxies with both fits converged)")
+        else:
+            print("Photometric Bagpipes and evidence comparisons: validation half only. The reference set "
+                  "has no test-half photometric fits of both models: set EXPORT_LOCKED_TEST_JOBS = True in "
+                  "notebook 2, fit those jobs and read them, then run this notebook again")
+    else:
+        print("Photometric Bagpipes and evidence comparisons: validation half (the test half is locked)")
+```
+
+  **`task15_cells/89339c2d.md`** (section 5.2 header, markdown):
+
+```markdown
+### 5.2 Delayed-τ against DPL on the shared labels
+
+For each pair of estimates, the cells below compute three statistics per label, over the galaxies both estimates have:
+- the median of the per-galaxy difference of medians (delayed-τ minus DPL);
+- its scatter: the NMAD around that median, 1.4826 × the median absolute deviation;
+- the share of galaxies whose two 16–84% intervals overlap.
+
+Pairs:
+- **ML:** validation galaxies (the draws of cell 8; test galaxies too with `RUN_LOCKED_TEST`), and DR3 galaxies predicted by both catalogues;
+- **photometric Bagpipes:** galaxies where both photometric fits converged, in the halves of `photometric_halves`;
+- **spectral Bagpipes:** galaxies where both spectral fits converged, in the halves of `halves`. This pair shows how much the assumed SFH shape moves the shared labels when the data are the spectra.
+```
+
+  **`task15_cells/79e11a83.py`** (section 5.2, code: the new spectral pair as step 3; the other pairs unchanged):
+
+```python
+if compare_models:
+    model_pairs = []
+    validation_ml_pairs = None
+    for half in halves:
+        # 1. The ML of each model, on the galaxies with both posteriors (cell 8)
+        ml_summaries = []
+        for sfh_model in COMPARED_MODELS:
+            if (sfh_model, half) not in ml_posteriors_by_half:
+                continue
+            galaxies, posteriors = ml_posteriors_by_half[(sfh_model, half)]
+            summary = pd.DataFrame({"specobjid": galaxies["specobjid"].to_numpy()})
+            for label in SHARED_LABELS:
+                p16, median, p84 = ev.percentile_summary(posteriors[label])
+                summary[f"ml_{sfh_model}_{label}_p16"] = p16
+                summary[f"ml_{sfh_model}_{label}_median"] = median
+                summary[f"ml_{sfh_model}_{label}_p84"] = p84
+            ml_summaries.append(summary)
+        if len(ml_summaries) == len(COMPARED_MODELS):
+            ml_pairs = ml_summaries[0].merge(ml_summaries[1], on="specobjid")
+            rows = ev.model_comparison_rows(ml_pairs, SHARED_LABELS, "ml_delayed_", "ml_dblplaw_")
+            model_pairs.append(rows.assign(pair="ML", sample=half))
+            if half == "validation":
+                validation_ml_pairs = ml_pairs
+
+    # 2. The photometric Bagpipes fits of each model, on the galaxies where both converged
+    for half in photometric_halves:
+        half_galaxies = reference[reference["split"] == half].reset_index(drop=True)
+        both_converged = (converged_fits(half_galaxies, sm.PHOTOMETRIC_PREFIXES["delayed"])
+                          & converged_fits(half_galaxies, sm.PHOTOMETRIC_PREFIXES["dblplaw"]))
+        rows = ev.model_comparison_rows(half_galaxies[both_converged], SHARED_LABELS,
+                                        sm.PHOTOMETRIC_PREFIXES["delayed"],
+                                        sm.PHOTOMETRIC_PREFIXES["dblplaw"])
+        model_pairs.append(rows.assign(pair="photometric Bagpipes", sample=half))
+
+    # 3. The spectral Bagpipes fits of each model, on the galaxies where both converged. Every half of
+    # halves: the spectral fits of both models cover every galaxy with a spectrum. Before notebook 2 has read
+    # the DPL spectral fits, the rows have no galaxies
+    for half in halves:
+        half_galaxies = reference[reference["split"] == half].reset_index(drop=True)
+        both_converged = spectral_fits(half_galaxies, "delayed") & spectral_fits(half_galaxies, "dblplaw")
+        rows = ev.model_comparison_rows(half_galaxies[both_converged], SHARED_LABELS,
+                                        sm.SPECTRAL_PREFIXES["delayed"], sm.SPECTRAL_PREFIXES["dblplaw"])
+        model_pairs.append(rows.assign(pair="spectral Bagpipes", sample=half))
+
+    # 4. The ML of each model on DR3: both catalogues have the same rows (cell 12); compared where
+    # both predicted
+    dr3_pairs = pd.concat([catalogues["delayed"].add_prefix("ml_delayed_"),
+                           catalogues["dblplaw"].add_prefix("ml_dblplaw_")], axis=1)
+    rows = ev.model_comparison_rows(dr3_pairs, SHARED_LABELS, "ml_delayed_", "ml_dblplaw_")
+    model_pairs.append(rows.assign(pair="ML", sample="DR3"))
+
+    model_pairs = pd.concat(model_pairs, ignore_index=True)
+    comparison_tables.append(model_pairs.assign(section="model_pairs"))
+    print("Delayed-tau minus DPL on the shared labels: median difference, scatter (NMAD around it) and the "
+          "share of galaxies whose 16-84% intervals overlap")
+    display(model_pairs.set_index(["pair", "sample", "label"]).round(3))
+
+    # 5. ML medians of the two models on the validation galaxies, one panel per shared label
+    if validation_ml_pairs is not None:
+        figure, axes = plt.subplots(2, 4, figsize=(16, 7))
+        for axis, label in zip(axes.flat, SHARED_LABELS):
+            delayed_median = validation_ml_pairs[f"ml_delayed_{label}_median"]
+            dblplaw_median = validation_ml_pairs[f"ml_dblplaw_{label}_median"]
+            axis.scatter(delayed_median, dblplaw_median, s=4)
+            low = min(delayed_median.min(), dblplaw_median.min())
+            high = max(delayed_median.max(), dblplaw_median.max())
+            axis.plot([low, high], [low, high], color="black", lw=1)
+            axis.set(xlabel=f"delayed-τ {label}", ylabel=f"DPL {label}")
+        figure.suptitle("ML posterior medians, validation galaxies")
+        plt.tight_layout()
+        plt.show()
+```
+
+  **`task15_cells/10a86e1d.md`** (section 5.3 header, markdown):
+
+```markdown
+### 5.3 Against the spectra
+
+The "works" test of four estimators against each of the two spectral references (the delayed-τ and the DPL spectral Bagpipes fits), on the shared labels: the ML of each model and the photometric Bagpipes fits of each model.
+- Passive and star-forming galaxies are judged apart, split at the delayed-τ spectral log sSFR of `PASSIVE_SSFR_LIMIT` (as in section 3), for both references.
+- A reference judges the galaxies whose spectral fit of its model converged, on the shared labels it holds.
+- The photometric Bagpipes fits keep only their 16th, 50th and 84th percentiles. Their 95% interval is therefore extended from these as a Gaussian, each side by its own width (`ev.compare_summaries_with_reference`).
+
+**Caveat: each spectral reference assumes its own SFH shape.** The reference `mw_age` and mass fractions `f_young`, `f_mid`, `f_old` carry the delayed-τ shape in the delayed-τ fits and the DPL shape in the DPL fits. An estimate that agrees with only one reference on them may describe the galaxy with the other history rather than be wrong, and the spectral pair of section 5.2 shows how far apart the two references are. `log_mstar`, `log_metallicity`, `av_ism` and `log_ssfr` depend less on the shape.
+```
+
+  **`task15_cells/0267e995.py`** (section 5.3, code: the four estimators against both spectral references):
+
+```python
+if compare_models:
+    ML_ESTIMATORS = []
+    PHOTOMETRIC_ESTIMATORS = []
+    for sfh_model in COMPARED_MODELS:
+        ML_ESTIMATORS.append(f"ML {sfh_model}")
+        PHOTOMETRIC_ESTIMATORS.append(f"photometric Bagpipes {sfh_model}")
+
+    # 1. One row per (spectral reference, estimator, galaxy, label), with the galaxy type
+    spectral_tables = []
+    for spectral_model in SPECTRAL_REFERENCES:
+        spectral_prefix = sm.SPECTRAL_PREFIXES[spectral_model]
+        for half in halves:
+            # The ML rows of cell 8 (they carry spectral_model, half and galaxy_type)
+            for sfh_model in COMPARED_MODELS:
+                agreement = agreements[(sfh_model, spectral_model)]
+                if len(agreement) == 0:
+                    continue
+                ml_rows = agreement[(agreement["half"] == half) & agreement["label"].isin(SHARED_LABELS)]
+                spectral_tables.append(ml_rows.assign(estimator=f"ML {sfh_model}"))
+            if half not in photometric_halves:
+                continue
+            # The photometric Bagpipes rows, on the galaxies with this reference's converged spectral fit
+            half_galaxies = reference[reference["split"] == half].reset_index(drop=True)
+            spectral_galaxies = half_galaxies[spectral_fits(half_galaxies, spectral_model)]
+            spectral_galaxies = spectral_galaxies.reset_index(drop=True)
+            galaxy_types = dict(zip(spectral_galaxies["specobjid"], spectral_galaxy_types(spectral_galaxies)))
+            for sfh_model in COMPARED_MODELS:
+                prefix = sm.PHOTOMETRIC_PREFIXES[sfh_model]
+                fitted = spectral_galaxies[converged_fits(spectral_galaxies, prefix)].reset_index(drop=True)
+                # The shared labels both the photometric fit and this spectral reference hold
+                labels = available_labels(fitted, available_labels(fitted, SHARED_LABELS, prefix),
+                                          spectral_prefix)
+                photometric_rows = pd.DataFrame(ev.summary_comparison_rows(fitted, labels, prefix,
+                                                                           spectral_prefix))
+                if len(photometric_rows) == 0:
+                    continue
+                photometric_rows["spectral_model"] = spectral_model
+                photometric_rows["half"] = half
+                photometric_rows["galaxy_type"] = photometric_rows["specobjid"].map(galaxy_types)
+                spectral_tables.append(photometric_rows.assign(estimator=f"photometric Bagpipes {sfh_model}"))
+    spectral_rows = pd.DataFrame(columns=["spectral_model", "half", "galaxy_type", "estimator", "label",
+                                          "offset_in_widths", "inside_95"])
+    if spectral_tables:
+        spectral_rows = pd.concat(spectral_tables, ignore_index=True)
+
+    # 2. The verdict of each estimator against each reference, passive and star-forming apart, on the shared
+    # labels the reference holds. A half without photometric fits (see photometric_halves) judges the ML
+    # estimators only
+    spectral_verdicts = []
+    for spectral_model in SPECTRAL_REFERENCES:
+        spectral_shared_labels = available_labels(reference, SHARED_LABELS,
+                                                  sm.SPECTRAL_PREFIXES[spectral_model])
+        if not spectral_shared_labels:
+            print(f"No {spectral_model} spectral Bagpipes fits in {REFERENCE_FILE} yet: run notebook 2 after "
+                  "the fits. Comparison against them skipped")
+            continue
+        for half in halves:
+            half_estimators = list(ML_ESTIMATORS)
+            if half in photometric_halves:
+                half_estimators.extend(PHOTOMETRIC_ESTIMATORS)
+            for galaxy_type in ("passive", "star-forming"):
+                by_estimator = {}
+                for estimator in half_estimators:
+                    rows = spectral_rows[(spectral_rows["spectral_model"] == spectral_model)
+                                         & (spectral_rows["half"] == half)
+                                         & (spectral_rows["galaxy_type"] == galaxy_type)
+                                         & (spectral_rows["estimator"] == estimator)]
+                    by_estimator[estimator] = ev.agreement_verdict(rows, spectral_shared_labels)
+                    spectral_verdicts.append(by_estimator[estimator].assign(
+                        spectral_model=spectral_model, half=half, galaxy_type=galaxy_type,
+                        estimator=estimator))
+                print(f"Against the {spectral_model} spectral Bagpipes fits (see the caveat): {half} half, "
+                      f"{galaxy_type} galaxies")
+                display(ev.side_by_side_verdicts(by_estimator).round(3))
+    if spectral_verdicts:
+        comparison_tables.append(pd.concat(spectral_verdicts, ignore_index=True)
+                                 .assign(section="against_spectra"))
+```
+
+  **`task15_cells/a7c3e5d1.md`** (new section 5.5 header, markdown):
+
+```markdown
+### 5.5 Spectral Bayesian evidence
+
+The spectral ln B = `spec_log_evidence` − `spec_dblplaw_log_evidence` for each galaxy whose two spectral fits converged, in the halves of `halves`; positive favours delayed-τ. Both fits see the same spectrum through the same likelihood (calibration polynomial, noise scale and MultiNest settings), so ln B compares the two SFH priors on these data. The spectra carry far more information than 12 colours, so this tests whether they prefer one SFH shape. The categories are those of section 5.4 (`ev.evidence_category_fractions`: below 1 inconclusive, 1–3 positive, above 3 strong), overall and by galaxy type.
+
+**Uncertainty.** The DPL spectral fits store MultiNest's ln Z error (`spec_dblplaw_log_evidence_error`). The delayed-τ spectral fits made before the error was stored have none (`spec_log_evidence_error` is empty), so their ln B error is unknown. ln Z differences between spectral models are expected to dwarf the usual 0.1–0.3 nats.
+
+**Against the photometric ln B.** For the galaxies with both ln B (the halves of `photometric_halves`):
+- the share whose two ln B have the same sign (`ev.log_bayes_sign_agreement`), and the share whose two ln B favour the same model, an inconclusive one counting as favouring neither;
+- the counts by the model each favours (`ev.favoured_model_crosstab`, rows photometric, columns spectral);
+- a scatter plot of the two.
+
+The spectral ln B axis is drawn as sign(ln B) log10(1 + |ln B|), since spectral ln B may reach hundreds of nats.
+```
+
+  **`task15_cells/b8d4f6e2.py`** (new section 5.5, code: the spectral ln B, its categories by galaxy type, and its relation to the photometric ln B of cell 22):
+
+```python
+SPECTRAL_EVIDENCE_COLUMNS = {"delayed": "spec_log_evidence", "dblplaw": "spec_dblplaw_log_evidence"}
+EVIDENCE_ERROR_SUFFIX = "_error"   # spec_log_evidence_error, spec_dblplaw_log_evidence_error
+
+
+def signed_log(values):
+    """sign(x) log10(1 + |x|): a monotone axis for ln B from 0.1 to thousands of nats, either sign."""
+    values = np.asarray(values, dtype=float)
+    return np.sign(values) * np.log10(1 + np.abs(values))
+
+
+def log_bayes_summary(table, column, halves_used):
+    """Percentiles and evidence categories of one ln B column, per half, overall and by galaxy type.
+
+    Inputs: table: DataFrame with half, galaxy_type and the ln B column [nats]; halves_used: halves, in order.
+    Returns: (distribution, categories): distribution has one row per (half, group) with n_galaxies and
+    ln_B_p16 / ln_B_median / ln_B_p84 of the finite ln B [nats]; categories stacks
+    ev.evidence_category_fractions per (half, group).
+    """
+    distribution_rows = []
+    category_tables = []
+    for half in halves_used:
+        in_half = table["half"] == half
+        groups = {"all": in_half, "passive": in_half & (table["galaxy_type"] == "passive"),
+                  "star-forming": in_half & (table["galaxy_type"] == "star-forming")}
+        for group, in_group in groups.items():
+            log_bayes = table.loc[in_group, column].to_numpy(dtype=float)
+            finite = log_bayes[np.isfinite(log_bayes)]
+            percentiles = np.full(3, np.nan)
+            if len(finite) > 0:
+                percentiles = np.percentile(finite, [16, 50, 84])
+            distribution_rows.append({"half": half, "group": group, "n_galaxies": len(finite),
+                                      "ln_B_p16": percentiles[0], "ln_B_median": percentiles[1],
+                                      "ln_B_p84": percentiles[2]})
+            category_tables.append(ev.evidence_category_fractions(log_bayes).assign(half=half, group=group))
+    return pd.DataFrame(distribution_rows), pd.concat(category_tables, ignore_index=True)
+
+
+if compare_models:
+    # 1. Spectral ln B and its uncertainty per galaxy, where both spectral fits converged
+    spectral_evidence_columns = []   # ln Z of each model, then their errors (columns of REFERENCE_FILE)
+    for suffix in ("", EVIDENCE_ERROR_SUFFIX):
+        for sfh_model in COMPARED_MODELS:
+            spectral_evidence_columns.append(f"{SPECTRAL_EVIDENCE_COLUMNS[sfh_model]}{suffix}")
+    spectral_evidence_tables = []
+    for half in halves:
+        half_galaxies = reference[reference["split"] == half].reset_index(drop=True)
+        both_converged = spectral_fits(half_galaxies, "delayed") & spectral_fits(half_galaxies, "dblplaw")
+        galaxies = half_galaxies[both_converged].reset_index(drop=True)
+        table = pd.DataFrame({"specobjid": galaxies["specobjid"], "half": half,
+                              "galaxy_type": spectral_galaxy_types(galaxies)})
+        # Why reindex: a column the reference set lacks (no DPL spectral fits read yet, or delayed-tau fits
+        # without a stored ln Z error) becomes NaN instead of a KeyError
+        log_evidence_delayed, log_evidence_dblplaw, error_delayed, error_dblplaw = (
+            galaxies.reindex(columns=spectral_evidence_columns).to_numpy(dtype=float).T)
+        table["spectral_log_bayes"] = ev.log_bayes_factor(log_evidence_delayed, log_evidence_dblplaw)
+        table["spectral_log_bayes_error"] = ev.log_bayes_factor_error(error_delayed, error_dblplaw)
+        spectral_evidence_tables.append(table)
+    spectral_evidence = pd.concat(spectral_evidence_tables, ignore_index=True)
+
+    if not np.isfinite(spectral_evidence["spectral_log_bayes"].to_numpy(dtype=float)).any():
+        print(f"No galaxy with both spectral ln Z in {REFERENCE_FILE} yet: run notebook 2 after the DPL "
+              "spectral fits. Spectral evidence skipped")
+    else:
+        # 2. The distribution of the spectral ln B and the share of each category, overall and by galaxy type
+        spectral_distribution, spectral_categories = log_bayes_summary(spectral_evidence,
+                                                                       "spectral_log_bayes", halves)
+        comparison_tables.append(spectral_distribution.assign(section="spectral_evidence_distribution"))
+        comparison_tables.append(spectral_categories.assign(section="spectral_evidence_categories"))
+        print("Spectral ln B = ln Z(delayed-tau spectral) - ln Z(DPL spectral) per galaxy "
+              "(positive favours delayed-tau)")
+        display(spectral_distribution.round(2))
+        display(spectral_categories.set_index(["half", "group", "favoured_model", "strength"])["fraction"]
+                .unstack(["favoured_model", "strength"]).round(3))
+
+        figure, axis = plt.subplots(figsize=(7, 4))
+        validation_spectral = spectral_evidence[spectral_evidence["half"] == "validation"]
+        for group in ("passive", "star-forming"):
+            values = validation_spectral.loc[validation_spectral["galaxy_type"] == group,
+                                             "spectral_log_bayes"].dropna()
+            axis.hist(signed_log(values), bins=30, histtype="step", label=f"{group} ({len(values)})")
+        for edge in (-ev.STRONG_LOG_BAYES, -ev.INCONCLUSIVE_LOG_BAYES, ev.INCONCLUSIVE_LOG_BAYES,
+                     ev.STRONG_LOG_BAYES):
+            axis.axvline(signed_log(edge), color="grey", ls=":")
+        axis.set(xlabel="sign(ln B) log10(1 + |ln B|), spectral ln B = ln Z(delayed-τ) − ln Z(DPL)",
+                 ylabel="galaxies",
+                 title="Spectral evidence per validation galaxy (positive favours delayed-τ)")
+        axis.legend()
+        plt.show()
+
+        # 3. The spectral ln B uncertainty, where both fits stored their MultiNest ln Z error
+        with_error = spectral_evidence["spectral_log_bayes_error"].notna()
+        if with_error.any():
+            errors = spectral_evidence.loc[with_error, "spectral_log_bayes_error"]
+            below_error = spectral_evidence.loc[with_error, "spectral_log_bayes"].abs() < errors
+            print(f"Spectral ln B uncertainty: median {errors.median():.2f} over {int(with_error.sum())} "
+                  f"galaxies; {below_error.mean():.0%} of them have |ln B| below it")
+        else:
+            print("No spectral ln B uncertainty: the delayed-tau spectral fits store no ln Z error "
+                  f"(spec_log_evidence_error is empty); the median |spectral ln B| is "
+                  f"{spectral_evidence['spectral_log_bayes'].abs().median():.1f} nats")
+
+        # 4. Against the photometric ln B of section 5.4, on the galaxies with both
+        both_evidence = evidence.merge(spectral_evidence[["specobjid", "half", "spectral_log_bayes"]],
+                                       on=["specobjid", "half"])
+        agreement_rows = []
+        crosstab_tables = []
+        for half in photometric_halves:
+            in_half = both_evidence["half"] == half
+            groups = {"all": in_half, "passive": in_half & (both_evidence["galaxy_type"] == "passive"),
+                      "star-forming": in_half & (both_evidence["galaxy_type"] == "star-forming")}
+            for group, in_group in groups.items():
+                photometric_log_bayes = both_evidence.loc[in_group, "log_bayes"]
+                spectral_log_bayes = both_evidence.loc[in_group, "spectral_log_bayes"]
+                sign_agreement = ev.log_bayes_sign_agreement(photometric_log_bayes, spectral_log_bayes)
+                agreement_rows.append({"half": half, "group": group, **sign_agreement})
+                crosstab = ev.favoured_model_crosstab(photometric_log_bayes, spectral_log_bayes)
+                crosstab_rows = crosstab.stack().rename("n_galaxies").reset_index()
+                crosstab_rows = crosstab_rows.rename(columns={"first": "photometric_favours",
+                                                              "second": "spectral_favours"})
+                crosstab_tables.append(crosstab_rows.assign(half=half, group=group))
+                if group == "all":
+                    print(f"Galaxies by the model each ln B favours ({half} half; rows photometric, "
+                          "columns spectral)")
+                    display(crosstab.rename_axis(index="photometric", columns="spectral"))
+        evidence_agreement = pd.DataFrame(agreement_rows)
+        comparison_tables.append(evidence_agreement.assign(section="evidence_agreement"))
+        comparison_tables.append(pd.concat(crosstab_tables, ignore_index=True)
+                                 .assign(section="evidence_favoured_models"))
+        print("Photometric against spectral ln B: share with the same sign and share favouring the "
+              "same model")
+        display(evidence_agreement.round(3))
+
+        validation_both = both_evidence[both_evidence["half"] == "validation"]
+        if len(validation_both) > 0:
+            figure, axis = plt.subplots(figsize=(6, 5))
+            for group in ("passive", "star-forming"):
+                in_group = validation_both["galaxy_type"] == group
+                axis.scatter(validation_both.loc[in_group, "log_bayes"],
+                             signed_log(validation_both.loc[in_group, "spectral_log_bayes"]), s=6,
+                             label=f"{group} ({int(in_group.sum())})")
+            axis.axhline(0, color="grey", lw=1)
+            axis.axvline(0, color="grey", lw=1)
+            axis.set(xlabel="photometric ln B [nats]", ylabel="sign(ln B) log10(1 + |ln B|), spectral",
+                     title="Evidence per validation galaxy (positive favours delayed-τ)")
+            axis.legend()
+            plt.show()
+```
+
+- [ ] **Step 6: Put the cells into the notebook.** Write this script to `Synthetic_domain/task15_cells/edit_notebook.py`:
+
+```python
+"""Task 15: put the new cell sources of task15_cells/ into ml_model.ipynb (run from Synthetic_domain/).
+
+Each file task15_cells/<cell id>.py (code) or .md (markdown) is the complete new source of that cell.
+REPLACED cells keep their id and type; NEW cells are inserted, in order, after the cell INSERT_AFTER.
+Edited code cells lose their stale outputs. The file is written as Jupyter writes it (indent 1, UTF-8,
+trailing newline), so the diff shows only the changed cells.
+"""
+
+import json
+import os
+import sys
+
+NOTEBOOK = sys.argv[1] if len(sys.argv) > 1 else "ml_model.ipynb"
+CELLS_DIRECTORY = sys.argv[2] if len(sys.argv) > 2 else "task15_cells"
+REPLACED = ["55011031", "fe480605", "e81a48b9", "e05c91f8", "74230b0e", "2e021085", "3e17feaa",
+            "2887477a", "b051ebb0", "89339c2d", "79e11a83", "10a86e1d", "0267e995"]
+INSERT_AFTER = "fc196542"           # the cross-fit cell of section 5.4
+NEW = [("a7c3e5d1", "markdown"), ("b8d4f6e2", "code")]   # section 5.5, before the COMPARISON_FILE cell
+EXTENSIONS = {"code": ".py", "markdown": ".md"}
+
+
+def cell_source(cell_id, cell_type):
+    """The new source of one cell as notebook lines (each ends with a newline except the last)."""
+    path = os.path.join(CELLS_DIRECTORY, cell_id + EXTENSIONS[cell_type])
+    with open(path, encoding="utf-8") as source_file:
+        text = source_file.read().rstrip("\n")
+    return text.splitlines(keepends=True)
+
+
+with open(NOTEBOOK, encoding="utf-8") as notebook_file:
+    notebook = json.load(notebook_file)
+cells_by_id = {cell["id"]: cell for cell in notebook["cells"]}
+for cell_id in REPLACED:
+    cell = cells_by_id[cell_id]
+    cell["source"] = cell_source(cell_id, cell["cell_type"])
+    if cell["cell_type"] == "code":
+        cell["outputs"] = []
+        cell["execution_count"] = None
+
+assert not set(cell_id for cell_id, _ in NEW) & set(cells_by_id), "a new cell id is already in the notebook"
+insert_at = [cell["id"] for cell in notebook["cells"]].index(INSERT_AFTER) + 1
+for offset, (cell_id, cell_type) in enumerate(NEW):
+    if cell_type == "code":
+        new_cell = {"cell_type": "code", "execution_count": None, "id": cell_id, "metadata": {},
+                    "outputs": [], "source": cell_source(cell_id, cell_type)}
+    else:
+        new_cell = {"cell_type": "markdown", "id": cell_id, "metadata": {},
+                    "source": cell_source(cell_id, cell_type)}
+    notebook["cells"].insert(insert_at + offset, new_cell)
+
+with open(NOTEBOOK, "w", encoding="utf-8") as notebook_file:
+    json.dump(notebook, notebook_file, indent=1, ensure_ascii=False)
+    notebook_file.write("\n")
+print(f"{NOTEBOOK}: {len(REPLACED)} cells replaced, {len(NEW)} inserted, {len(notebook['cells'])} cells")
+```
+
+  - Run: `cd Synthetic_domain && ../.venv/bin/python task15_cells/edit_notebook.py`
+  - Expected: `ml_model.ipynb: 13 cells replaced, 2 inserted, 27 cells`. A `KeyError` names a cell id that is not in the notebook: stop and report (the notebook is not the one this task was written against).
+
+- [ ] **Step 7: Validate and compile; never execute.**
+  1. JSON, nbformat, every code cell compiles, no undefined name across cells:
+
+```bash
+cd Synthetic_domain && cells_file="$(mktemp --suffix=.py)" && LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python - "$cells_file" <<'EOF'
+import sys
+
+import nbformat
+
+notebook = nbformat.read("ml_model.ipynb", as_version=4)
+nbformat.validate(notebook)
+sources = []
+for index, cell in enumerate(notebook.cells):
+    if cell.cell_type == "code":
+        compile(cell.source, f"cell {index}", "exec")
+        sources.append(cell.source)
+with open(sys.argv[1], "w") as output:
+    output.write("\n\n".join(sources))
+print(len(notebook.cells), "cells; valid; every code cell compiles")
+EOF
+../.venv/bin/flake8 --select=F821 --builtins=display "$cells_file" && echo "no undefined names"
+awk 'length > 110 {print FILENAME ": " FNR ": " length " characters"}' task15_cells/*.py
+```
+
+  - Expected: `27 cells; valid; every code cell compiles`, then `no undefined names`, and no line from `awk`.
+
+  2. Every module name the notebooks use exists (this needs Task 13's `sm.SPECTRAL_PREFIXES` and Step 3's functions):
+     - Run: `cd Synthetic_domain && LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python -m pytest tests/test_notebooks.py -q`
+     - Expected: `3 passed`.
+
+  3. Only the intended places changed:
+
+```bash
+cd Synthetic_domain && git diff --stat -- ml_model.ipynb && grep -c '"id": "' ml_model.ipynb \
+    && grep -n -e 'agreements\[sfh_model\]' -e 'verdicts\[(sfh_model, "photometric")\]' \
+       -e 'verdicts\[(sfh_model, reference_set)\]' ml_model.ipynb
+```
+
+  - Expected: one changed file; `27`; and no line from the last `grep`, which therefore exits with status 1 (no old key of `agreements` or `verdicts` is left; the current notebook has 5 such lines).
+
+- [ ] **Step 8: Stub check of the changed tables (CPU, about 30 s, outside the repository; needs the controller's approval, see the top of this task).** It runs the table code of the changed cells with stubbed posteriors: no notebook is executed with nbconvert, and there is no Bagpipes or flow work. It runs the code cells of sections 3, 3b and 5 of the old and the new notebook with the same fake ML posteriors (`labelled_posteriors` and `ml_networks.load_run` are stubs; sections 1, 2 and 4 are skipped, the DR3 catalogues are small random tables). It checks that every delayed-τ table is unchanged, and that the new tables appear with fake DPL spectral columns and stay empty without them, unlocked and locked. It writes only into its own folder.
+  Every command of this step runs from the repository root, in one shell (it keeps `$check_dir`). The check reads the laptop's `Synthetic_domain/spectroscopic_reference.csv` and `photometric_cross_fits.csv`, which exist since Task 12.
+  1. Make a scratch folder outside the repository and save the old notebook there (HEAD still holds it: Step 4 committed only `ml_evaluation.py` and its tests):
+
+```bash
+check_dir="$(mktemp -d)" && echo "$check_dir"
+git show HEAD:Synthetic_domain/ml_model.ipynb > "$check_dir/ml_model_before_task15.ipynb"
+```
+
+  2. Write this script to `"$check_dir"/task15_stub_check.py`:
+
+```python
+"""Task 15 stub check: run ml_model.ipynb sections 3, 3b and 5 on fake ML posteriors, old cells against new.
+
+No flow, no GPU, no DR3: labelled_posteriors and ml_networks.load_run are stubs, the DR3 catalogues are
+small random tables, and sections 1, 2 and 4 are skipped. The same stub draws feed the old and the new
+notebook, so every delayed-tau table (and the DPL tables against the delayed-tau spectra) must be equal.
+Usage: python task15_stub_check.py <Synthetic_domain directory> <old ml_model.ipynb> <new ml_model.ipynb>
+Writes its CSV files (reference copies, the notebook's outputs) into run/ next to this script.
+"""
+
+import json
+import os
+import shutil
+import sys
+
+import numpy as np
+import pandas as pd
+
+REPO, OLD_NOTEBOOK, NEW_NOTEBOOK = (os.path.abspath(path) for path in sys.argv[1:4])
+RUN_DIRECTORY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run")
+sys.path.insert(0, REPO)
+os.chdir(REPO)                                   # synthetic_model reads its grids from here at import
+import ml_data  # noqa: E402
+import ml_networks  # noqa: E402
+import sfh_models  # noqa: E402
+
+os.makedirs(RUN_DIRECTORY, exist_ok=True)
+shutil.copy(os.path.join(REPO, "photometric_cross_fits.csv"), RUN_DIRECTORY)
+os.chdir(RUN_DIRECTORY)                          # the notebook writes its outputs here, not in the repo
+STUB_SAMPLES = 60
+SKIPPED_CELLS = {"b6229f82", "59be2b0a", "19fe68be", "d51a8bf8", "46b23dbe"}   # run by hand, or not at all
+
+
+def stub_load_run(directory, sfh_model, device="cpu"):
+    """ml_networks.load_run without a checkpoint: only the config fields the notebook reads."""
+    return None, {"sfh_model": sfh_model, "n_targets": len(ml_data.target_names(sfh_model))}, None
+
+
+def stub_labelled_posteriors(run, observations, n_samples, seed, labels=None):
+    """Random posteriors of every training label; the same draws for the same model and galaxy count."""
+    sfh_model = run[1]["sfh_model"]
+    n_valid = int(observations["valid"].sum())
+    rng = np.random.default_rng([n_valid, len(sfh_model)])
+    posteriors = {}
+    for label in sfh_models.MODELS[sfh_model].training_labels:
+        centre = rng.normal(0, 1, size=(n_valid, 1))
+        posteriors[label] = centre + rng.normal(0, 1, size=(n_valid, n_samples))
+    return posteriors, None
+
+
+def run_notebook(notebook_path, reference_path, locked):
+    """Execute the notebook's code cells (except SKIPPED_CELLS) with the stubs; returns its namespace."""
+    ml_networks.load_run = stub_load_run
+    notebook = json.load(open(notebook_path))
+    sources = {cell["id"]: "".join(cell["source"]) for cell in notebook["cells"]}
+    code_ids = [cell["id"] for cell in notebook["cells"] if cell["cell_type"] == "code"]
+    namespace = {"display": lambda value: None, "__name__": "__main__"}
+    exec(sources["b6229f82"].replace("RUN_LOCKED_TEST = False", f"RUN_LOCKED_TEST = {locked}"), namespace)
+    namespace.update(REFERENCE_FILE=reference_path, N_POSTERIOR_SAMPLES=STUB_SAMPLES,
+                     labelled_posteriors=stub_labelled_posteriors)
+    namespace["choices"] = {model: pd.DataFrame({"label": ["stub"]}) for model in namespace["SFH_MODELS"]}
+    namespace["synthetic_test_summaries"] = dict(namespace["choices"])
+    rng = np.random.default_rng(3)
+    namespace["catalogues"] = {}
+    for sfh_model in namespace["SFH_MODELS"]:
+        catalogue = {}
+        for label in sfh_models.SHARED_LABELS:
+            median = rng.normal(size=50)
+            catalogue.update({f"{label}_p16": median - 1, f"{label}_median": median,
+                              f"{label}_p84": median + 1})
+        namespace["catalogues"][sfh_model] = pd.DataFrame(catalogue)
+    plt = namespace["plt"]
+    plt.show = lambda: plt.close("all")
+    for cell_id in code_ids:
+        if cell_id not in SKIPPED_CELLS:
+            exec(sources[cell_id], namespace)
+    return namespace
+
+
+def same(first, second):
+    """Assert two tables hold the same values (compared as text, so None, NaN and dtypes match exactly)."""
+    pd.testing.assert_frame_equal(first.reset_index(drop=True).astype(str),
+                                  second.reset_index(drop=True).astype(str))
+
+
+def tables_by_section(namespace):
+    """The notebook's comparison_tables, grouped by their section column."""
+    tables = {}
+    for table in namespace["comparison_tables"]:
+        tables.setdefault(table["section"].iloc[0], []).append(table)
+    return tables
+
+
+# 1. Two reference sets: without any DPL spectral column (the old CSV), and with fake DPL spectral fits
+reference = pd.read_csv(os.path.join(REPO, "spectroscopic_reference.csv"), dtype={"specobjid": str})
+plain = reference.drop(columns=[column for column in reference.columns if column.startswith("spec_")])
+plain.to_csv("reference_plain.csv", index=False)
+rng = np.random.default_rng(5)
+fitted = (plain["fit_status"] == "fitted").to_numpy()
+fake = {}
+for label in sfh_models.MODELS["dblplaw"].training_labels:
+    median = np.where(fitted, rng.normal(size=len(plain)), np.nan)
+    fake.update({f"spec_dblplaw_{label}_p16": median - 1, f"spec_dblplaw_{label}_median": median,
+                 f"spec_dblplaw_{label}_p84": median + 1})
+converged = rng.random(len(plain)) < 0.9
+fake["spec_dblplaw_converged"] = pd.array([bool(c) if f else None for c, f in zip(converged, fitted)],
+                                          dtype=object)
+fake["spec_dblplaw_fitter_calibrated"] = np.where(fitted, True, None)
+fake["spec_log_evidence"] = np.where(fitted, rng.normal(-500, 50, len(plain)), np.nan)
+fake["spec_log_evidence_error"] = np.nan
+fake["spec_dblplaw_log_evidence"] = np.where(fitted, rng.normal(-500, 50, len(plain)), np.nan)
+fake["spec_dblplaw_log_evidence_error"] = np.where(fitted, 0.2, np.nan)
+with_dpl = pd.concat([plain, pd.DataFrame(fake, index=plain.index)], axis=1)
+with_dpl.to_csv("reference_with_dpl.csv", index=False)
+
+# 2. Old cells against new cells, unlocked and locked
+for locked in (False, True):
+    old = run_notebook(OLD_NOTEBOOK, "reference_plain.csv", locked)
+    old_tables = {section: tables[0] for section, tables in tables_by_section(old).items()}
+    for reference_file in ("reference_plain.csv", "reference_with_dpl.csv"):
+        new = run_notebook(NEW_NOTEBOOK, reference_file, locked)
+        new_tables = tables_by_section(new)
+        for sfh_model in ("delayed", "dblplaw"):
+            same(old["verdicts"][(sfh_model, "photometric")],
+                 new["verdicts"][(sfh_model, "photometric", "validation")])
+            same(old["agreements"][sfh_model],
+                 new["agreements"][(sfh_model, "delayed")].drop(columns="spectral_model"))
+        same(old["verdicts"][("delayed", "spectral")], new["verdicts"][("delayed", "spectral", "validation")])
+        same(old["model_pairs"], new["model_pairs"][new["model_pairs"]["pair"] != "spectral Bagpipes"])
+        new_against_spectra = new_tables["against_spectra"][0]
+        new_against_delayed = new_against_spectra[new_against_spectra["spectral_model"] == "delayed"]
+        same(old_tables["against_spectra"], new_against_delayed.drop(columns="spectral_model"))
+        for section in ("evidence_distribution", "evidence_categories", "true_model_recovery"):
+            same(old_tables[section], new_tables[section][0])
+        dpl_own_spectral = new["verdicts"][("dblplaw", "spectral", "validation")]
+        all_row = dpl_own_spectral[dpl_own_spectral["label"] == "all"]["agrees"].iloc[0]
+        if reference_file == "reference_plain.csv":
+            assert all_row is None, all_row                  # no DPL spectral fit: no verdict
+            assert "spectral_evidence_distribution" not in new_tables
+        else:
+            assert all_row in (True, False), all_row
+            assert dpl_own_spectral["n_galaxies"].iloc[0] > 0
+            for section in ("own_spectral", "spectral_evidence_distribution", "spectral_evidence_categories",
+                            "evidence_agreement", "evidence_favoured_models"):
+                assert section in new_tables, section
+            assert set(new_tables["against_spectra"][0]["spectral_model"]) == {"delayed", "dblplaw"}
+            assert (new["model_pairs"]["pair"] == "spectral Bagpipes").any()
+        expected_halves = {"validation", "test"} if locked else {"validation"}
+        assert {key[2] for key in new["verdicts"] if key[1] == "spectral"} == expected_halves
+        print(f"locked={locked}, {reference_file}: delayed-tau tables reproduce; new sections present")
+print("stub check passed")
+```
+
+  3. Run it:
+
+```bash
+MPLBACKEND=Agg LD_LIBRARY_PATH=.venv/lib .venv/bin/python -W ignore "$check_dir/task15_stub_check.py" \
+    "$PWD/Synthetic_domain" "$check_dir/ml_model_before_task15.ipynb" "$PWD/Synthetic_domain/ml_model.ipynb" \
+    | grep -e "reproduce" -e "stub check"
+git status --short Synthetic_domain
+```
+
+  - Expected:
+
+```text
+locked=False, reference_plain.csv: delayed-tau tables reproduce; new sections present
+locked=False, reference_with_dpl.csv: delayed-tau tables reproduce; new sections present
+locked=True, reference_plain.csv: delayed-tau tables reproduce; new sections present
+locked=True, reference_with_dpl.csv: delayed-tau tables reproduce; new sections present
+stub check passed
+```
+
+  - `git status` lists only `ml_model.ipynb` (modified), `task15_cells/` and the untracked files that were there before (`__pycache__/`, `pipes/`, the two training logs): the check writes nothing into the repository.
+  - An `AssertionError` in `pd.testing.assert_frame_equal` names the table and column that changed: fix the cell, rerun Step 6 on a fresh copy (`git checkout Synthetic_domain/ml_model.ipynb`, then Step 6), Step 7 and this step.
+  - Remove the scratch folder: `rm -r "$check_dir"`.
+
+- [ ] **Step 9: Run the whole suite.**
+  - Run: `cd Synthetic_domain && LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python -m pytest -q`
+  - Expected: all pass: the total after Task 14 plus the 3 tests of Step 1, with the 12 Bagpipes overflow warnings and the self-skipping MultiNest smoke test. Passed + skipped is 285 (282 after Task 14, plus 3); tests that need git-ignored data skip themselves where it is missing.
+
+- [ ] **Step 10: Remove the temporary folder; commit.**
+
+```bash
+rm -r Synthetic_domain/task15_cells
+git add Synthetic_domain/ml_model.ipynb
+git commit -m "feat: ml_model.ipynb judges each model against its own spectral fits, compares all estimators
+with both spectral references, reports the spectral evidence against the photometric one, and judges the
+test half in the locked test
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+**Handoff to the controller (PC runs, not part of this task).** The order is that of Amendment 2, item 6. First the "PC order after Task 14" at the end of Task 14:
+- (a) the remaining delayed-τ spectral fits;
+- (b) `EXPORT_LOCKED_TEST_JOBS = True` in notebook 2, committed;
+- (c) the notebook-2 export run;
+- (d) the DPL spectral fits, then the photometric fits of both models for the new validation and the test galaxies;
+- (e) the notebook-2 reading run.
+
+Then this notebook with the locked test, from `Synthetic_domain/`. The locked test runs once, so its inputs are checked before it runs:
+
+0. **Pre-flight check of the fetched `spectroscopic_reference.csv`.** A reading run without one of the fit folders does not fail; it leaves that model's columns empty, and the locked run would then only print messages such as "dblplaw ML: no converged dblplaw spectral fits to compare with", "No dblplaw spectral Bagpipes fits in ..." or "validation half only" instead of failing. Save as `$SCRATCH/locked_test_preflight.py` and run `LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python "$SCRATCH/locked_test_preflight.py"`:
+
+```python
+"""Pre-flight check of the locked test: spectroscopic_reference.csv must hold every input of both models."""
+import sys
+
+import numpy as np
+import pandas as pd
+
+MIN_FIT_FRACTION = 0.9   # converged fits per half and model, as a fraction of the half's galaxies
+HALVES = ["validation", "test"]
+VERDICT_COLUMNS = ["fitter_calibrated", "spec_dblplaw_fitter_calibrated", "phot_fitter_calibrated",
+                   "phot_dblplaw_fitter_calibrated"]
+CONVERGED_COLUMNS = ["spec_dblplaw_converged", "phot_converged", "phot_dblplaw_converged"]
+EVIDENCE_COLUMNS = ["spec_log_evidence", "spec_dblplaw_log_evidence"]
+
+reference = pd.read_csv("spectroscopic_reference.csv")
+
+# 1. Every column the locked run reads; a missing one means notebook 2 did not read that fit folder
+missing_columns = [column for column in ["split", *VERDICT_COLUMNS, *CONVERGED_COLUMNS, *EVIDENCE_COLUMNS]
+                   if column not in reference.columns]
+if missing_columns:
+    sys.exit(f"STOP: spectroscopic_reference.csv lacks {missing_columns}; do not run the locked test")
+
+failures = []
+
+
+def check(passed, message):
+    """Print one check and remember a failure."""
+    print(("ok    " if passed else "FAIL  ") + message)
+    if not passed:
+        failures.append(message)
+
+
+# 2. Fitter verdicts: True or False is a result; empty means a calibration test was incomplete
+for column in VERDICT_COLUMNS:
+    check(bool(reference[column].notna().all()), f"{column} filled ({reference[column].iloc[0]})")
+
+# 3. Per half: spectral fits of both models with their ln Z, and photometric fits of both models
+for half in HALVES:
+    galaxies = reference[reference["split"] == half]
+    n_galaxies = len(galaxies)
+    check(n_galaxies > 0, f"{half}: {n_galaxies} galaxies")
+    check(bool(np.isfinite(galaxies["spec_log_evidence"]).all()),
+          f"{half}: spec_log_evidence finite for every galaxy")
+    for column in CONVERGED_COLUMNS:
+        n_converged = int(galaxies[column].eq(True).sum())
+        check(n_converged >= MIN_FIT_FRACTION * n_galaxies,
+              f"{half}: {column} True for {n_converged} of {n_galaxies}")
+    dblplaw_converged = galaxies["spec_dblplaw_converged"].eq(True)
+    check(bool(np.isfinite(galaxies.loc[dblplaw_converged, "spec_dblplaw_log_evidence"]).all()),
+          f"{half}: spec_dblplaw_log_evidence finite for every converged DPL spectral fit")
+
+if failures:
+    sys.exit(f"STOP: {len(failures)} check(s) failed; do not run the locked test")
+print("pre-flight passed: run the locked test")
+```
+
+  - Expected: every line `ok` and `pre-flight passed: run the locked test`. A fitter verdict of `False` is a result, not a failure; an empty one means that calibration test was incomplete.
+  - On `STOP`, do not flip `RUN_LOCKED_TEST`: redo the step of the Task 14 PC order that the failing line names (a missing or empty `spec_dblplaw_*` column: (e) without `spectral_fits_dblplaw`, or (d) 1 unfinished; too few test-half `phot_*`/`phot_dblplaw_*` fits: (b)-(d)), then (e), then this check again. If the DPL spectral fits themselves converge for fewer than 90% of a half, report it to the user before going on.
+
+1. Set `RUN_LOCKED_TEST = True` in cell 1, keeping the JSON layout (from `Synthetic_domain`):
+
+```bash
+LD_LIBRARY_PATH=../.venv/lib ../.venv/bin/python - <<'EOF'
+import json
+
+with open("ml_model.ipynb", encoding="utf-8") as notebook_file:
+    notebook = json.load(notebook_file)
+cell = next(cell for cell in notebook["cells"] if cell["id"] == "b6229f82")
+old_line = "RUN_LOCKED_TEST = False            # set True once, for the final report (both models)\n"
+new_line = "RUN_LOCKED_TEST = True             # set True once, for the final report (both models)\n"
+assert cell["source"].count(old_line) == 1, "the RUN_LOCKED_TEST line is not the expected one"
+cell["source"][cell["source"].index(old_line)] = new_line
+with open("ml_model.ipynb", "w", encoding="utf-8") as notebook_file:
+    json.dump(notebook, notebook_file, indent=1, ensure_ascii=False)
+    notebook_file.write("\n")
+print("RUN_LOCKED_TEST = True")
+EOF
+```
+
+2. Run the GPU notebook job with the same inputs as Task 12 Step 7 (`spectroscopic_reference.csv` now carries the `spec_dblplaw_*` and `spec_*log_evidence*` columns of Task 14):
+
+```bash
+GPU=1 CORES=16 MEMORY_MB=7100 TIME_LIMIT=12:00:00 FLOAT32_FILES="training_set.parquet training_set_dblplaw.parquet" \
+    HLJOB_OPTIONS=--pause-llm remote/submit_notebook.sh ml_model.ipynb ml_runs/mlp ml_runs/mlp_dblplaw \
+    synthetic_validation.parquet synthetic_test.parquet training_set.parquet \
+    synthetic_validation_dblplaw.parquet synthetic_test_dblplaw.parquet training_set_dblplaw.parquet \
+    spectroscopic_reference.csv photometric_cross_fits.csv dr3_corrected.csv splus_noise_model.csv
+```
+
+3. Check in the outputs: "Photometric Bagpipes and evidence comparisons: validation and test halves" (otherwise the test-half photometric fits were not read); the `own_spectral` verdicts of both models for both halves; `against_spectra` rows for both `spectral_model` values; the spectral evidence tables and the `evidence_agreement` rows; `out/memory_peak_bytes.txt` below the 7.1 GB cap. The locked test adds the synthetic test sets of both models (sections 2) to the run time; the 12 h limit covers it.
+
+4. **README notes for Task 16 (repository `README.md`):**
+   - Replace the bullet "**The spectral reference is delayed-τ only.** Its `mw_age` and mass fractions carry the delayed-τ SFH shape, so part of a DPL disagreement with the spectra is a model difference, not an ML error." (line 537 at 9b4676e) with the caveat of the new `10a86e1d` markdown: each spectral reference carries its own SFH shape (`mw_age`, `f_young`, `f_mid`, `f_old` follow delayed-τ in the delayed-τ fits and DPL in the DPL fits), and the "spectral Bagpipes" pair of section 5.2 shows how far apart the two references are.
+   - Say that, from Amendment 2 on, `agreement_spectral` in `ml_evaluation_summary_dblplaw.csv` is the DPL ML against the DPL spectral fits; the DPL ML against the delayed-τ spectra is in `ml_model_comparison.csv`, section `against_spectra`, `spectral_model` = `delayed`. Before Amendment 2 those rows were the DPL ML against the delayed-τ spectral fits, judged on `log_metallicity` and `log_mstar`.
+
+### Task 16: README and PC runs of Part 2 (controller)
+
+- [ ] **Step 1:** After Tasks 13–15, update `README.md`:
+  - module map and §4: DPL spectral fits;
+  - §7: the run order of Part 2;
+  - §8: the DPL spectral calibration, the comparison against both spectral references, the spectral evidence, and the locked-test results;
+  - §9: replace "The spectral reference is delayed-τ only".
+- [ ] **Step 2:** On the PC, in order, with fetches and commits between the steps:
+  1. The remaining delayed-τ spectral fits (job `351292`).
+  2. Notebook 2 exports the DPL spectral jobs and mocks.
+  3. `FITS_SUBDIR=spectral_fits_dblplaw remote/submit_fits.sh`, twice if the 24 h limit is reached.
+  4. Notebook 2 with `EXPORT_LOCKED_TEST_JOBS = True`: reads everything, makes the grown split, and exports the photometric jobs of both models for the new validation galaxies and the test half.
+  5. The photometric fits of both folders.
+  6. Notebook 2 reads them; then the Task 15 pre-flight check.
+  7. `ml_model.ipynb` with `RUN_LOCKED_TEST = True`, once.
