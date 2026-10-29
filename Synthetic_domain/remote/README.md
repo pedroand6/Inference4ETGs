@@ -287,4 +287,7 @@ Notebook 2 reads no `jobs/` folder (it exports every job again), so `jobs` in `E
 the jobs the run exported and still keeps the local `calib_*.npz`. The bundle is still large: 1.5 GB on
 2026-10-29 with 788 delayed-tau spectral fits and no DPL spectral folder (`spectra/` 1.4 GB, the CSFD map
 289 MB), and about 2 GB once both spectral folders are finished (about 300 MB of fits each). That is close to
-hljobd's 3 GB limit, so check it first with `BUNDLE_ONLY=<folder>` in front of the same command.
+hljobd's 3 GB limit (a 1.7 GB upload once made it run out of memory), so check it first with
+`BUNDLE_ONLY=<folder>` in front of the same command. To keep a bundle near 1 GB, pass only part of `spectra/`
+(job dbaa19 sent the 841 smallest files, `ls -S -r spectra/*.fits` up to 600 MB): the notebook downloads every
+spectrum it does not find from SDSS.
