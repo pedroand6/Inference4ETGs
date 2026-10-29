@@ -258,3 +258,31 @@ The 604 pending delayed-τ spectral fits are independent of this work. When they
 2. **Locked test.** Notebook 2 gets a switch (`EXPORT_LOCKED_TEST_JOBS`) that exports the test-half photometric jobs of both models. It is set once, together with `RUN_LOCKED_TEST`, so the photometric and evidence comparisons also cover the test half.
 3. **Decoding cost.** Decoding DPL labels costs about 0.1 ms per sample, since it sums over Bagpipes' grid. `ml_data.decode_samples` therefore decodes blocks in parallel (`n_jobs`), and the `ml_model.ipynb` job runs with 16 cores and a 12 h limit.
 4. **Old tests.** The existing delayed-τ tests change only through the new `sfh_model` argument and the new metadata keys. Their delayed-τ assertions stay as they are.
+
+## Amendment 2 (2026-10-29, user: DPL spectral fits and the locked test)
+
+The user asked: "Run the remaining spectral tau fits then run all the spectral fits using DPL, then run the locked test for both." This lifts decision 1 and the out-of-scope item "DPL spectral fits and DPL spectral mocks".
+
+1. **Remaining delayed-τ spectral fits.** The 604 galaxies left of the 1359 are fitted with the existing jobs, so the validation and test halves grow. The split stays the hash-based split of the delayed-τ spectral fits, so no galaxy changes half.
+2. **DPL spectral fits:**
+   - **Galaxies:** all galaxies with a prepared spectrum, fitted with the DPL prior. The spectral dimensions are the DPL photometric dims plus `veldisp` and `noise_scale`.
+   - **Machinery:** the same as delayed-τ (calibration polynomial, likelihood, MultiNest settings).
+   - **Jobs:** the prepared spectra of `spectral_fits/jobs/`, re-exported with `sfh_model = "dblplaw"` into `spectral_fits_dblplaw/jobs/` (`FIT_FOLDER_MODELS` gains that folder).
+   - **Calibration mocks:** 33 drawn from the DPL prior, like the delayed-τ spectral mocks (template spectra, `sm.make_mock_spectrum`). The test passes when 95% coverage is at least 0.85 on the DPL calibration labels.
+3. **Reference columns.** DPL spectral results go to `spectroscopic_reference.csv` as:
+   - `spec_dblplaw_<label>_p16/_median/_p84` for the DPL training labels;
+   - `spec_dblplaw_converged`, `spec_dblplaw_fitter_calibrated` and `spec_dblplaw_log_evidence` (with its error).
+
+   The delayed-τ spectral columns keep their plain names. The validation rulers (indices, Gallazzi, relations) stay on the delayed-τ fits.
+4. **Comparison (`ml_model.ipynb`):**
+   - **Works test of each model against its own spectral fits:** the DPL ML against DPL spectral Bagpipes, on its calibration labels plus the shared labels, beside the delayed-τ ML against delayed-τ spectral Bagpipes.
+   - **Against the spectra:** part 3 of the comparison is reported against both spectral references.
+   - **Evidence:** a spectral ln B per galaxy, ln Z(delayed-τ spectral) − ln Z(DPL spectral), with the same categories, by galaxy type and against the photometric ln B. The spectra carry far more information than 12 colours, so this tests whether they prefer one SFH shape.
+5. **Locked test.** It runs once, for both models, after the DPL spectral fits:
+   - `EXPORT_LOCKED_TEST_JOBS = True` in notebook 2 gives the test-half photometric fits of both models;
+   - `RUN_LOCKED_TEST = True` in `ml_model.ipynb` then runs the locked sections and the comparison on the test half too.
+6. **Compute:**
+   - the delayed-τ rest is about 12 h;
+   - the DPL spectral fits (about 1400) are about 30 h in two 24 h jobs, since a fit job resumes from its finished fits;
+   - then the photometric fits of both models for the new validation and test galaxies;
+   - then notebook 2, then `ml_model.ipynb`.
