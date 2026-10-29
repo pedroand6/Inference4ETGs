@@ -56,7 +56,20 @@ uv pip install --quiet --python "$VENV_DIR/bin/python" "${PINNED_PACKAGES[@]}"
 # venv made by uv has no pip, so uv installs into it)
 if [[ "$INSTALL_TORCH" == "1" ]]; then
     echo "== 4b. Installing PyTorch $TORCH_VERSION and zuko $ZUKO_VERSION"
-    uv pip install --quiet --python "$VENV_DIR/bin/python" "torch==$TORCH_VERSION" --index-url "$TORCH_INDEX_URL"
+    # The CUDA wheels are hundreds of MB, and one dropped download failed whole jobs (2026-10-28): try three
+    # times, with a longer timeout than uv's default
+    for attempt in 1 2 3; do
+        if UV_HTTP_TIMEOUT=300 uv pip install --quiet --python "$VENV_DIR/bin/python" "torch==$TORCH_VERSION" \
+            --index-url "$TORCH_INDEX_URL"; then
+            break
+        fi
+        if [[ $attempt -eq 3 ]]; then
+            echo "ERROR: PyTorch could not be installed after 3 attempts" >&2
+            exit 1
+        fi
+        echo "PyTorch download failed (attempt $attempt of 3); retrying in 30 s"
+        sleep 30
+    done
     uv pip install --quiet --python "$VENV_DIR/bin/python" "zuko==$ZUKO_VERSION"
     "$VENV_DIR/bin/python" -c "import torch; print('cuda available:', torch.cuda.is_available())"
 fi
