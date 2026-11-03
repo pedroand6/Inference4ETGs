@@ -1,10 +1,3 @@
-"""
-SFH models of the S-PLUS synthetic domain: the shared prior, one section per Bagpipes SFH, and the registry.
-
-synthetic_model.py imports this module (never the reverse), so the training sets, the fits and the ML use
-exactly the same prior and labels for each SFH model.
-"""
-
 import os
 from dataclasses import dataclass
 from typing import Callable
@@ -15,31 +8,26 @@ from scipy.special import gammainc, gammaincc
 
 import bagpipes as pipes
 
-
-# =============================================================================
-# 1. Shared prior (fixed before looking at the data)
-# =============================================================================
 COSMOLOGY = FlatLambdaCDM(H0=70.0, Om0=0.3)
-UNIVERSE_AGE_MARGIN = 0.1        # [Gyr] age upper bound = Universe age at z minus this
-LABEL_EDGES = [0.1, 1.0]         # [Gyr] f_young < 0.1 < f_mid < 1.0 < f_old
-SFR_TIMESCALE = 0.1              # [Gyr] log_sfr is the mean SFR over this lookback time, as Bagpipes' sfr
-GYR_TO_YEARS = 1e9               # [yr/Gyr]
+UNIVERSE_AGE_MARGIN = 0.1   # Gyr
+LABEL_EDGES = [0.1, 1.0]    # Gyr -> f_young < 0.1 < f_mid < 1.0 < f_old
+SFR_TIMESCALE = 0.1         # Gyr
+GYR_TO_YEARS = 1e9          # yr/Gyr
 
-# Parameters every SFH model shares: redshift, one metallicity, dust, nebular emission and the formed mass
+# Toda SFH compartilha os intervalos de metalicidade, poeira, redshift, etc abaixo
 Z_RANGE = (0.002, 0.7)                               # redshift
-METALLICITY_RANGE = (0.005, 2.5)                     # [Z/Z_sun] the bc03_miles grid range
-AV_ISM_RANGE = (0.01, 2.0)                           # [mag]
-LOG_TAU_BC_RANGE = (np.log10(0.5), np.log10(4.0))    # birth-cloud optical depth
-LOGU_RANGE = (-4.0, -1.0)                            # nebular ionisation parameter
-DUST_SLOPE = 0.7                                     # CF00 attenuation-law exponent
-BIRTH_CLOUD_AGE = 0.01                               # [Gyr]
-LOG_MASS_FORMED = 10.0                               # [log M_sun]
+METALLICITY_RANGE = (0.005, 2.5)                     # Z/Z_sun
+AV_ISM_RANGE = (0.01, 2.0)                           # mag
+LOG_TAU_BC_RANGE = (np.log10(0.5), np.log10(4.0))    # profundidade optica da bc
+LOGU_RANGE = (-4.0, -1.0)                            # emissao nebular
+DUST_SLOPE = 0.7                                     # CF00 slope - fixo
+BIRTH_CLOUD_AGE = 0.01                               # Gyr
+LOG_MASS_FORMED = 10.0                               # log M_sun
 TAU_TO_AV = 1.086                                    # A_V = 1.086 * tau_V
-SFR_FLOOR = 1e-14                # [yr^-1] sSFR floor for SFHs with no recent star formation
+SFR_FLOOR = 1e-14                                    # yr^-1 - SFR mínima pra quiescentes
 
-# Labels every model's analytic_labels returns, computed from the shape of its SFH
+# Parâmetros de saída das SFHs
 HISTORY_LABELS = ["mw_age", "f_young", "f_mid", "f_old", "log_sfr", "log_ssfr"]
-
 
 def uniform(draw, low, high):
     """Map a unit-interval draw onto [low, high).
